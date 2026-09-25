@@ -1,0 +1,17 @@
+.docs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+
+# Medarx artifacts
+capture/
+*.pcap
+evals/reports/
