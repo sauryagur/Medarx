@@ -53,6 +53,11 @@ EXPECTED_EMISSION_SITES: frozenset[str] = frozenset(
         # reasons translate to, so the sweep covers what component J will
         # serialise.
         "backend/src/medarx/policy/policy_engine.py",
+        # Component F. The gateway names every wire code it can put in a
+        # receipt as a module constant, including `HASH_MISMATCH`, which no
+        # other component emits and which was in the contract enum before this
+        # one was written.
+        "backend/src/medarx/gateway/openai_gateway.py",
     }
 )
 

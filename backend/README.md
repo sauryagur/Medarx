@@ -266,3 +266,75 @@ and **nothing reads it**: the orchestrator takes `Decision.wire_code` and drops
 the decision, so today the coarse code is the whole of what reaches a receipt
 or a record. Whether the audit log should carry the reason is an open question
 in the phase plan; nothing in this package claims the distinction is preserved.
+
+## Component F — model gateway
+
+`medarx.gateway` is the only component in the package that performs network
+I/O. It speaks the OpenAI request/response wire spec, and the base URL, model,
+key and timeout all come from `Settings`, so one implementation drives a local
+engine and a cloud one. There is no provider branch: a test asserts that no
+provider is named in `openai_gateway.py` at all, which is the structural form of
+"provider-agnostic by construction" rather than of a promise in a docstring.
+
+**The bytes are the evidence, so they are built once.** `build_body` returns
+the body and is public, because a caller that wants to know what *would* go on
+the wire can ask without sending anything. `send` encodes it exactly once and
+hands those same bytes to the transport and to `last_request_body()`. Nothing
+re-encodes, reorders or normalises them in between: the egress check in
+component I compares observed bytes against what was approved, and that
+comparison is meaningless if the gateway records one encoding and transmits
+another. A test measures the bytes at a loopback socket and asserts they equal
+`last_request_body()`. The encoding is compact and `ensure_ascii`, so the bytes
+are ASCII whatever the report contains; `httpx`'s own `json=` parameter writes
+raw UTF-8 instead, which is one of the two behaviours the non-ASCII test
+distinguishes.
+
+**An unknown model fails before a body exists.** `build_body` resolves the
+model through `model_registry.is_allowed` and holds no I/O, so an unknown
+identifier is refused locally rather than by a provider's 4xx. The configured
+default goes through the same check, so a typo in `MEDARX_GATEWAY_MODEL` blocks
+instead of sending. The registry is a set of whole identifiers: a prefix or
+substring rule would admit `medarx-demo-model-and-more`, which is the same
+class of hole as a payload check that matches on a prefix.
+
+**The payload is verified, not passed through.** `verify_approved_payload`
+re-derives the hash from the object's own content with the shared
+`models.payload_hash_of` and refuses unless both the carried claim and the
+re-derived hash equal the hash the policy engine approved. It raises
+`GatewayError` at layer `F` carrying **`PAYLOAD_MISMATCH` and `HASH_MISMATCH`**:
+the first is §6 row 7's own name for the condition and the leading code of
+the contract's layer-F block example, the second names the check that detected
+it. `HASH_MISMATCH` sat in the contract enum with nothing emitting it — layer 3
+overwrites the hash rather than comparing it — and an enum member the kernel
+never emits is a claim the contract cannot keep.
+
+**Ordering is the composition root's obligation.** `send` takes only the model
+request, because that is the signature the pipeline and the demo patches
+monkeypatch. So nothing in `send` can enforce that the verification ran first;
+`build_pipeline` must call `verify_approved_payload` immediately before `send`.
+The asymmetry with `PolicyEngine.authorize_payload` is deliberate and mirrors
+it: both are separate methods the root sequences, and both re-derive rather
+than trust the carried hash.
+
+**Three provider failures, none of them a block.** A transport failure, a
+non-2xx response and a malformed body are `ProviderTransportError`,
+`ProviderStatusError` and `ProviderResponseError` — three types, so a caller
+tells them apart without parsing a message. None is a `MedarxError`: §6 has no
+row for a provider being down, and a layer plus action codes on a provider
+outage would reach the API as a 422 privacy block receipt naming codes for a
+refusal the privacy kernel never made. The contract answers this with a 500
+`ProblemDetail`.
+
+**The timeout is configuration.** It is read from `Settings.gateway_timeout_s`
+(default 120 s) onto the client and never lowered in code: a cold first
+inference measured ~14.6 s against ~1.1 s warm, so a short default is a timeout
+that fires on the one request a user is waiting for. A test drives a stub that
+never answers in time and requires the failure, and the same test with a
+generous timeout requires the success, so a timeout that was silently ignored
+would fail it.
+
+**An empty key sends no header.** `gateway_api_key` defaults to `""` and an
+empty key omits `Authorization` entirely rather than sending a bare `Bearer `,
+which would put a credential-shaped header on the wire that authenticates
+nothing. A non-empty key is sent as `Bearer {key}`. Both are asserted against
+the headers the stub server actually received.

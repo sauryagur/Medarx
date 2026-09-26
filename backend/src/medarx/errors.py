@@ -21,6 +21,15 @@ returns 403 and a privacy block returns 422, and a caller must be able to tell
 them apart by status code alone. Keeping the authorization type outside this
 hierarchy means the 422 block handler cannot catch it by accident, and it
 carries no `layer` and no `action_codes` to leak into a receipt.
+
+`ProviderError` is not a `MedarxError` for the same reason, and a stronger
+one. A provider that is unreachable, that answers 503, or that answers with
+something that is not a completion has not refused anything on privacy
+grounds: design §6 has no row for it, and the contract answers it with a 500
+`ProblemDetail`. A `MedarxError` here would be rendered by the 422 block
+handler into a receipt carrying action codes for a refusal the kernel never
+made. Its three subclasses keep the three conditions apart by type, so a
+caller can tell them apart without reading a message.
 """
 
 from __future__ import annotations
@@ -33,6 +42,10 @@ __all__ = [
     "GatewayError",
     "MedarxError",
     "PolicyError",
+    "ProviderError",
+    "ProviderResponseError",
+    "ProviderStatusError",
+    "ProviderTransportError",
     "PseudonymError",
     "RedactionError",
 ]
@@ -127,4 +140,51 @@ class AuthzError(Exception):
 
     Carries no `layer` and no `action_codes`, so it cannot be rendered as a
     privacy block even if a future handler catches it by mistake.
+    """
+
+
+class ProviderError(Exception):
+    """A model provider call failed, for a reason that is not a privacy block.
+
+    Deliberately **not** a `MedarxError`, for the same reason `AuthzError` is
+    not one. Design §6 enumerates the conditions that block, and "the provider
+    was unreachable", "the provider answered 503" and "the provider answered
+    with something that is not a completion" are not among them: no privacy
+    refusal was made and no payload was withheld for a privacy reason. Were
+    these `MedarxError`s, the API's 422 handler would turn a provider outage
+    into a privacy block receipt naming codes for a refusal the kernel never
+    made, and the audit log would record a redaction event that never
+    happened. The contract's answer for this is `500`, a `ProblemDetail`.
+
+    The three subclasses are the three conditions, kept apart deliberately: a
+    transport failure, a non-2xx response and a malformed body are different
+    failures with different remedies, and a caller must be able to tell them
+    apart by type rather than by parsing a message. None carries a `layer` and
+    none carries `action_codes`, so none can be rendered into a block receipt.
+    """
+
+
+class ProviderTransportError(ProviderError):
+    """The request never reached the provider: DNS, connect, or timeout."""
+
+
+class ProviderStatusError(ProviderError):
+    """The provider answered, and the answer was not a 2xx.
+
+    `status_code` is the provider's own status. It is a number the provider
+    chose; it is not an `action_code` and never reaches a receipt.
+    """
+
+    def __init__(self, status_code: int, message: str = "") -> None:
+        self.status_code = status_code
+        super().__init__(message or f"provider answered {status_code}")
+
+
+class ProviderResponseError(ProviderError):
+    """The provider answered 2xx with a body that is not a completion.
+
+    Raised for a body that is not JSON, and for JSON that does not carry
+    `choices[0].message.content` as a string. It is a distinct condition from
+    a non-2xx because the call *succeeded* and the answer was unusable, which
+    is a different problem with a different fix.
     """
