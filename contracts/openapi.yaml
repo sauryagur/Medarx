@@ -674,6 +674,7 @@ components:
         - UNRESOLVED_EMPTY_BODY
         - UNAPPROVED_PAYLOAD
         - MALFORMED_METADATA
+        - SURROGATE_SHAPED_REFERENCE_REJECTED
 
     StudyContext:
       type: object

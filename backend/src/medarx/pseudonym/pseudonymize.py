@@ -69,6 +69,14 @@ _DATE_LENGTH = 8
 
 _DATE_FORMAT = "%Y%m%d"
 
+#: The code for a reference that already *has* the shape of a surrogate.
+#: Deliberately not `MISSING_SURROGATE`, which this module also emits for the
+#: genuinely-missing cases (a blank patient or study reference): a receipt
+#: carries the code but not the message, so reusing it would leave a receipt
+#: unable to tell a missing surrogate from a pre-minted one — opposite
+#: conditions under the same layer. The polarity of the name is the point.
+_REJECTED_CODE = "SURROGATE_SHAPED_REFERENCE_REJECTED"
+
 
 def pseudonymize_payload(
     payload: StructuredPayload,
@@ -82,10 +90,12 @@ def pseudonymize_payload(
     module docstring).
 
     Raises `PseudonymError` with `MISSING_SURROGATE` when the patient or a
-    study reference is blank, or when any study reference is already shaped
-    like a surrogate; and with `UNSHIFTED_DATE` when a date field holds
-    something that is not a DICOM `YYYYMMDD` date. A blank date field is left
-    as it is: there is no date there to leak or to shift.
+    study reference is blank; with `SURROGATE_SHAPED_REFERENCE_REJECTED` when
+    any study reference already has the shape of a surrogate (a distinct
+    condition, not a missing one — see `_REJECTED_CODE`); and with
+    `UNSHIFTED_DATE` when a date field holds something that is not a DICOM
+    `YYYYMMDD` date. A blank date field is left as it is: there is no date
+    there to leak or to shift.
     """
     if not patient_ref.strip():
         raise PseudonymError(
@@ -152,7 +162,7 @@ def _refuse_if_surrogate_shaped(reference: str, where: str) -> None:
     if not _SURROGATE_SHAPE.fullmatch(reference):
         return
     raise PseudonymError(
-        action_codes=("MISSING_SURROGATE",),
+        action_codes=(_REJECTED_CODE,),
         message=(
             f"{where} is {reference!r}, which already has the shape of a study "
             f"surrogate. The reference must be the original one, and this "

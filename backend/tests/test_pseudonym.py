@@ -17,7 +17,7 @@ from sqlalchemy import create_engine, insert, select
 from sqlalchemy.exc import IntegrityError
 
 from medarx.errors import MedarxError, PseudonymError
-from medarx.models import StructuredPayload
+from medarx.models import BlockReceipt, StructuredPayload
 from medarx.pseudonym.date_shift import patient_offset, shift_date
 from medarx.pseudonym.derivation import audit_digest, surrogate
 from medarx.pseudonym.errors import AuditKeyRequired
@@ -360,15 +360,14 @@ def test_a_caller_supplied_surrogate_shaped_reference_is_refused(store, referenc
         pseudonymize_payload(
             BASE.model_copy(update={"study_ref": reference}), "PAT-0001", store
         )
-    assert ei.value.action_codes == ("MISSING_SURROGATE",)
-    assert ei.value.layer == "C"
+    assert ei.value.action_codes == ("SURROGATE_SHAPED_REFERENCE_REJECTED",)
 
 
 def test_a_surrogate_shaped_prior_reference_is_refused(store):
     payload = BASE.model_copy(update={"prior_study_refs": ("STU-0000", "medarx-study-deadbeef")})
     with pytest.raises(PseudonymError) as ei:
         pseudonymize_payload(payload, "PAT-0001", store)
-    assert ei.value.action_codes == ("MISSING_SURROGATE",)
+    assert ei.value.action_codes == ("SURROGATE_SHAPED_REFERENCE_REJECTED",)
 
 
 def test_the_refusal_says_which_reference_and_why(store):
@@ -386,7 +385,54 @@ def test_applying_this_twice_raises_instead_of_double_shifting_the_dates(store):
     once = pseudonymize_payload(BASE, "PAT-0001", store)
     with pytest.raises(PseudonymError) as ei:
         pseudonymize_payload(once, "PAT-0001", store)
-    assert ei.value.action_codes == ("MISSING_SURROGATE",)
+    assert ei.value.action_codes == ("SURROGATE_SHAPED_REFERENCE_REJECTED",)
+
+
+def _receipt_from(error: PseudonymError) -> BlockReceipt:
+    return BlockReceipt(
+        request_id="req-1",
+        layer=error.layer,
+        action_codes=list(error.action_codes),
+        policy_version="medarx-policy-1.0.0",
+    )
+
+
+def test_a_receipt_from_the_refusal_carries_the_rejection_code(store):
+    with pytest.raises(PseudonymError) as ei:
+        pseudonymize_payload(
+            BASE.model_copy(update={"study_ref": "medarx-study-deadbeef"}), "PAT-0001", store
+        )
+    receipt = _receipt_from(ei.value)
+    assert receipt.action_codes == ["SURROGATE_SHAPED_REFERENCE_REJECTED"]
+    assert receipt.layer == "C"
+
+
+@pytest.mark.parametrize(
+    "payload, patient_ref",
+    [
+        (BASE, ""),
+        (BASE.model_copy(update={"study_ref": ""}), "PAT-0001"),
+    ],
+)
+def test_a_receipt_can_tell_a_missing_surrogate_from_a_rejected_one(
+    store, payload, patient_ref
+):
+    # The two conditions are opposites and both live in layer C, so they must
+    # not share a code: a receipt carries the code and not the message, and it
+    # is a persistent audit record.
+    with pytest.raises(PseudonymError) as missing:
+        pseudonymize_payload(payload, patient_ref, store)
+    missing_receipt = _receipt_from(missing.value)
+    assert missing_receipt.action_codes == ["MISSING_SURROGATE"]
+
+    with pytest.raises(PseudonymError) as rejected:
+        pseudonymize_payload(
+            BASE.model_copy(update={"study_ref": "medarx-study-deadbeef"}), "PAT-0001", store
+        )
+    rejected_receipt = _receipt_from(rejected.value)
+    assert rejected_receipt.action_codes == ["SURROGATE_SHAPED_REFERENCE_REJECTED"]
+    assert missing_receipt.layer == rejected_receipt.layer == "C"
+    assert missing_receipt.action_codes != rejected_receipt.action_codes
 
 
 @pytest.mark.parametrize(
@@ -428,6 +474,7 @@ def test_pseudonymization_reads_no_environment():
 
     source = Path(module.__file__).read_text(encoding="utf-8")
     assert "os.environ" not in source and "getenv" not in source
+
 
 def test_different_patients_get_different_dates_for_the_same_payload(store):
     a = pseudonymize_payload(BASE, "PAT-0001", store)
