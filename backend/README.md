@@ -126,6 +126,26 @@ month, or the weekday. The one exception is a date already at the edge of the
 representable calendar, which saturates at `date.max` / `date.min` rather than
 raising, and so loses the duration guarantee for that single date.
 
+`pseudonymize.pseudonymize_payload(payload, patient_ref, store)` is the entry
+point that applies the store to a `StructuredPayload`: it maps `study_ref` and
+every entry in `prior_study_refs` to surrogates, shifts `study_date` and
+`prior_study_date` by the one offset for that patient, and returns a copy. It
+**never touches `report_text`** — free text passes through byte-identical,
+because finding identifiers inside it is the redaction layers' job, not this
+one. It leaves `payload_hash` exactly as it arrived: that is component A's
+pre-redaction provenance value and layer 3 overwrites it.
+
+**Call it once per payload.** It cannot tell whether a date it is handed has
+already been shifted, so a second application would shift every date again and
+return a payload whose intervals are silently wrong. Rather than let that pass,
+a study reference that already has the exact shape of a surrogate
+(`medarx-study-` plus 8 lowercase hex) is **refused** with `MISSING_SURROGATE`.
+That also closes an injection channel: `StudyContext.study_reference` is
+caller-supplied, so a forged surrogate-shaped string would otherwise pass
+through unrecorded and be indistinguishable from a system-minted one. The
+check is anchored, so a legitimate reference that merely contains the domain —
+`STU-medarx-study-1` — is still processed normally.
+
 **An empty audit key is refused**, by both the derivation and the store, with
 `AuditKeyRequired`. Unkeyed surrogates would be a reversible encoding, which
 would hand the model path the re-identification key the store exists to

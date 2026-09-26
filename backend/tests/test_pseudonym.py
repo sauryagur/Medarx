@@ -238,14 +238,6 @@ def test_file_backed_url_keeps_the_null_pool(tmp_path):
     assert _pool_args(url) == _FILE_POOL_ARGS
 
 
-@contextmanager
-def _open(url: str) -> Iterator[MappingStore]:
-    store = MappingStore(url, KEY)
-    try:
-        yield store
-    finally:
-        store.close()
-
 BASE = StructuredPayload(
     function="draft",
     report_text="FINDINGS: 7mm nodule. Patient 4452819.",
@@ -299,14 +291,12 @@ def test_both_date_fields_shift_by_the_same_offset(store):
         }
     )
     out = pseudonymize_payload(payload, "PAT-0001", store)
-    offset = store.offset_for_patient("PAT-0001")
-    gap = (
-        date(2026, 1, 14) - date(2025, 9, 1)
-    ).days == (
-        _as_date(out.dicom_fields["study_date"]) - _as_date(out.dicom_fields["prior_study_date"])
+    before = (date(2026, 1, 14) - date(2025, 9, 1)).days
+    after = (
+        _as_date(out.dicom_fields["study_date"])
+        - _as_date(out.dicom_fields["prior_study_date"])
     ).days
-    assert gap, "the interval between a patient's two studies must survive the shift"
-    assert offset == store.offset_for_patient("PAT-0001")
+    assert before == after, "the interval between a patient's two studies must survive"
 
 
 def test_free_text_passes_through_byte_identical(store):
@@ -352,34 +342,85 @@ def test_the_same_payload_and_patient_always_give_the_same_result(store):
     assert once.dicom_fields == twice.dicom_fields
 
 
-def test_a_surrogate_reference_is_not_mapped_a_second_time(store):
-    # Chaining must not mint a surrogate of a surrogate: the study would then
-    # have two identities, and nothing downstream could tell them apart.
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "medarx-study-deadbeef",
+        "medarx-study-00000000",
+        "medarx-study-abcdef12",
+    ],
+)
+def test_a_caller_supplied_surrogate_shaped_reference_is_refused(store, reference):
+    # The reference arrives from the caller, so one shaped like a surrogate may
+    # be a forged value. Passing it through would put an unvalidated, unrecorded
+    # string on the model path that is indistinguishable from a real one — and
+    # it would satisfy any check that only looks for the domain prefix.
+    with pytest.raises(PseudonymError) as ei:
+        pseudonymize_payload(
+            BASE.model_copy(update={"study_ref": reference}), "PAT-0001", store
+        )
+    assert ei.value.action_codes == ("MISSING_SURROGATE",)
+    assert ei.value.layer == "C"
+
+
+def test_a_surrogate_shaped_prior_reference_is_refused(store):
+    payload = BASE.model_copy(update={"prior_study_refs": ("STU-0000", "medarx-study-deadbeef")})
+    with pytest.raises(PseudonymError) as ei:
+        pseudonymize_payload(payload, "PAT-0001", store)
+    assert ei.value.action_codes == ("MISSING_SURROGATE",)
+
+
+def test_the_refusal_says_which_reference_and_why(store):
+    payload = BASE.model_copy(update={"prior_study_refs": ("medarx-study-deadbeef",)})
+    with pytest.raises(PseudonymError) as ei:
+        pseudonymize_payload(payload, "PAT-0001", store)
+    assert "prior_study_refs[0]" in ei.value.message
+    assert "medarx-study-deadbeef" in ei.value.message
+    assert "once per payload" in ei.value.message
+
+
+def test_applying_this_twice_raises_instead_of_double_shifting_the_dates(store):
+    # A second application would move every date again and return a payload
+    # whose intervals are silently wrong. It must fail loudly instead.
     once = pseudonymize_payload(BASE, "PAT-0001", store)
-    twice = pseudonymize_payload(once, "PAT-0001", store)
-    assert twice.study_ref == once.study_ref
-    assert twice.prior_study_refs == once.prior_study_refs
+    with pytest.raises(PseudonymError) as ei:
+        pseudonymize_payload(once, "PAT-0001", store)
+    assert ei.value.action_codes == ("MISSING_SURROGATE",)
 
 
-def test_chaining_shifts_the_dates_again_by_the_same_offset(store):
-    # Pinned deliberately, not accepted quietly: the payload carries no record
-    # of a date having been shifted, so a second pass moves the date again.
-    # Callers must call this once per payload.
-    once = pseudonymize_payload(BASE, "PAT-0001", store)
-    twice = pseudonymize_payload(once, "PAT-0001", store)
-    offset = store.offset_for_patient("PAT-0001")
-    moved = _as_date(once.dicom_fields["study_date"])
-    again = moved + timedelta(days=offset)
-    assert twice.dicom_fields["study_date"] == again.strftime("%Y%m%d")
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "STU-medarx-study-1",
+        "medarx-study",
+        "medarx-study-",
+        "medarx-study-ZZZZ",
+        "medarx-study-attacker-chosen-value",
+        "medarx-study-1234567",
+        "medarx-study-deadbeef-extra",
+        "medarx-study-DEADBEEF",
+    ],
+)
+def test_a_reference_only_containing_the_domain_is_still_processed(store, reference):
+    # The check must not be so broad that it refuses legitimate references.
+    out = pseudonymize_payload(
+        BASE.model_copy(update={"study_ref": reference}), "PAT-0001", store
+    )
+    assert out.study_ref == store.surrogate_for_study(reference)
+    assert out.study_ref != reference
 
 
-def test_a_surrogate_shaped_source_reference_is_passed_through_unchanged(store):
-    # The documented trade-off of recognising surrogates: a source reference
-    # that already looks like a surrogate is left alone, so it is never
-    # recorded in the store and never gains a surrogate of its own.
-    payload = BASE.model_copy(update={"study_ref": STUDY_DOMAIN + "-deadbeef"})
-    out = pseudonymize_payload(payload, "PAT-0001", store)
-    assert out.study_ref == STUDY_DOMAIN + "-deadbeef"
+def test_a_new_reference_maps_to_exactly_one_surrogate(store):
+    reference = "STU-NEW-9"
+    first = pseudonymize_payload(
+        BASE.model_copy(update={"study_ref": reference}), "PAT-0001", store
+    )
+    again = pseudonymize_payload(
+        BASE.model_copy(update={"study_ref": reference}), "PAT-0001", store
+    )
+    minted = store.surrogate_for_study(reference)
+    assert first.study_ref == again.study_ref == minted
 
 
 def test_pseudonymization_reads_no_environment():
@@ -438,3 +479,12 @@ def test_a_non_date_field_that_looks_like_a_date_is_not_shifted(store):
 
 def _as_date(value: str) -> date:
     return date(int(value[:4]), int(value[4:6]), int(value[6:8]))
+
+
+@contextmanager
+def _open(url: str) -> Iterator[MappingStore]:
+    store = MappingStore(url, KEY)
+    try:
+        yield store
+    finally:
+        store.close()
