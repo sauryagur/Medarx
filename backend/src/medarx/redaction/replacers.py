@@ -22,6 +22,17 @@ see it. So this module holds:
   `replacement_for`; layer 2 consults `has_replacer` first and emits
   `NER_UNRESOLVED` itself.
 
+* This module also **installs the scan's own safety rule**. On import it
+  registers `lambda entity: not has_replacer(entity)` with `ner`, so that
+  `scan_entities` cannot drop an unresolvable hit at *either* of its two
+  filters — the `min_score` filter and the overlap collapse — whatever the
+  caller passes. Registering the rule here rather than importing this table
+  into `ner` keeps the dependency pointing one way and keeps `ner.py` ignorant
+  of what a replacement is. The cost is that importing `replacers` is a
+  prerequisite for the protection; `ner` fails closed without it (it then
+  treats every entity as unresolvable and drops nothing), and a test asserts
+  the registration happened.
+
 Two replacement strategies, both deterministic:
 
 * `DATE_TIME` becomes the patient's stable surrogate. The surrogate is the
@@ -36,7 +47,7 @@ Two replacement strategies, both deterministic:
 from dataclasses import dataclass
 from typing import Callable
 
-from medarx.redaction.ner import EntityHit
+from medarx.redaction.ner import EntityHit, set_unreplaceable_predicate
 
 __all__ = [
     "REPLACERS",
@@ -142,3 +153,9 @@ def replacement_for(hit: EntityHit, ctx: ReplacerContext) -> str:
             f"an unresolvable entity must be blocked, not guessed at"
         )
     return replacer(hit, ctx)
+
+
+# Install the scan's safety rule now that the table exists. A lambda rather
+# than `not has_replacer` so the lookup goes through the public function and
+# stays correct if the table is ever extended.
+set_unreplaceable_predicate(lambda entity_type: not has_replacer(entity_type))

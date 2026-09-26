@@ -231,12 +231,28 @@ _ANCHOR = _anchor_pattern()
 
 
 def strip_anchor_labels(text: str) -> str:
-    """Remove standalone clinical field labels from `text`.
+    """Blank out standalone clinical field labels, preserving length.
 
-    Only a label standing alone and followed by `:` or `#` is removed, and
-    only the label and its separator: the whitespace after it is left in place,
-    so offsets elsewhere in the string do not shift. Free-standing clinical
-    words (`FINDINGS:`, and a sentence that merely mentions "mrn") are left
-    exactly as they are.
+    Only a label standing alone and followed by `:` or `#` is blanked, and
+    only the label and its separator; the whitespace after it is left in
+    place. Free-standing clinical words (`FINDINGS:`, and a sentence that
+    merely mentions "mrn") are left exactly as they are.
+
+    **The replacement is equal-length spaces, not deletion, and it must stay
+    that way.** The label is gone as far as Presidio is concerned — the
+    analyser sees the same characters either way, so the protection against a
+    bare `DOB` being scored as `ORGANIZATION` is identical — but blanking keeps
+    every character position identical to the caller's original string. That
+    is what lets `ner.scan_entities` hand out spans a caller can splice
+    directly.
+
+    Deleting the label instead is not a cosmetic difference. Measured on this
+    machine, on `"MRN: 4452819 and DOB: 1953-04-11 and PAT 9911"`, deletion
+    shortens the text by 8 characters and the third entity's offsets land
+    eight characters past the real value, inside a different field: hit
+    `(29, 37)` labelled `PAT 9911` splices into the original as `'-11 and '`.
+    With this length-preserving form every offset is an index into the input.
+    If a future refactor "simplifies" this to `_ANCHOR.sub("", text)`, it
+    reinstates silent corruption in every downstream splice.
     """
-    return _ANCHOR.sub("", text)
+    return _ANCHOR.sub(lambda match: " " * len(match.group(0)), text)

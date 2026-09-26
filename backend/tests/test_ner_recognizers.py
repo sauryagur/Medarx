@@ -355,14 +355,36 @@ def test_a_lower_cased_label_still_leaves_the_value_matched():
 # -- anchor labels ---------------------------------------------------------
 
 
-def test_strip_anchor_labels_removes_standalone_labels():
-    assert strip_anchor_labels("DOB: 1953-04-11") == " 1953-04-11"
+def test_strip_anchor_labels_blanks_standalone_labels_without_changing_length():
+    # The output is spaces, not a deletion, and the length is the point. The
+    # analyzer cannot see a label either way, but only the length-preserving
+    # form keeps every offset downstream valid against the caller's original
+    # string. Deleting "DOB:" here would shorten the text by four characters
+    # and shift every later span; see `strip_anchor_labels`.
+    assert strip_anchor_labels("DOB: 1953-04-11") == "     1953-04-11"
     assert strip_anchor_labels("FINDINGS: 7mm nodule.") == "FINDINGS: 7mm nodule."
 
 
-def test_strip_anchor_labels_removes_every_declared_anchor():
-    for label in ("MRN:", "Accession:", "PAT:", "Patient ID:"):
-        assert strip_anchor_labels(f"{label} X") == " X"
+def test_strip_anchor_labels_preserves_length_for_every_anchor_and_in_practice():
+    # The invariant the offset contract rests on, over every declared anchor
+    # and over a note with several of them. The multi-label case is the one
+    # that bites: it is what made the third entity's span land eight
+    # characters past its value.
+    for label in ("MRN:", "ACC:", "Accession:", "PAT:", "Patient ID:", "DOB:",
+                  "Date of Birth:"):
+        text = f"{label} X"
+        assert strip_anchor_labels(text) == " " * len(label) + " X"
+        assert len(strip_anchor_labels(text)) == len(text)
+
+    note = "MRN: 4452819 and DOB: 1953-04-11 and PAT 9911"
+    assert len(strip_anchor_labels(note)) == len(note)
+
+
+def test_strip_anchor_labels_blanks_the_label_and_its_separator_only():
+    # The separator goes with the label (`MRN:` is four characters, so four
+    # spaces); the whitespace after it is not part of the match and is left
+    # exactly as it was.
+    assert strip_anchor_labels("MRN:  X") == "      X"
 
 
 def test_strip_anchor_labels_leaves_clinical_prose_alone():
@@ -487,30 +509,89 @@ def test_hits_below_min_score_are_filtered_out():
     assert hits == []
 
 
-def test_a_sub_threshold_hit_is_still_visible_at_min_score_zero():
-    # The other half of the same mechanism: the filter belongs to the caller,
-    # so `min_score=0.0` surfaces the deliberately-unresolvable reference. If
-    # this stops being true, layer 2 cannot see the candidate that must block.
-    hits = scan_entities(
-        "Ref ticket ZX-99-ALPHA issued at the counter.",
-        min_score=0.0,
-        unreplaceable=lambda entity: not has_replacer(entity),
-    )
-    ambiguous = [h for h in hits if h.entity_type == "AMBIGUOUS_REFERENCE"]
-    assert len(ambiguous) == 1
-    assert ambiguous[0].score < load_settings().ner_score_threshold
+def test_a_sub_threshold_hit_is_still_visible_and_never_filtered_away():
+    # The filter belongs to the caller, and — more to the point — the
+    # deliberately-unresolvable reference must arrive *whatever* `min_score`
+    # the caller passes, because it is going to become a block and a block
+    # cannot be raised for a hit that was filtered out first. No predicate is
+    # passed here: this is the default path every future task takes.
+    text = "Ref ticket ZX-99-ALPHA issued at the counter."
+    for min_score in (0.0, 0.30, load_settings().ner_score_threshold, 0.9, 1.0):
+        ambiguous = [
+            h for h in scan_entities(text, min_score=min_score)
+            if h.entity_type == "AMBIGUOUS_REFERENCE"
+        ]
+        assert len(ambiguous) == 1, f"dropped at min_score={min_score}"
+        assert ambiguous[0].score == pytest.approx(0.30)
+        assert ambiguous[0].score < load_settings().ner_score_threshold
 
 
 def test_the_scan_does_not_apply_the_settings_threshold_itself():
     # `Settings.ner_score_threshold` is the *decision* threshold and belongs to
     # layer 2. If `scan_entities` filtered on it, layer 2 would never see the
     # candidate that has to become a block.
-    hits = scan_entities(
-        "Ref ticket ZX-99-ALPHA issued at the counter.",
-        min_score=0.0,
-        unreplaceable=lambda entity: not has_replacer(entity),
-    )
+    hits = scan_entities("Ref ticket ZX-99-ALPHA issued at the counter.", min_score=0.0)
     assert any(h.score < load_settings().ner_score_threshold for h in hits)
+
+
+def test_a_replaceable_hit_is_still_filtered_by_min_score():
+    # The control for the test above, and the non-vacuity proof that the score
+    # filter still exists: `min_score` is not simply ignored wholesale, and the
+    # protection above is not just a filter that was switched off. `ORGANIZATION`
+    # has a replacer, so raising `min_score` above its 0.85 does remove it —
+    # while the unresolvable `AMBIGUOUS_REFERENCE` on the same span survives.
+    text = "Ref ticket ZX-99-ALPHA issued at the counter."
+    assert all(h.entity_type == "AMBIGUOUS_REFERENCE"
+               for h in scan_entities(text, min_score=0.99))
+    assert all(h.entity_type != "ORGANIZATION"
+               for h in scan_entities(text, min_score=0.99))
+
+
+def test_importing_the_replacers_installs_the_scan_safety_rule():
+    # The property belongs to the system, not the call site, so it is checked
+    # at the registration rather than at a call. `replacers` is imported at the
+    # top of this file, which is what put the real predicate in place.
+    from medarx.redaction import ner
+
+    assert ner._UNREPLACEABLE is not None
+    assert ner._UNREPLACEABLE("AMBIGUOUS_REFERENCE") is True
+    assert ner._UNREPLACEABLE("MRN") is False
+
+
+def test_the_caller_predicate_can_only_widen_the_protection_never_narrow_it():
+    # `unreplaceable=` is a hook for protecting *more*, not for overriding the
+    # default. A caller that passes "nothing is protected" must not be able to
+    # unprotect the ambiguous reference, because that is precisely the
+    # pass-through this whole mechanism exists to prevent.
+    text = "Ref ticket ZX-99-ALPHA issued at the counter."
+    assert any(
+        h.entity_type == "AMBIGUOUS_REFERENCE"
+        for h in scan_entities(text, min_score=0.0, unreplaceable=lambda e: False)
+    )
+    # And it can add: a registered type is protected when the caller says so.
+    assert any(
+        h.entity_type == "AMBIGUOUS_REFERENCE"
+        for h in scan_entities(
+            text, min_score=0.0, unreplaceable=lambda e: has_replacer(e)
+        )
+    )
+
+
+def test_with_no_policy_registered_the_scan_drops_nothing():
+    # The state a module that imports `ner` without `replacers` is in. The
+    # fallback is fail-closed — every entity is treated as unresolvable, so
+    # nothing is filtered and nothing is collapsed — because the alternative
+    # default is the one that published documents. The cost is a noisier
+    # report in a configuration that no layer-2 caller should be in.
+    from medarx.redaction import ner
+
+    registered = ner._UNREPLACEABLE
+    ner._UNREPLACEABLE = None
+    try:
+        hits = scan_entities("MRN: 4452819", min_score=0.99)
+    finally:
+        ner._UNREPLACEABLE = registered
+    assert {h.entity_type for h in hits} >= {"MRN", "DATE_TIME", "US_DRIVER_LICENSE"}
 
 
 def test_oversized_text_is_truncated_with_a_flag_hit():
@@ -615,25 +696,45 @@ def test_every_entity_the_engine_can_emit_either_has_a_replacer_or_is_known():
     assert emitted - set(REPLACERS) == {"AMBIGUOUS_REFERENCE"}
 
 
-def test_an_unreplaceable_hit_survives_the_overlap_collapse():
+def test_an_unreplaceable_hit_survives_the_overlap_collapse_by_default():
     # The failure this guards is silent and total. Measured on this machine,
     # spaCy reports "ZX-99-ALPHA" as `ORGANIZATION` at 0.85 on exactly the same
-    # span (11, 22) as `AMBIGUOUS_REFERENCE` at 0.30. Collapsing on score
-    # alone therefore keeps the organization, drops the reference, and layer 2
-    # never learns there is anything it cannot replace — the document goes out
-    # redacted-as-an-organisation and the blocked beat never fires.
+    # span as `AMBIGUOUS_REFERENCE` at 0.30. Collapsing on score alone keeps
+    # the organization, drops the reference, and layer 2 never learns there is
+    # anything it cannot replace — the document goes out
+    # redacted-as-an-organisation and the blocked beat never fires. No
+    # predicate is passed: the registered one already does this.
     text = "Ref ticket ZX-99-ALPHA issued at the counter."
-    without = scan_entities(text, min_score=0.0)
-    assert all(h.entity_type != "AMBIGUOUS_REFERENCE" for h in without)
+    hits = scan_entities(text, min_score=0.0)
+    assert any(h.entity_type == "AMBIGUOUS_REFERENCE" for h in hits)
+    assert any(h.entity_type == "ORGANIZATION" for h in hits)
+    # And the collapse still does its job where nothing is unresolvable.
+    assert [h.entity_type for h in scan_entities("MRN: 4452819", min_score=0.0)] == ["MRN"]
 
-    with_ = scan_entities(
-        text, min_score=0.0, unreplaceable=lambda entity: not has_replacer(entity)
+
+def test_every_hit_splices_back_into_the_callers_own_text():
+    # The offset contract, pinned where it protects: every span indexes the
+    # string the caller passed, so `text[start:end]` is exactly the detected
+    # value. The multi-anchor note is the case that used to break — with the
+    # deleting strip, the third hit's span landed eight characters past its
+    # value, inside a different field, and `text[start:end]` was `'-11 and '`.
+    text = (
+        "MRN: 4452819 and DOB: 1953-04-11 and PAT 9911 and "
+        "Ref ticket ZX-99-ALPHA issued at the counter."
     )
-    assert any(h.entity_type == "AMBIGUOUS_REFERENCE" for h in with_)
-    # And it costs nothing on a span where the higher-scoring hit is the one
-    # that survives: the plain MRN case is unchanged.
-    assert [h.entity_type for h in scan_entities("MRN: 4452819", min_score=0.0,
-                                                 unreplaceable=lambda e: False)] == ["MRN"]
+    hits = scan_entities(text, min_score=0.0)
+    assert len(hits) > 1
+    for hit in hits:
+        if hit.entity_type == "TRUNCATED_TEXT":
+            continue
+        assert text[hit.start:hit.end] == hit.text, f"{hit} does not splice"
+
+    # Spelled out for the two fields the bug was found in, so a regression
+    # names the corruption rather than only failing a loop.
+    by_text = {h.text: h for h in hits}
+    assert text[by_text["1953-04-11"].start:by_text["1953-04-11"].end] == "1953-04-11"
+    assert text[by_text["PAT 9911"].start:by_text["PAT 9911"].end] == "PAT 9911"
+    assert text[by_text["4452819"].start:by_text["4452819"].end] == "4452819"
 
 
 def test_the_ambiguous_reference_has_no_registered_replacer():
@@ -654,7 +755,6 @@ def test_the_block_condition_is_expressible_as_an_absent_replacer():
     detected = scan_entities(
         "Ref ticket ZX-99-ALPHA issued at the counter.",
         min_score=0.0,
-        unreplaceable=lambda entity: not has_replacer(entity),
     )
     assert any(
         h.entity_type == "AMBIGUOUS_REFERENCE" and not has_replacer(h.entity_type)
@@ -674,7 +774,7 @@ def test_the_engine_really_does_return_both_labellers_for_one_span():
     # key would become dead code and this test would say so.
     from medarx.redaction.ner import _shared_engine
 
-    raw = _shared_engine().analyze(text=" 4452819", language="en")
+    raw = _shared_engine().analyze(text="    4452819", language="en")
     by_type = {r.entity_type for r in raw}
     assert {"MRN", "DATE_TIME"} <= by_type
     assert [h.entity_type for h in scan_entities("MRN: 4452819", min_score=0.0)] == ["MRN"]
@@ -694,6 +794,10 @@ def test_the_scan_is_stable_across_hash_seeds():
 
     script = (
         "import warnings; warnings.filterwarnings('ignore');"
+        # `replacers` is imported because a real caller always has it: it
+        # registers the predicate that lets the collapse run at all. Without
+        # it `ner` fails closed and reports all three overlapping hits.
+        "import medarx.redaction.replacers;"
         "from medarx.redaction.ner import scan_entities;"
         "print([h.entity_type for h in scan_entities('MRN: 4452819', 0.0)])"
     )
