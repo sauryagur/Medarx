@@ -28,6 +28,7 @@ per process rather than per test.
 
 from __future__ import annotations
 
+import re
 import types
 from datetime import date
 from pathlib import Path
@@ -163,15 +164,29 @@ def test_a_context_carries_the_stores_own_offset_not_a_guess(store, settings):
 # -- Layer 1: deterministic structured identifiers ---------------------------
 
 
-def test_layer1_mints_a_surrogate_for_a_reference_that_arrived_raw(store, settings):
-    # Everything else about the payload is already correct, so the reference is
-    # the only thing this layer has to do.
+def test_layer1_refuses_a_reference_that_arrived_without_a_surrogate(store, settings):
+    # The boundary rule, pinned: component C assigns surrogates and the mapping
+    # store is C's, so layer 1 blocks on a raw reference rather than minting
+    # one. An earlier version minted, which both wrote to the re-identification
+    # key from the model path and made design §6 row 5's "missing surrogate for
+    # a reference" block unreachable — the condition was repaired before it
+    # could be observed.
     payload, ctx = pseudonymized(CLEAN, store, settings)
     raw = payload.model_copy(update={"study_ref": "STU-0002"})
     out, dispositions = layer1_deterministic(raw, ctx)
-    assert out.study_ref == store.surrogate_for_study("STU-0002")
-    assert [d.action_code for d in dispositions] == ["REDACT_LAYER1_REPLACED"]
-    assert dispositions[0].resolved and dispositions[0].layer == "D.1"
+    assert out.study_ref == "STU-0002", "layer 1 must not write to the mapping store"
+    unresolved = _unresolved(dispositions)
+    assert [d.action_code for d in unresolved] == ["MISSING_SURROGATE"]
+    assert unresolved[0].field == "study_ref" and unresolved[0].layer == "D.1"
+
+
+def test_layer1_checks_every_prior_reference_not_only_the_first(store, settings):
+    payload, ctx = pseudonymized(CLEAN, store, settings, function="prior_summary")
+    raw = payload.model_copy(update={"prior_study_refs": ("STU-0002", "STU-0003")})
+    out, dispositions = layer1_deterministic(raw, ctx)
+    assert out.prior_study_refs == ("STU-0002", "STU-0003")
+    assert sorted(d.field for d in dispositions) == ["prior_study_refs[0]",
+                                                      "prior_study_refs[1]"]
 
 
 def test_layer1_reshifts_a_date_component_c_left_alone(store, settings):
@@ -197,15 +212,6 @@ def test_layer1_leaves_an_already_surrogated_payload_completely_alone(store, set
     assert out == payload
 
 
-def test_layer1_refuses_a_blank_reference_rather_than_inventing_one(store, settings):
-    payload, ctx = pseudonymized(CLEAN, store, settings)
-    blank = payload.model_copy(update={"study_ref": "  "})
-    out, dispositions = layer1_deterministic(blank, ctx)
-    assert out.study_ref == "  ", "a blank reference must not be replaced by a minted one"
-    unresolved = _unresolved(dispositions)
-    assert [d.action_code for d in unresolved] == ["MISSING_SURROGATE"]
-    assert unresolved[0].field == "study_ref"
-
 
 def test_layer1_refuses_a_date_it_cannot_shift(store, settings):
     # A structured field that cannot be deterministically replaced is layer 1's
@@ -226,15 +232,6 @@ def test_layer1_refuses_a_date_it_cannot_shift(store, settings):
         "DETERMINISTIC_REPLACEMENT_FAILED"
     ]
 
-
-def test_layer1_covers_every_prior_study_reference_not_only_the_first(store, settings):
-    payload, ctx = pseudonymized(CLEAN, store, settings, function="prior_summary")
-    raw = payload.model_copy(update={"prior_study_refs": ("STU-0002", "STU-0003")})
-    out, dispositions = layer1_deterministic(raw, ctx)
-    assert out.prior_study_refs == (store.surrogate_for_study("STU-0002"),
-                                    store.surrogate_for_study("STU-0003"))
-    assert sorted(d.field for d in dispositions) == ["prior_study_refs[0]",
-                                                      "prior_study_refs[1]"]
 
 
 def test_layer2_redacts_the_identifiers_it_finds_and_shifts_the_date(store, settings):
@@ -294,11 +291,17 @@ def test_an_entity_with_no_replacer_is_unresolved_at_any_score(store, settings, 
 
 def test_a_replaceable_hit_below_the_threshold_is_blocked_not_guessed_at(store, settings,
                                                                       monkeypatch):
-    # A different failure with a different remedy: here a replacement *exists*,
-    # and applying it to a detection the engine is not sure about would corrupt
-    # the text on the strength of a guess. "6 weeks" and the bare patient id
-    # "774123" are both returned as `DATE_TIME` at 0.85 on this machine, so
-    # this is not hypothetical.
+    # A different failure with a different remedy, and it now says so on the
+    # wire: here a replacement *exists*, and applying it to a detection the
+    # engine is not sure about would corrupt the text on the strength of a
+    # guess. The bare patient id "774123" is returned as `DATE_TIME` at 0.85 on
+    # this machine, so a wrong label here is not hypothetical.
+    #
+    # The code is `LOW_CONFIDENCE_NER_UNRESOLVED` and not `NER_UNRESOLVED`,
+    # because a receipt is the only durable record of why a request was refused
+    # and these are different problems: one needs a replacer, the other needs a
+    # threshold. An earlier version of this test pinned the shared code as an
+    # invariant, and an invariant that preserves a defect is itself a defect.
     from medarx.redaction import layers
 
     payload, ctx = pseudonymized("FINDINGS: 7mm nodule.", store, settings)
@@ -307,8 +310,43 @@ def test_a_replaceable_hit_below_the_threshold_is_blocked_not_guessed_at(store, 
         lambda text, min_score: [EntityHit("MRN", 0, 9, 0.01, "FINDINGS:")],
     )
     out, dispositions = layer2_ner(payload, ctx)
-    assert [d.action_code for d in _unresolved(dispositions)] == ["NER_UNRESOLVED"]
+    assert [d.action_code for d in _unresolved(dispositions)] == [
+        "LOW_CONFIDENCE_NER_UNRESOLVED"
+    ]
     assert out.report_text == "FINDINGS: 7mm nodule."
+
+
+def _codes_on_the_wire(store, settings, text, threshold=None):
+    """The unresolved action codes a run of layer 2 would put in a receipt."""
+    tuned = settings if threshold is None else settings.model_copy(
+        update={"ner_score_threshold": threshold}
+    )
+    payload, ctx = pseudonymized(text, store, tuned)
+    _, dispositions = layer2_ner(payload, ctx)
+    return tuple(dict.fromkeys(d.action_code for d in dispositions if not d.resolved))
+
+
+def test_the_two_d2_blocks_serialise_to_different_receipts(store, settings):
+    # The defect this exists to prevent. `Disposition.entity` was the only thing
+    # that told the two conditions apart, and it reaches no persistent record:
+    # `BlockReceipt` is `additionalProperties: false` with five fields and
+    # `AuditRecord` has no entity field, so a no-replacer block and a
+    # sub-threshold block produced byte-identical receipts. An audit record that
+    # cannot distinguish two refusal reasons is a false record.
+    from medarx.models import BlockReceipt
+
+    def receipt(codes):
+        return BlockReceipt(request_id="req-1", layer="D.2", action_codes=list(codes),
+                            policy_version=PV)
+
+    # `AMBIGUOUS_REFERENCE` has no replacer, so it blocks whatever the threshold
+    # is. `MRN` has one, so a threshold above its score turns an otherwise
+    # clean report into the other condition.
+    no_replacer = _codes_on_the_wire(store, settings, UNMAPPED)
+    low_confidence = _codes_on_the_wire(store, settings, DIRTY, threshold=0.99)
+    assert no_replacer == ("NER_UNRESOLVED",)
+    assert low_confidence == ("LOW_CONFIDENCE_NER_UNRESOLVED",)
+    assert receipt(no_replacer).model_dump_json() != receipt(low_confidence).model_dump_json()
 
 
 def test_a_date_the_replacer_cannot_shift_is_reported_as_unshifted(store, settings):
@@ -542,7 +580,7 @@ def test_layer3_rejects_an_unknown_function(store, settings):
 
 def test_the_pipeline_blocks_and_returns_no_payload(store, settings, engine):
     payload, _ = pseudonymized(UNMAPPED, store, settings)
-    out = run_redaction(payload, PATIENT, store, engine, settings, source_for(UNMAPPED))
+    out = run_redaction(payload, PATIENT, store, engine, settings, source=source_for(UNMAPPED))
     assert out.blocked is True
     assert out.approved is None
     assert [d.action_code for d in _unresolved(out.dispositions)]
@@ -551,7 +589,7 @@ def test_the_pipeline_blocks_and_returns_no_payload(store, settings, engine):
 def test_the_raising_form_names_the_flagging_layer_and_its_codes(store, settings, engine):
     payload, _ = pseudonymized(UNMAPPED, store, settings)
     with pytest.raises(RedactionError) as caught:
-        run_privacy_kernel(payload, PATIENT, store, engine, settings, source_for(UNMAPPED))
+        run_privacy_kernel(payload, PATIENT, store, engine, settings, source=source_for(UNMAPPED))
     error = caught.value
     assert error.layer == "D.2"
     assert error.layer in LAYERS
@@ -568,7 +606,7 @@ def test_the_raising_form_names_the_flagging_layer_and_its_codes(store, settings
 def test_a_clean_report_is_approved_and_hashed(store, settings, engine):
     source = source_for(CLEAN)
     payload, _ = pseudonymized(CLEAN, store, settings)
-    out = run_privacy_kernel(payload, PATIENT, store, engine, settings, source)
+    out = run_privacy_kernel(payload, PATIENT, store, engine, settings, source=source)
     assert out.report_text == CLEAN
     assert out.study_ref.startswith("medarx-study-")
     assert out.dicom_fields["study_date"] != "20260114"
@@ -580,7 +618,7 @@ def test_a_block_is_still_returned_by_the_non_raising_form(store, settings, engi
     # The demo asserts on dispositions directly, so a privacy block must not be
     # an exception on this path.
     payload, _ = pseudonymized(UNMAPPED, store, settings)
-    out = run_redaction(payload, PATIENT, store, engine, settings, source_for(UNMAPPED))
+    out = run_redaction(payload, PATIENT, store, engine, settings, source=source_for(UNMAPPED))
     assert isinstance(out, RedactionOutcome)
     assert out.dispositions and all(d.layer in {"D.1", "D.2", "D.3"} for d in out.dispositions)
 
@@ -593,7 +631,7 @@ def test_a_layer3_violation_alone_blocks_the_pipeline(store, settings, engine):
     widened = payload.model_copy(update={
         "dicom_fields": {**payload.dicom_fields, "institution_name": "Example Imaging"},
     })
-    out = run_redaction(widened, PATIENT, store, engine, settings, source)
+    out = run_redaction(widened, PATIENT, store, engine, settings, source=source)
     assert out.blocked is True
     assert out.approved is None
     assert [d.layer for d in _unresolved(out.dispositions)] == ["D.3"]
@@ -609,7 +647,7 @@ def test_layer1_repairs_an_unshifted_date_before_layer3_ever_sees_it(store, sett
     unshifted = payload.model_copy(update={
         "dicom_fields": {**payload.dicom_fields, "study_date": "20260114"},
     })
-    out = run_redaction(unshifted, PATIENT, store, engine, settings, source)
+    out = run_redaction(unshifted, PATIENT, store, engine, settings, source=source)
     assert out.blocked is False
     assert out.approved.dicom_fields["study_date"] != "20260114"
 
@@ -618,7 +656,7 @@ def test_the_pipeline_does_not_mutate_the_payload_it_was_given(store, settings, 
     source = source_for(DIRTY)
     payload, _ = pseudonymized(DIRTY, store, settings)
     before = payload.model_dump()
-    run_privacy_kernel(payload, PATIENT, store, engine, settings, source)
+    run_privacy_kernel(payload, PATIENT, store, engine, settings, source=source)
     assert payload.model_dump() == before
 
 
@@ -627,7 +665,7 @@ def test_no_disposition_carries_a_detected_value(store, settings, engine):
     # field and the entity kind; if it also carried the matched text, the audit
     # log would become the second PHI store the storage policy forbids.
     payload, _ = pseudonymized(ONLY_PHI, store, settings)
-    out = run_redaction(payload, PATIENT, store, engine, settings, source_for(ONLY_PHI))
+    out = run_redaction(payload, PATIENT, store, engine, settings, source=source_for(ONLY_PHI))
     rendered = " ".join(
         f"{d.layer} {d.field} {d.entity} {d.action_code}" for d in out.dispositions
     )
@@ -640,14 +678,14 @@ def test_every_unresolved_disposition_carries_a_contract_code(store, settings, e
     # covers the values that actually reach a receipt, which the sweep cannot
     # see because a `Disposition` is never serialised.
     payload, _ = pseudonymized(ONLY_PHI, store, settings)
-    out = run_redaction(payload, PATIENT, store, engine, settings, source_for(ONLY_PHI))
+    out = run_redaction(payload, PATIENT, store, engine, settings, source=source_for(ONLY_PHI))
     codes = {d.action_code for d in _unresolved(out.dispositions)}
     assert codes and codes <= _action_codes(), f"off-contract codes: {codes - _action_codes()}"
 
 
 def test_every_disposition_layer_is_a_contract_layer_tag(store, settings, engine):
     payload, _ = pseudonymized(ONLY_PHI, store, settings)
-    out = run_redaction(payload, PATIENT, store, engine, settings, source_for(ONLY_PHI))
+    out = run_redaction(payload, PATIENT, store, engine, settings, source=source_for(ONLY_PHI))
     assert {d.layer for d in out.dispositions} <= set(LAYERS)
 
 
@@ -668,7 +706,7 @@ def test_a_keyword_metadata_request_survives_the_whole_kernel(store, settings, e
                          patient_ref=PATIENT, function="draft")
     source = pipeline_for("draft", study, CLEAN, DICOM_METADATA, PV)
     payload = pseudonymize_payload(source, PATIENT, store)
-    out = run_privacy_kernel(payload, PATIENT, store, engine, settings, source)
+    out = run_privacy_kernel(payload, PATIENT, store, engine, settings, source=source)
     assert out.report_text == CLEAN
     assert out.study_ref == store.surrogate_for_study("STU-0001")
     assert out.dicom_fields["study_date"] == payload.dicom_fields["study_date"]
@@ -683,26 +721,218 @@ def test_an_identifier_planted_in_free_text_is_removed_end_to_end(store, setting
     text = "FINDINGS: 7mm nodule. MRN: 4452819. Accession: ACC0000417."
     source = pipeline_for("draft", study, text, DICOM_METADATA, PV)
     payload = pseudonymize_payload(source, PATIENT, store)
-    out = run_privacy_kernel(payload, PATIENT, store, engine, settings, source)
+    out = run_privacy_kernel(payload, PATIENT, store, engine, settings, source=source)
     assert "4452819" not in out.report_text
     assert "ACC0000417" not in out.report_text
     assert "FINDINGS: 7mm nodule." in out.report_text
 
 
-def test_a_required_field_is_never_one_the_allowlist_forbids():
-    # Layer 3 reads both the permitted and the required sets from the one module
-    # that blesses field names. A field that was both required and forbidden
-    # would make every payload for that function block on two counts at once,
-    # so the two sets are asserted consistent here rather than discovered in a
-    # demo.
-    from medarx.extraction import allowlists
+def test_a_partial_metadata_request_is_approved_rather_than_blocked_for_completeness(
+        store, settings, engine):
+    # Input completeness is extraction's concern, not redaction's. `pipeline_for`
+    # copies only the metadata a request carries, so a request that omits the
+    # modality produces a payload with no `dicom_fields` — and an earlier
+    # version of layer 3 required the fields the function's allowlist names,
+    # which made a privacy block out of a perfectly legitimate request. Layer A
+    # already refuses a field *outside* the allowlist, which is the check that
+    # belongs to the boundary; a missing one is not a privacy problem.
+    study = StudyContext(study_uid="1.2.3.4", study_ref="STU-0001",
+                         patient_ref=PATIENT, function="draft")
+    source = pipeline_for("draft", study, CLEAN, {"Modality": "CT"}, PV)
+    assert source.dicom_fields == {"modality": "CT"}
+    payload = pseudonymize_payload(source, PATIENT, store)
+    out = run_privacy_kernel(payload, PATIENT, store, engine, settings, source=source)
+    assert out.report_text == CLEAN
+    assert out.payload_hash is not None
 
-    assert set(allowlists.REQUIRED_FIELDS) == set(ALLOWED_FIELDS)
-    for function, required in allowlists.REQUIRED_FIELDS.items():
-        assert required <= ALLOWED_FIELDS[function], function
-        assert "report_text" not in required, (
-            "report_text is a required field of the model, not a dicom field"
-        )
+STUDY = StudyContext(study_uid="1.2.3.4", study_ref="STU-0001",
+                     patient_ref=PATIENT, function="draft")
+
+
+
+# -- Ordinary radiology prose -----------------------------------------------
+
+#: Fabricated sentences of the kind a radiology report is actually made of.
+#: They carry no identifiers, and every one of them was written before the
+#: relative-interval work to find out which of them the kernel could process.
+#: The pass rate over this list is the project's real usability number, and it
+#: is measured in `test_the_pass_rate_over_ordinary_radiology_prose`.
+ORDINARY_SENTENCES = (
+    "May be a small effusion.",
+    "Right lower lobe effusion, follow-up 6 weeks.",
+    "Aorta 3.2 cm, no dissection.",
+    "Dose 2.5 mg today.",
+    "Nodule unchanged from 2025-12-01.",
+    "Comparison with the prior study shows slight interval growth.",
+    "Stable for 6 months.",
+    "Follow-up in 3 months.",
+    "The patient returns in 2 days.",
+    "Seen on 14 January 2026 and again on 2026-03-02.",
+    "Previous CT chest on 01/14/2026 for comparison.",
+    "Findings discussed at the 4 March 2026 multidisciplinary meeting.",
+    "The catheter was removed 2 weeks ago.",
+    "DOB 14 January 2026.",
+    "No acute osseous abnormality.",
+    "Liver enzymes normalised within 3 weeks.",
+    "Scan performed 2026-01-14 10:30.",
+    "Study dated 20260114.",
+    "Recommend follow-up imaging in six weeks.",
+    "Apnoea episodes continue, roughly 4 per night.",
+    "Mass unchanged in size over 18 months.",
+    "Pulmonary embolism, right lower lobe, seen 2025-11-30.",
+    "Technical note: breathing artefact present.",
+    "Pleural effusion, right side, 15 mm.",
+    "Findings as above.",
+    "Compared with 02/03/2026 the haematoma has resolved.",
+    "The 3 cm nodule seen 14 January 2026 is unchanged.",
+    "Density of 120 HU on 2026-02-03.",
+)
+
+
+def _run(store, settings, engine, text):
+    source = pipeline_for("draft", STUDY, text, DICOM_METADATA, PV)
+    payload = pseudonymize_payload(source, PATIENT, store)
+    return run_redaction(payload, PATIENT, store, engine, settings, source=source)
+
+
+def _pass_rate(store, settings, engine):
+    blocked = [t for t in ORDINARY_SENTENCES if _run(store, settings, engine, t).blocked]
+    return len(ORDINARY_SENTENCES) - len(blocked), len(ORDINARY_SENTENCES), blocked
+
+
+def test_the_pass_rate_over_ordinary_radiology_prose(store, settings, engine):
+    # Before relative intervals were recognised, 14 of these 28 blocked — a
+    # system that could not process half of ordinary radiology prose. The two
+    # that still block are named in `test_the_two_sentences_that_still_block`
+    # so this cannot quietly improve by blocking something new.
+    passed, total, blocked = _pass_rate(store, settings, engine)
+    assert (passed, total) == (24, 28), f"still blocked: {blocked}"
+
+
+def test_declaring_a_date_order_is_what_the_two_remaining_date_blocks_need(store, settings,
+                                                                          engine):
+    # The point of `Settings.date_order`: the refusal for an ambiguous numeric
+    # date is a configuration decision someone makes once, not a permanent
+    # refusal. With it declared, both numeric-date sentences are approved.
+    declared = settings.model_copy(update={"date_order": "MDY"})
+    passed, total, blocked = _pass_rate(store, declared, engine)
+    assert (passed, total) == (26, 28), f"still blocked: {blocked}"
+
+
+def test_the_two_sentences_that_still_block(store, settings, engine):
+    # Both are refusals this kernel is supposed to make, recorded here so the
+    # pass-rate test above cannot be satisfied by blocking them instead.
+    out = _run(store, settings, engine, "DOB 14 January 2026.")
+    assert out.blocked
+    assert "UNRESOLVED_EMPTY_BODY" in {d.action_code for d in _unresolved(out.dispositions)}
+    # A report that is a label and a date and nothing else has no clinical
+    # content left; approving it would present an empty finding.
+    out = _run(store, settings, engine,
+               "Findings discussed at the 4 March 2026 multidisciplinary meeting.")
+    assert out.blocked
+    assert "UNSHIFTED_DATE" in {d.action_code for d in _unresolved(out.dispositions)}
+    # The engine reports the span as `March 2026` — the day is not in it — so
+    # shifting it would mean inventing one, and the shifted month would depend
+    # on which day was picked. Refused rather than guessed. This is a genuine
+    # residual, recorded rather than worked around.
+
+
+@pytest.mark.parametrize("text", [
+    "Right lower lobe effusion, follow-up 6 weeks.",
+    "Dose 2.5 mg today.",
+    "Stable for 6 months.",
+    "Follow-up in 3 months.",
+    "The patient returns in 2 days.",
+    "The catheter was removed 2 weeks ago.",
+    "Recommend follow-up imaging in six weeks.",
+    "Mass unchanged in size over 18 months.",
+])
+def test_a_relative_interval_survives_a_report_unchanged(store, settings, engine, text):
+    # A relative interval names no date, so there is nothing to shift and
+    # nothing to leak: the interval between now and six weeks is the same for a
+    # shifted patient. Before this, each of these blocked with UNSHIFTED_DATE.
+    out = _run(store, settings, engine, text)
+    assert not out.blocked
+    assert out.approved.report_text == text
+    assert all(d.resolved for d in out.dispositions)
+
+
+def test_a_month_name_date_is_shifted_and_the_text_around_it_is_not(store, settings, engine):
+    out = _run(store, settings, engine, "The 3 cm nodule seen 14 January 2026 is unchanged.")
+    assert not out.blocked
+    assert "3 cm nodule seen" in out.approved.report_text
+    assert "is unchanged." in out.approved.report_text
+    assert "14 January 2026" not in out.approved.report_text
+
+
+def test_a_numeric_date_blocks_until_the_date_order_is_declared(store, settings, engine):
+    # The gate, measured. `01/14/2026` is read once the deployment says which
+    # order it writes and refused until then — a per-request refusal that
+    # `require_date_order` turns into a startup decision.
+    out = _run(store, settings, engine, "Previous CT chest on 01/14/2026 for comparison.")
+    assert out.blocked
+    assert "UNSHIFTED_DATE" in {d.action_code for d in _unresolved(out.dispositions)}
+
+    declared = settings.model_copy(update={"date_order": "MDY"})
+    out = _run(store, declared, engine, "Previous CT chest on 01/14/2026 for comparison.")
+    assert not out.blocked
+    assert "01/14/2026" not in out.approved.report_text
+
+
+def test_a_date_order_is_refused_at_startup_when_it_has_not_been_declared():
+    # The guard. It cannot be a field validator, because `load_settings()`
+    # builds `Settings` from the environment in tests that never touch a
+    # numeric date, and a hard requirement would stop the process starting over
+    # a setting only one code path reads.
+    from medarx.config import Settings, require_date_order
+
+    with pytest.raises(ValueError, match="MEDARX_DATE_ORDER"):
+        require_date_order(Settings(audit_key="k"))
+    require_date_order(Settings(audit_key="k", date_order="MDY"))
+    with pytest.raises(Exception):
+        Settings(audit_key="k", date_order="mdy")
+
+
+def test_the_startup_guard_refuses_the_default_configuration():
+    # The shipped default is the undecided one, and the guard is what makes
+    # that a refusal of the deployment rather than a quiet per-request block.
+    from medarx.config import Settings, require_date_order
+
+    assert Settings(audit_key="k").date_order is None
+    with pytest.raises(ValueError):
+        require_date_order(Settings(audit_key="k"))
+
+
+# -- The known false positive, recorded -------------------------------------
+
+
+@pytest.mark.parametrize("text,entity,word", [
+    ("Previous CT chest for comparison.", "ORGANIZATION", "CT"),
+    ("Nodule unchanged in size.", "ORGANIZATION", "Nodule"),
+    ("Scan performed this morning.", "NRP", "Scan"),
+    ("Pulmonary embolism, right lower lobe.", "PERSON", "Pulmonary"),
+    ("Pleural effusion, right side.", "LOCATION", "Pleural"),
+    ("Density of 120 HU measured.", "PERSON", "HU"),
+])
+def test_a_clinical_word_masked_as_a_named_entity_is_pinned_not_hidden(store, settings,
+                                                                       engine, text, entity, word):
+    # Known and recorded, which is what makes it acceptable for Phase 1: a
+    # false positive that is merely absent from the report is not acceptable at
+    # all. spaCy reports each of these ordinary words at 0.85 as a named entity,
+    # and the replacer table replaces it, so an *approved* payload can carry
+    # `[REDACTED:ORGANIZATION]` where "CT" was. No value leaks — the word is not
+    # an identifier — but the clinical text is corrupted, which is the failure
+    # mode this suite exists to keep visible.
+    #
+    # Not fixed here. The fix belongs with the detectors or with a closed
+    # clinical vocabulary, and either risks the detection of genuine
+    # organisation names, which is the recall the eval harness measures.
+    out = _run(store, settings, engine, text)
+    assert not out.blocked, f"{text!r} unexpectedly blocked"
+    assert f"[REDACTED:{entity}]" in out.approved.report_text
+    # Word-boundaried: "CT" is a substring of "REDACTED", so a plain
+    # containment check calls a correctly masked sentence a failure.
+    assert re.search(rf"\b{re.escape(word)}\b", out.approved.report_text) is None
 
 
 def test_a_resolved_dispositions_code_is_never_one_that_could_be_sent(store, settings, engine):
@@ -712,7 +942,7 @@ def test_a_resolved_dispositions_code_is_never_one_that_could_be_sent(store, set
     # would mean the two had become indistinguishable.
     source = source_for(DIRTY)
     payload, _ = pseudonymized(DIRTY, store, settings)
-    out = run_redaction(payload, PATIENT, store, engine, settings, source)
+    out = run_redaction(payload, PATIENT, store, engine, settings, source=source)
     resolved = {d.action_code for d in out.dispositions if d.resolved}
     assert resolved, "the approved path replaced something, and said so"
     assert not resolved & _action_codes()

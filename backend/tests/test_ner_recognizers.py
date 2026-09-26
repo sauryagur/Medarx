@@ -35,6 +35,7 @@ from medarx.redaction.replacers import (
     REPLACERS,
     ReplacerContext,
     has_replacer,
+    is_relative_interval,
     replacement_for,
 )
 
@@ -703,13 +704,78 @@ def test_a_date_the_kernel_cannot_shift_is_refused_rather_than_guessed():
     # an unregistered entity is in, expressed as a value rather than a
     # missing table entry, so layer 2 has one mechanism and not two. Measured
     # on this machine: Presidio reports the bare patient id "774123" as
-    # `DATE_TIME` at 0.85, a relative interval as "6 weeks" at 0.85, and
-    # "14 January 2026" at 0.85. Guessing a format for any of them produces a
-    # date that is wrong, which is data corruption that reads as a redaction.
+    # `DATE_TIME` at 0.85 and a month and year with no day, "March 2026", at
+    # 0.85. Guessing a format or a day for either produces a date that is
+    # wrong, which is data corruption that reads as a redaction.
+    #
+    # A *relative* interval is not on this list: it names no date, so there is
+    # nothing to shift and nothing to leak. It is recognised by
+    # `is_relative_interval` and passed through by the layer, not refused here.
     assert replacement_for(EntityHit("DATE_TIME", 0, 6, 0.85, "774123"), CTX) is None
-    assert replacement_for(EntityHit("DATE_TIME", 0, 7, 0.85, "6 weeks"), CTX) is None
-    assert replacement_for(EntityHit("DATE_TIME", 0, 16, 0.85, "14 January 2026"), CTX) is None
+    assert replacement_for(EntityHit("DATE_TIME", 0, 10, 0.85, "March 2026"), CTX) is None
     assert replacement_for(EntityHit("DATE_TIME", 0, 10, 0.85, "2026-02-30"), CTX) is None
+    assert replacement_for(EntityHit("DATE_TIME", 0, 10, 0.85, "01/14/2026"), CTX) is None
+
+
+def test_a_month_name_date_is_unambiguous_and_is_shifted():
+    # `14 January 2026` names one date however it is read, so it is shifted
+    # rather than refused. Before this the whole shape was refused and any
+    # report containing one was blocked.
+    assert replacement_for(EntityHit("DATE_TIME", 0, 16, 0.85, "14 January 2026"), CTX) \
+        == "15 December 2025"
+    assert replacement_for(EntityHit("DATE_TIME", 0, 16, 0.85, "January 14, 2026"), CTX) \
+        == "December 15, 2025"
+
+
+def test_a_numeric_date_is_read_only_once_the_order_is_declared():
+    # `03/04/2026` is 4 March in one convention and 3 April in the other, and
+    # those land on different days after a shift. Unset, it is refused; the
+    # values below are measured at offset -30 and the two orders differ, which
+    # is the whole reason guessing is not an option.
+    mdy = ReplacerContext(patient_surrogate="medarx-patient-ab12cd34", offset=-30,
+                          date_order="MDY")
+    dmy = ReplacerContext(patient_surrogate="medarx-patient-ab12cd34", offset=-30,
+                          date_order="DMY")
+    unset = ReplacerContext(patient_surrogate="medarx-patient-ab12cd34", offset=-30)
+
+    def shift(text, ctx):
+        return replacement_for(EntityHit("DATE_TIME", 0, len(text), 0.85, text), ctx)
+
+    assert shift("03/04/2026", unset) is None
+    assert shift("03/04/2026", mdy) == "02/02/2026"
+    assert shift("03/04/2026", dmy) == "04/03/2026"
+    # A value that is not a date in the declared order is refused rather than
+    # reinterpreted: `01/14/2026` has no 14th month in MDY, and `14/01/2026`
+    # has no 14th month in DMY. Swapping would be wrong because both readings
+    # are *plausible* -- that is precisely what makes the shape ambiguous.
+    assert shift("01/14/2026", mdy) == "12/15/2025"
+    assert shift("01/14/2026", dmy) is None
+    assert shift("14/01/2026", mdy) is None
+    assert shift("14/01/2026", dmy) == "15/12/2025"
+
+
+@pytest.mark.parametrize("text", [
+    "6 weeks", "six weeks", "2 weeks ago", "6 months", "2 days", "1 year",
+    "24 hours", "3 o'clock", "today", "tomorrow", "in 3 months", "within 2 weeks",
+    "18 months", "3 decades",
+])
+def test_a_relative_interval_is_recognised_by_its_shape(text):
+    # Measured: the engine reports each of these as `DATE_TIME` at 0.85. They
+    # name no date, so there is nothing to shift and nothing to leak — the
+    # interval between now and six weeks is the same for a shifted patient.
+    assert is_relative_interval(text)
+
+
+@pytest.mark.parametrize("text", [
+    # A real date is never an interval, and neither is a number that merely sits
+    # near one. The list is closed: an unrecognised shape is `False`, which
+    # sends the text on to be shifted or refused — never silently kept.
+    "4452819", "774123", "2026-01-14", "14 January 2026", "01/14/2026",
+    "March 2026", "120 HU", "6 mm", "6 weeks 2 days", "about 6 weeks",
+    "last week", "two weeks' time", "6 wk", "18-month",
+])
+def test_a_shape_that_is_not_a_listed_interval_is_not_one(text):
+    assert not is_relative_interval(text)
 
 
 def test_replacer_refuses_to_guess_for_an_unregistered_entity():

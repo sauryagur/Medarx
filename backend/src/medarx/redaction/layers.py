@@ -29,10 +29,28 @@ is consulted, and never after.
 `Settings.ner_score_threshold` still has a job: it decides whether a
 *replaceable* detection is acted on at all. A hit below it is not replaced,
 because applying a replacement on the strength of a detection the engine is not
-sure about is redaction by guessing. It is reported and the payload blocks —
-under the same `NER_UNRESOLVED` code, but for a different reason, and it is the
-one condition in this module that a configuration change can move. The two
-conditions are told apart by `Disposition.entity`, not by the code.
+sure about is redaction by guessing. It is reported and the payload blocks --
+under `LOW_CONFIDENCE_NER_UNRESOLVED`, its own wire code, and it is the one
+condition in this module that a configuration change can move.
+
+That separate code is not cosmetic. `Disposition.entity` used to be the only
+thing distinguishing the two blocks, and it reaches no durable record:
+`BlockReceipt` has five fields and none is the entity, and `AuditRecord` has no
+such field. A no-replacer block and a sub-threshold block therefore serialised
+to byte-identical receipts, which leaves the audit log unable to say whether a
+refusal was a coverage gap (needs a replacer) or a tuning problem (needs a
+threshold). An audit record that cannot distinguish two refusal reasons is a
+false record.
+
+**Relative intervals are passed through.** A count of a named unit, a bare
+relative day word, and a clock time name no date, so there is nothing to shift
+and nothing to leak -- the interval between now and six weeks is the same for a
+shifted patient as for an unshifted one. The recognised shapes are a closed
+list, in `replacers.is_relative_interval`; a shape that is not on it is not
+passed through, and there is no fallthrough that turns an unrecognised date
+into a pass. Measured over 28 sentences of ordinary radiology prose, this took
+the approved rate from 14/28 to 24/28, and to 26/28 once `Settings.date_order`
+is declared.
 
 **Wire codes versus internal codes.** `Disposition.action_code` carries either.
 An *unresolved* or otherwise anomalous disposition carries a member of the
@@ -59,13 +77,19 @@ import re
 from dataclasses import dataclass
 
 from medarx.config import Settings
-from medarx.extraction.allowlists import ALLOWED_FIELDS, REQUIRED_FIELDS
+from medarx.extraction.allowlists import ALLOWED_FIELDS
 from medarx.models import LAYERS, StructuredPayload, canonical_hash
 from medarx.pseudonym.mapping_store import MappingStore
 from medarx.pseudonym.pseudonymize import SURROGATE_SHAPE, shift_dicom_date
 from medarx.redaction.ner import TRUNCATED_TEXT, EntityHit, scan_entities
 from medarx.redaction.recognizers import PATTERNS, REGEX_FLAGS, strip_anchor_labels
-from medarx.redaction.replacers import ReplacerContext, has_replacer, replacement_for
+from medarx.redaction.replacers import (
+    ReplacerContext,
+    has_replacer,
+    is_absolute_date,
+    is_relative_interval,
+    replacement_for,
+)
 
 __all__ = [
     "Disposition",
@@ -83,6 +107,7 @@ __all__ = [
 # there rather than shipping in a receipt.
 
 _ACTION_CODE_NER_UNRESOLVED = "NER_UNRESOLVED"
+_ACTION_CODE_LOW_CONFIDENCE = "LOW_CONFIDENCE_NER_UNRESOLVED"
 _ACTION_CODE_UNSHIFTED_DATE = "UNSHIFTED_DATE"
 _ACTION_CODE_UNRESOLVED_EMPTY_BODY = "UNRESOLVED_EMPTY_BODY"
 _ACTION_CODE_DETERMINISTIC_REPLACEMENT_FAILED = "DETERMINISTIC_REPLACEMENT_FAILED"
@@ -95,6 +120,10 @@ _ACTION_CODE_LEFTOVER_PATTERN_MATCH = "LEFTOVER_PATTERN_MATCH"
 #: Internal, never serialised: these record that a replacement happened.
 _REPLACED_LAYER1 = "REDACT_LAYER1_REPLACED"
 _REPLACED_LAYER2 = "REDACT_LAYER2_REPLACED"
+
+#: A relative interval, carried through unchanged. Not a replacement: the text
+#: that came in is the text that goes out.
+_PASSTHROUGH_INTERVAL = "REDACT_LAYER2_INTERVAL_PASSTHROUGH"
 
 #: The payload fields component C shifts, named rather than pattern-matched.
 #: Component C holds the same list privately; the check here is against the
@@ -203,6 +232,7 @@ class RedactionContext:
             replacers=ReplacerContext(
                 patient_surrogate=store.surrogate_for_patient(patient_ref),
                 offset=store.offset_for_patient(patient_ref),
+                date_order=settings.date_order,
             ),
             source=source,
         )
@@ -214,7 +244,7 @@ class RedactionContext:
 def layer1_deterministic(
     payload: StructuredPayload, ctx: RedactionContext
 ) -> tuple[StructuredPayload, list[Disposition]]:
-    """Give every reference a surrogate and every date the patient's shift.
+    """Check every reference, and give every date the patient's shift.
 
     Layer 1 is the deterministic layer: it touches only fields whose correct
     replacement is known from the field's own shape, so nothing here depends on
@@ -222,40 +252,38 @@ def layer1_deterministic(
     *touched* — a field already in its correct state produces nothing, so the
     disposition list is a record of work done rather than a transcript.
 
-    Two repairs, in order:
+    **References are checked, never minted.** Component C assigns surrogates;
+    the mapping store is C's, and D's channels in the design are C, E and G —
+    not the re-identification key. A reference that arrives without the
+    surrogate shape is therefore an unresolved `MISSING_SURROGATE`: a block,
+    and the same condition layer 3 independently checks.
 
-    * **References.** A reference that does not carry the surrogate shape is
-      given one from the store. That is a write into the mapping store, and it
-      is bounded: it can only insert the deterministic surrogate for a reference
-      the payload already holds, it never reads or exports a mapping, and
-      `surrogate_for_study` is idempotent, so re-running a layer is harmless. A
-      blank reference is *not* minted — there is no stable surrogate for
-      nothing, and inventing one would let unlabelled studies share an identity.
+    That branch is unreachable on a well-formed run — measured, after
+    `pseudonymize_payload` the reference is `medarx-study-6acddd73` and this
+    layer changes nothing — and it is a *check* rather than a repair precisely
+    because reaching it means component C was skipped, which is not something a
+    later layer should paper over by writing to the one store it was told not
+    to touch. An earlier version minted the surrogate here, which both crossed
+    that boundary and made design §6 row 5's "missing surrogate for a reference"
+    block unreachable, since the condition was repaired before it could be
+    observed.
 
-    * **Dates.** A date field that still equals the value component C saw was
-      never shifted, and this is the layer that can still fix it. The
-      comparison is skipped entirely when the patient's offset is zero, where
-      "unchanged" and "shifted" are the same value and the distinction would be
-      a guess.
+    **Dates are shifted when they still equal the value component C saw.** The
+    comparison is skipped entirely when the patient's offset is zero, where
+    "unchanged" and "shifted" are the same value and the distinction would be a
+    guess.
     """
     fields = dict(payload.dicom_fields)
     updates: dict[str, object] = {}
     dispositions: list[Disposition] = []
 
-    reference, disposition = _resolve_reference("study_ref", payload.study_ref, ctx)
-    updates["study_ref"] = reference
+    disposition = _check_reference("study_ref", payload.study_ref)
     if disposition is not None:
         dispositions.append(disposition)
-
-    priors = []
     for position, value in enumerate(payload.prior_study_refs):
-        field = f"prior_study_refs[{position}]"
-        prior, disposition = _resolve_reference(field, value, ctx)
-        priors.append(prior)
+        disposition = _check_reference(f"prior_study_refs[{position}]", value)
         if disposition is not None:
             dispositions.append(disposition)
-    if priors or payload.prior_study_refs:
-        updates["prior_study_refs"] = tuple(priors)
 
     for key, value in payload.dicom_fields.items():
         if key not in _DATE_FIELDS:
@@ -273,33 +301,21 @@ def layer1_deterministic(
     return payload.model_copy(update=updates), dispositions
 
 
-def _resolve_reference(
-    field: str, value: str, ctx: RedactionContext
-) -> tuple[str, Disposition | None]:
-    """`value` as a surrogate, plus a disposition if anything had to be done."""
+def _check_reference(field: str, value: str) -> Disposition | None:
+    """The refusal for a reference with no surrogate, or `None`.
+
+    One code for both ways a reference can be unusable — blank, or carrying
+    something that is not a surrogate — because a receipt cannot tell them apart
+    anyway, and a distinction no consumer can act on is noise. Component C
+    already reports its two conditions separately (`MISSING_SURROGATE` and
+    `SURROGATE_SHAPED_REFERENCE_REJECTED`); by the time a reference reaches
+    this layer the only question left is whether it has a surrogate at all.
+    """
     if SURROGATE_SHAPE.fullmatch(value):
-        return value, None
-    if not value.strip():
-        return value, Disposition(
-            layer="D.1", field=field, entity=None,
-            action_code=_ACTION_CODE_MISSING_SURROGATE, resolved=False,
-        )
-    try:
-        minted = ctx.store.surrogate_for_study(value)
-    except Exception:
-        # Any failure to mint is a block, and the breadth is deliberate: the
-        # only safe reading of "I could not produce a surrogate" is "there is no
-        # surrogate", and a payload carrying an unminted reference must not reach
-        # a model. The trade is that a defect in this module would surface as a
-        # block rather than a traceback, which is why each of these paths is
-        # asserted directly in the tests.
-        return value, Disposition(
-            layer="D.1", field=field, entity=None,
-            action_code=_ACTION_CODE_DETERMINISTIC_REPLACEMENT_FAILED, resolved=False,
-        )
-    return minted, Disposition(
+        return None
+    return Disposition(
         layer="D.1", field=field, entity=None,
-        action_code=_REPLACED_LAYER1, resolved=True,
+        action_code=_ACTION_CODE_MISSING_SURROGATE, resolved=False,
     )
 
 
@@ -449,19 +465,54 @@ def _redact_field(
 def _judge(hit: EntityHit, ctx: RedactionContext) -> tuple[bool, str, str | None]:
     """`(resolved, action_code, replacement)` for one detection.
 
-    The order of the first two branches is the module's central claim. The
-    absent replacer is asked about first and short-circuits, so the score and
-    the threshold are never consulted for a detection that nothing can replace.
+    Four decisions, in this order, and the order is the module's central claim.
+
+    **A relative interval is not an identifier.** `6 weeks` and `today` name no
+    date, so there is nothing to shift and nothing to leak: the interval between
+    now and six weeks is the same for a shifted patient as for an unshifted
+    one. It is the one shape that passes through untouched, decided by a closed
+    list of shapes and asked *before* everything else, so it cannot be moved by
+    a score or a threshold. The replacement is the original text, which is what
+    makes "passed through" and "replaced" the same operation here.
+
+    **A date is a date whatever the engine called it.** `01/14/2026` comes back
+    as `LOCATION` in one sentence and as `DATE_TIME` in another; routing on the
+    label would mask a date as a location in the first and shift it in the
+    second. So a hit whose *text* is a date goes down the date path regardless,
+    which is also what makes an unreadable numeric date a refusal rather than a
+    silent mask of its digits.
+
+    **The absent replacer short-circuits everything else.** A detection nothing
+    can replace is unresolved at any score, which is what stops a settings
+    change from turning a deterministic block into a pass-through.
+
+    **A sub-threshold detection is a different condition** and says so on the
+    wire: `LOW_CONFIDENCE_NER_UNRESOLVED` rather than `NER_UNRESOLVED`, because a
+    receipt and an audit record are the only durable record of why a request was
+    refused, and the two are different problems. One is a coverage gap that
+    needs a replacer; the other is a tuning problem that needs a threshold. The
+    old behaviour made the two byte-identical on the wire.
     """
     if hit.entity_type == TRUNCATED_TEXT:
         # The scan did not cover the whole field. There is no entity and no
         # value, so there is nothing to replace — and a report whose tail was
         # never read cannot be certified clean.
         return False, _ACTION_CODE_NER_UNRESOLVED, None
+    if is_relative_interval(hit.text):
+        return True, _PASSTHROUGH_INTERVAL, hit.text
+    if is_absolute_date(hit.text) and hit.entity_type != "DATE_TIME":
+        # Labelled as something else; treat it as the date its characters say
+        # it is, so the outcome does not depend on which recogniser fired.
+        shifted = replacement_for(
+            EntityHit("DATE_TIME", hit.start, hit.end, hit.score, hit.text), ctx.replacers
+        )
+        if shifted is None:
+            return False, _ACTION_CODE_UNSHIFTED_DATE, None
+        return True, _REPLACED_LAYER2, shifted
     if not has_replacer(hit.entity_type):
         return False, _ACTION_CODE_NER_UNRESOLVED, None
     if hit.score < ctx.settings.ner_score_threshold:
-        return False, _ACTION_CODE_NER_UNRESOLVED, None
+        return False, _ACTION_CODE_LOW_CONFIDENCE, None
     replacement = replacement_for(hit, ctx.replacers)
     if replacement is None:
         return False, _ACTION_CODE_UNSHIFTED_DATE, None
@@ -510,10 +561,10 @@ def layer3_validation(
 
     Layer 3 changes nothing except `payload_hash`. Its job is to be the last
     reader of the payload before a policy decision, and to disagree with
-    whatever the first two layers let through. Six checks:
+    whatever the first two layers let through. Five checks:
 
     * the function is one the contract names, and no carried field is outside
-      its allowlist, and none the allowlist requires is missing;
+      its allowlist;
     * no field was dropped between the layers, comparing against `ctx.source`;
     * every date field holds a shiftable date, and none still equals the value
       component C was given;
@@ -542,13 +593,16 @@ def layer3_validation(
             action_code=_ACTION_CODE_FIELD_NOT_ALLOWLISTED, resolved=False,
         ))
 
-    # Two ways a field can be missing — the contract requires it, or a layer
-    # dropped it — and they are the same violation with the same code, so a
-    # field that is both is reported once. Reporting it twice would make a
-    # receipt claim two problems where there is one.
-    missing = (REQUIRED_FIELDS.get(payload.function, frozenset()) | set(ctx.source.dicom_fields)) \
-        - set(payload.dicom_fields)
-    for key in sorted(missing):
+    # A field a layer *dropped* is a violation; a field the caller never
+    # supplied is not. An earlier version also required the fields the
+    # function's allowlist names, which made redaction responsible for input
+    # completeness: `pipeline_for` copies only the metadata a request carries,
+    # so a legitimate partial-metadata request produced a payload with no
+    # `dicom_fields` and layer 3 refused it. That is extraction's concern —
+    # layer A already refuses a field outside the allowlist — and a privacy
+    # layer that blocks a report for being incomplete is failing at the wrong
+    # thing. Removed deliberately; see the task report.
+    for key in sorted(set(ctx.source.dicom_fields) - set(payload.dicom_fields)):
         dispositions.append(Disposition(
             layer="D.3", field=key, entity=None,
             action_code=_ACTION_CODE_CONTRACT_VIOLATION, resolved=False,

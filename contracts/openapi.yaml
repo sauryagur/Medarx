@@ -675,6 +675,7 @@ components:
         - UNAPPROVED_PAYLOAD
         - MALFORMED_METADATA
         - SURROGATE_SHAPED_REFERENCE_REJECTED
+        - LOW_CONFIDENCE_NER_UNRESOLVED
 
     StudyContext:
       type: object

@@ -92,32 +92,104 @@ def _module_assignments(tree: ast.Module) -> dict[str, ast.AST]:
     return assignments
 
 
-def _codes_in_value(node: ast.AST, assignments: dict[str, ast.AST], where: str) -> list[str]:
+def _codes_in_value(node: ast.AST, assignments: dict[str, ast.AST], where: str,
+                     seen: frozenset[str] = frozenset()) -> list[str]:
     """The action codes in an `action_codes=` value, resolving names.
 
     A `Name` is resolved to its module-level assignment **at any depth** — as
-    the whole argument (`action_codes=CODES`) or as an element of a tuple or
-    list (`action_codes=(_CODE,)`). Only names are resolved; other nodes are
-    read for their string literals, so this does not over-collect unrelated
-    strings that merely happen to sit inside the value.
+    the whole argument (`action_codes=CODES`), as an element of a tuple or
+    list (`action_codes=(_CODE,)`), behind a star (`action_codes=(*CODES,)`),
+    or in either arm of a conditional (`X if flag else Y`). Only names are
+    resolved; other nodes are read for their string literals, so this does not
+    over-collect unrelated strings that merely happen to sit inside the value.
+
+    `Starred` and `IfExp` are handled explicitly for the reason below: both used
+    to fall through to the string-literal reader, which walks past a `Name` and
+    returns `[]`. A site written `action_codes=(*CODES,)` was therefore reported
+    as emitting nothing while emitting everything, which is the quietest way
+    for a sweep to stop working.
 
     An unresolvable name is an assertion failure, never a silent skip: the
     sweep must be able to say "I could not look here" rather than reporting
     nothing and looking like it found nothing.
     """
     if isinstance(node, ast.Name):
+        # Recurse rather than read for string literals, so a name that resolves
+        # to a *collection* of names -- `CODES = (*_BASE, *_MORE)` -- is seen
+        # through the same rules as one written inline. `seen` stops a name that
+        # resolves to itself (`CODES = (*CODES,)`) from recursing forever; such
+        # a collection emits nothing new anyway.
         resolved = assignments.get(node.id)
         assert resolved is not None, (
             f"{where}: action_codes={node.id!r} does not resolve to a "
             "module-level assignment; the sweep cannot see what it emits"
         )
-        return _string_literals(resolved)
+        if node.id in seen:
+            return []
+        return _codes_in_value(resolved, assignments, where, seen | {node.id})
     if isinstance(node, (ast.Tuple, ast.List)):
         codes: list[str] = []
         for element in node.elts:
-            codes.extend(_codes_in_value(element, assignments, where))
+            codes.extend(_codes_in_value(element, assignments, where, seen))
         return codes
+    if isinstance(node, ast.Starred):
+        # `action_codes=(*CODES,)`. The starred value *is* the tuple, so it is
+        # resolved exactly as one written without the star would be. Handled
+        # here rather than left to `_string_literals`, which walks straight
+        # past a `Name` and reports nothing — a coverage gap that reads as
+        # "this site emits nothing", which is the quietest way for a sweep to
+        # stop working.
+        return _codes_in_value(node.value, assignments, where, seen)
+    if isinstance(node, ast.IfExp):
+        # `action_codes=(X if flag else Y)`. Both arms are read, because either
+        # can be the one that ships, and a conditional is the one shape where
+        # reading only the "then" would under-report what a module can emit.
+        return (_codes_in_value(node.body, assignments, where, seen)
+                + _codes_in_value(node.orelse, assignments, where, seen))
     return _string_literals(node)
+
+
+def test_a_starred_code_collection_is_read_rather_than_reported_as_silent():
+    # The regression this exists for. `*CODES` is a natural way to extend a
+    # shared tuple, and while only `Name`, `Tuple` and `List` were handled the
+    # starred value fell through to the string reader, which walks past a
+    # `Name` and returns nothing — so a site emitting three codes was recorded
+    # as emitting none, with the suite green.
+    snippet = (
+        '_BASE = ("FIRST_CODE",)\n'
+        '_MORE = ("SECOND_CODE", "THIRD_CODE")\n'
+        "CODES = (*_BASE, *_MORE)\n"
+        "def refuse():\n"
+        "    raise Refusal(action_codes=(*CODES,))\n"
+    )
+    assert _emitted_codes_in_tree(ast.parse(snippet), "snippet.py") == [
+        "FIRST_CODE", "SECOND_CODE", "THIRD_CODE",
+    ]
+
+
+def test_both_arms_of_a_conditional_are_read():
+    # Either arm can be the one that ships, so reading only the "then" would
+    # under-report what a module can emit — the same quiet failure as the star.
+    snippet = (
+        '_THEN = ("THEN_CODE",)\n'
+        '_ELSE = ("ELSE_CODE",)\n'
+        "def refuse(flag):\n"
+        "    raise Refusal(action_codes=_THEN if flag else _ELSE)\n"
+    )
+    assert sorted(_emitted_codes_in_tree(ast.parse(snippet), "snippet.py")) == [
+        "ELSE_CODE", "THEN_CODE",
+    ]
+
+
+def test_an_unresolvable_name_behind_a_star_still_fails():
+    # Handling the star must not have introduced a new quiet path: a name that
+    # is not a module-level assignment is still a broken sweep, not a clean one.
+    snippet = (
+        "def refuse():\n"
+        "    raise Refusal(action_codes=(*_NEVER_ASSIGNED_,))\n"
+    )
+    with pytest.raises(AssertionError, match="does not resolve to a module-level"):
+        _emitted_codes_in_tree(ast.parse(snippet), "snippet.py")
 
 
 def _emitted_codes_in_tree(tree: ast.Module, where: str) -> list[str]:
@@ -235,6 +307,7 @@ def test_the_sweep_sees_every_code_component_d_emits():
     emitted = _emitted_action_codes()
     assert set(emitted["backend/src/medarx/redaction/layers.py"]) == {
         "NER_UNRESOLVED",
+        "LOW_CONFIDENCE_NER_UNRESOLVED",
         "UNSHIFTED_DATE",
         "UNRESOLVED_EMPTY_BODY",
         "DETERMINISTIC_REPLACEMENT_FAILED",
@@ -250,11 +323,12 @@ def test_the_sweep_sees_every_code_component_d_emits():
 
 
 def test_no_internal_code_is_named_as_if_it_reached_the_wire():
-    # The layers record a successful replacement under an internal code that is
-    # never serialised. Those names deliberately avoid the `ACTION_CODE`
-    # substring, which is what keeps them out of the sweep above; this asserts
-    # that from the other side, so a rename that made one look like a wire code
-    # would fail here rather than shipping an internal code in a receipt.
+    # The layers record a successful replacement and an untouched relative
+    # interval under internal codes that are never serialised. Those names
+    # deliberately avoid the `ACTION_CODE` substring, which is what keeps them
+    # out of the sweep above; this asserts that from the other side, so a rename
+    # that made one look like a wire code would fail here rather than shipping
+    # an internal code in a receipt.
     emitted = _emitted_action_codes()
     for source in ("backend/src/medarx/redaction/layers.py",
                    "backend/src/medarx/redaction/pipeline.py"):

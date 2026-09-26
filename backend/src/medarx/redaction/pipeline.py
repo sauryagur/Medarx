@@ -79,6 +79,7 @@ def run_redaction(
     store: MappingStore,
     engine: PolicyEngine,
     settings: Settings,
+    *,
     source: StructuredPayload,
 ) -> RedactionOutcome:
     """Run layers 1–3 over `payload`, then ask `engine` for a decision.
@@ -87,9 +88,15 @@ def run_redaction(
     `source` is that same payload before any redaction. The two are separate
     arguments because layer 3's unshifted-date and dropped-field checks are
     statements about a difference, and a difference needs both sides — see
-    `RedactionContext.source`. Passing the same object twice is legal and means
-    "nothing has been transformed yet", which is exactly what the checks then
-    conclude.
+    `RedactionContext.source`.
+
+    `source` is **keyword-only**, and that is a safety property rather than a
+    style one. It sits beside another payload argument, and with both
+    positional the two could be transposed: passing the *redacted* payload as
+    `source` silently disables both of layer 3's difference checks and the
+    pipeline approves a payload whose unshifted dates nothing looked at. A
+    caller who has to name the argument cannot make that mistake, and one who
+    forgets it gets a `TypeError` rather than a weakened boundary.
 
     The layers run in order and each one's output is the next one's input, so a
     value layer 1 shifted is the value layer 2 scans. Their dispositions are
@@ -118,6 +125,7 @@ def run_privacy_kernel(
     store: MappingStore,
     engine: PolicyEngine,
     settings: Settings,
+    *,
     source: StructuredPayload,
 ) -> StructuredPayload:
     """The approved payload, or a `RedactionError` naming why there is none.
@@ -134,7 +142,7 @@ def run_privacy_kernel(
     `UNAPPROVED_PAYLOAD` so the receipt says what happened without inventing a
     layer that did not flag anything.
     """
-    outcome = run_redaction(payload, patient_ref, store, engine, settings, source)
+    outcome = run_redaction(payload, patient_ref, store, engine, settings, source=source)
     if not outcome.blocked:
         # Unreachable by construction: `run_redaction` ties the two together.
         # Raised rather than asserted, because `assert` is removed under `-O`
