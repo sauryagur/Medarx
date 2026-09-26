@@ -65,11 +65,57 @@ _ATTRIBUTE_TO_FIELD: dict[str, str] = {
 _PRIOR_FIELDS: frozenset[str] = frozenset({"prior_report_text", "prior_study_date"})
 
 
-_AGE = re.compile(r"^(\d{3})([YMD])$")
+#: The DICOM `AS` (age string) VR: three digits and one of four units. `W` is
+#: in the standard and was missing here, so a perfectly good `010W` was refused
+#: as `MALFORMED_METADATA`.
+_AGE = re.compile(r"^(\d{3})([DWMY])$")
+
+#: How many months one unit is worth, used to bring every age onto one scale
+#: before it is banded. `D` and `W` are the mean lengths of a year and a month,
+#: because a DICOM `AS` value carries no calendar context to be exact against:
+#: `030D` can be read as "about a month" and no more precisely than that. `M`
+#: and `Y` are exact, since months and years are the units they are given in.
+_MONTHS_PER_UNIT: dict[str, float] = {"D": 12 / 365, "W": 12 / 52, "M": 1, "Y": 12}
+
+#: The width of an infant band, in months, and the suffix that marks a band as
+#: being counted in months rather than years.
+_INFANT_BAND_MONTHS = 3
+_MONTH_BAND_SUFFIX = "M"
+
+#: Every age from here up shares one band. Not a compliance claim — Medarx does
+#: not assert HIPAA conformance — but the grouping is the standard reference
+#: implementation of age de-identification, and above ninety the ten-year band
+#: stops describing the population well: `100-109` is a band a real cohort
+#: barely populates, and it isolates a person who is genuinely unusual. One
+#: band, `090+`, and the boundary is exact.
+_OLDEST_BAND_LOW = 90
+_OLDEST_BAND = "090+"
 
 
 def _age_band(value: str) -> str:
-    """`045Y` -> `040-049`. Age is a band here, never an exact birth date."""
+    """`045Y` -> `040-049`. Age is a band here, never an exact birth date.
+
+    **The unit is read, not discarded.** `AS` is `ddd[DWMY]`, and an age
+    expressed in days, weeks or months is not an age in years: `030D` is a
+    30-day-old, and banding it as `030-039` hands every later stage a clinical
+    age wrong by thirty years. So the value is first brought onto a common
+    scale in months and only then banded.
+
+    **A sub-year age is banded in months, not in years.** `000-009` would place
+    a neonate, a 7-month-old and a 9-year-old in one bucket, which is both
+    clinically useless and no more private than the decade bands above it — the
+    privacy comes from *banding at all*, not from the width. So below one year
+    the band is `_INFANT_BAND_MONTHS` wide and carries a trailing `M`, which
+    keeps `003-005M` from being read as three-to-five *years*. This is a real
+    choice rather than a forced one: an alternative is to report every age
+    under ten in months, which is finer, and is rejected because it makes the
+    under-tens more identifiable than the adults without buying any privacy.
+
+    **From one year up the band is a decade of years**, so `018M` — 18 months,
+    one year and a half — lands in `000-009` alongside nine-year-olds. That
+    coarseness is the trade the band exists to make, and it is the same trade
+    `040-049` already makes between a 40-year-old and a 49-year-old.
+    """
     m = _AGE.match(value.strip().upper())
     if m is None:
         raise ExtractionError(
@@ -77,7 +123,16 @@ def _age_band(value: str) -> str:
             action_codes=("MALFORMED_METADATA",),
             message="PatientAge is not a DICOM age string such as 045Y",
         )
-    years = int(m.group(1))
+    magnitude, unit = int(m.group(1)), m.group(2)
+    months = round(magnitude * _MONTHS_PER_UNIT[unit])
+
+    if months < 12:
+        low = months - months % _INFANT_BAND_MONTHS
+        return f"{low:03d}-{low + _INFANT_BAND_MONTHS - 1:03d}{_MONTH_BAND_SUFFIX}"
+
+    years = months // 12
+    if years >= _OLDEST_BAND_LOW:
+        return _OLDEST_BAND
     low = years - years % 10
     return f"{low:03d}-{low + 9:03d}"
 
