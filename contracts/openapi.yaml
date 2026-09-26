@@ -1,0 +1,1267 @@
+openapi: 3.1.0
+
+info:
+  title: Medarx Application API (Phase 1 Privacy Kernel)
+  version: 0.1.0-phase1
+  summary: HTTP surface for the Medarx Phase 1 privacy kernel.
+  description: |
+    Medarx is intended for research and demonstration. It performs administrative report assistance using clinician-supplied findings and authorized report text. It does not independently interpret medical images, make diagnostic or treatment recommendations, or autonomously submit clinical reports. Its regulatory classification has not been established, and it is not validated for clinical use.
+
+    This document specifies component J (Application API) of the approved Phase 1 design: the HTTP surface that exercises components A through I. It is the privacy kernel's boundary, not a clinical product surface.
+
+    ## Relationship to the design document
+
+    The normative source for enforcement behaviour is §6 (Fail-Closed Enforcement) of the design. This specification is a faithful encoding of that table; the `layer` values used in the `BlockReceipt` correspond one-to-one with the design's layer designations (`A`, `D.1`, `D.2`, `D.3`, `E`, `F`).
+
+    ## Two things this API deliberately does NOT do
+
+    * **It does not accept arbitrary DICOM objects or free-form prompts.** This is a load-bearing design constraint, not a validation nicety. The request schemas are structured such that an arbitrary DICOM payload or a free-form prompt cannot even be expressed: DICOM metadata is a closed, allowlisted field set, and the only free text is a single `report_text` field that is itself a documented pipeline input. Any attempt to express something outside those shapes is rejected at this surface (see §6 row 1 of the design).
+
+    * **It does not write back to any clinical system.** Every model response is a draft requiring explicit human sign-off. There is no endpoint that submits a report anywhere, and no endpoint that implies an autonomous clinical write-back. The approval endpoint records a human decision against the audit trail and nothing else; it does not transmit or publish the draft.
+
+    ## Function scope
+
+    The three named functions — `Draft`, `Prior Summary`, and `Ask` — are represented here as a **closed enum**. Phase 1 implements the privacy pipeline *around* them, not their full clinical behaviour: `Draft`'s automated output validation is a Phase 4 concern, and `Prior Summary` / `Ask` contract validation is a Phase 5 concern. What Phase 1 proves is that a request routed through any of them is authorized, allowlisted, pseudonymized, redacted, and policy-approved or refused before anything leaves the environment.
+
+    ## Status-code contract
+
+    Two refusal conditions must be distinguishable **by status code alone**, without parsing the body:
+
+    | Status | Meaning | Raised by |
+    |---|---|---|
+    | `403 Forbidden` | Authenticated but not permitted — unauthorized study scope, or the function is not permitted for this caller. | Design §6 row 1 (authorization half) |
+    | `422 Unprocessable Entity` | Privacy-policy block. The request was well-formed and authorized, but the privacy pipeline could not produce a policy-compliant payload. | Design §6 rows 1 (input-shape half), 2, 3, 4, 5, 6, 7 |
+    | `400 Bad Request` | Structurally malformed request: unparseable body, wrong media type, or a JSON shape that does not match the schema. The request never became a valid request at all. | Design §6 row 1 (malformed request) |
+
+    The `422`/`403` split is load-bearing and is asserted directly by the design's end-to-end test strategy. `403` is never returned for a privacy block, and `422` is never returned for an authorization failure.
+
+    ## Request identity
+
+    The design records a Request ID in the audit log and carries it in the block receipt and the approval response. **Choice: `X-Request-Id` is an optional request header on the execution endpoint.** When supplied it is honoured and recorded; when omitted the server generates one. It is a header rather than a body field because the request ID identifies the *request* rather than being part of the extraction input, and because a header still reaches the surface when the body is unparseable (`400`). This choice is stated here because the design does not fix it.
+
+    ## Authentication
+
+    The design's authorization model beyond the demo scope (roles, per-user permissions) is explicitly deferred to Phase 6 (§9). Phase 1 exercises **synthetic** study-scoped and function-scoped permission. This specification therefore declares no authentication scheme — root `security` is the empty list, which means "no security scheme is defined" and is the honest representation of Phase 1 scope. The `403` responses and the `scope` fields in request schemas describe an *authorization* boundary that is modelled and enforced, not a deployed identity system.
+
+    ## Audit readback
+
+    The audit log is append-only and raw PHI is never stored in it, by field-by-field storage policy. The readback response therefore returns **exactly the stored fields** — hashes, field names, action codes, approvals, dispositions. It deliberately exposes no raw-PHI field, because none exists to expose; a consumer needing payload content is looking at the wrong store.
+  contact:
+    name: Medarx (research / demonstration project)
+  license:
+    name: Unlicensed — research and demonstration use only
+    identifier: "Proprietary"
+
+tags:
+  - name: execution
+    description: >-
+      Component J — function execution. Exercises A (allowlisted extraction), C (pseudonymization),
+      D (layered redaction), E (policy) and F (model gateway). Phase 1 scope.
+  - name: approval
+    description: >-
+      Explicit human sign-off against a drafted model response. Records a decision in the audit
+      log (component G). Never transmits, publishes, or submits anything.
+  - name: policy
+    description: >-
+      Component E — policy inspection. Reports the configured policy mode and the de-identification
+      policy version. Read-only; the policy mode is a deployment configuration, not something a
+      request may select.
+  - name: audit
+    description: >-
+      Component G — append-only, tamper-evident audit readback. Returns stored fields only;
+      raw PHI is never stored and therefore never returned.
+
+servers:
+  - url: http://localhost:8000
+    description: >-
+      Phase 1 local deployment. No production deployment is described by the design.
+
+security: []
+
+paths:
+  /v1/functions/{function_name}/executions:
+    post:
+      tags: [execution]
+      operationId: createFunctionExecution
+      summary: Execute a named function over clinician-supplied report text and allowlisted DICOM metadata.
+      description: |
+        Submits an execution request for one of the three closed functions (`Draft`, `Prior Summary`,
+        `Ask`) against a study context, with clinician-supplied report text and an allowlisted set of
+        DICOM metadata fields, plus any prior-study references.
+
+        On success the response is the model response **as a draft requiring explicit human sign-off**,
+        together with the request ID, the selected model, the de-identification policy version, and the
+        hash of the approved payload that was transmitted. No endpoint in this API submits that draft
+        anywhere; recording a human decision is `recordHumanApproval`.
+
+        On any privacy-policy block the response is `422` with a `BlockReceipt`. Raw PHI values never
+        appear in a block receipt, and nothing is transmitted to a provider — in either implemented
+        policy mode.
+
+        This operation does NOT accept arbitrary DICOM objects or free-form prompts. The only DICOM
+        fields expressible are those in `AllowlistedDicomMetadata`, and the only free text is
+        `report_text`, which is a documented pipeline input rather than a prompt. Submitting anything
+        outside those shapes is rejected at this surface and never enters the pipeline.
+      parameters:
+        - $ref: '#/components/parameters/FunctionNamePathParam'
+        - $ref: '#/components/parameters/RequestIdHeader'
+      requestBody:
+        required: true
+        description: The execution request.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecutionRequest'
+      responses:
+        '200':
+          description: >-
+            The privacy pipeline approved the payload and the model gateway returned a response.
+            The response is a draft; it has not been approved by a human and has not been written
+            to any clinical system.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionResponse'
+        '400':
+          $ref: '#/components/responses/MalformedRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/FunctionNotFound'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/Blocked'
+        '500':
+          $ref: '#/components/responses/UnexpectedError'
+
+  /v1/executions/{request_id}/approval:
+    post:
+      tags: [approval]
+      operationId: recordHumanApproval
+      summary: Record an explicit human approval or rejection of a drafted model response.
+      description: |
+        Records a human sign-off decision against a previously approved execution. This is the
+        only path by which a draft becomes "approved", and it is deliberately narrow:
+
+        * It records a decision **in the audit log only**. It does not publish the draft, submit it
+          to a clinical system, or trigger any downstream clinical action. Medarx has no autonomous
+          clinical write-back, and this endpoint does not create one.
+        * It accepts no draft content. The draft already exists; the caller approves or rejects it by
+          `request_id`, and cannot edit or resubmit a modified payload through this path. Editing a
+          draft requires a new execution, which re-runs the whole privacy pipeline.
+        * A rejected draft is recorded as a final disposition of `rejected`, not deleted. The audit log
+          is append-only.
+
+        Requires a human-supplied reviewer identity. In Phase 1 this is a synthetic identifier, since
+        the design's per-user authorization model is deferred to Phase 6.
+      parameters:
+        - $ref: '#/components/parameters/RequestIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HumanApprovalRequest'
+      responses:
+        '200':
+          description: The approval or rejection was recorded in the append-only audit log.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanApprovalResponse'
+        '400':
+          $ref: '#/components/responses/MalformedRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ExecutionNotFound'
+        '409':
+          description: >-
+            A human decision has already been recorded for this request ID. The audit log is
+            append-only, so a decision is immutable; a changed mind requires a new execution.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/UnexpectedError'
+
+  /v1/policy:
+    get:
+      tags: [policy]
+      operationId: getPolicyConfiguration
+      summary: Inspect the configured policy mode and de-identification policy version.
+      description: |
+        Read-only inspection surface over component E. Returns the policy mode the deployment is
+        configured with and the de-identification policy version currently in force.
+
+        The three named modes are:
+
+        * `strict_local` — implemented in v1.
+        * `cloud` — implemented in v1.
+        * `authorized_local` — **documented as an architectural extension only.** The design states it
+          is never implemented against identifiable data in the demo, and its definition of a
+          "trusted environment" is deferred beyond Phase 6. It is reported here as
+          `implemented: false` and must not be selected by a request.
+
+        The policy mode is a **deployment configuration**, not a per-request parameter. A request
+        cannot choose its mode: the mode is fixed for the deployment precisely so that a caller
+        cannot route around the boundary by picking a laxer mode. Consequently `ExecutionRequest`
+        has no `policy_mode` field, and a request that supplies one is a malformed request (`400`).
+
+        The returned `policy_version` is the value that appears in block receipts and audit records.
+        An unknown or missing policy version causes a fail-closed block in every implemented mode
+        (design §6 row 6), so this endpoint is also the way a caller confirms the version in force
+        before relying on receipts.
+      responses:
+        '200':
+          description: The policy configuration in force for this deployment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyConfiguration'
+        '500':
+          $ref: '#/components/responses/UnexpectedError'
+
+  /v1/audit/records:
+    get:
+      tags: [audit]
+      operationId: listAuditRecords
+      summary: Read back audit records (append-only, raw-PHI-free).
+      description: |
+        Read-only query surface over component G's append-only, tamper-evident log.
+
+        The response returns **exactly the fields the storage policy persists**: request ID and
+        timestamp, function and selected model, de-identification policy version, input and
+        approved-payload hashes, redacted field names and action codes, human approval, and final
+        disposition.
+
+        It deliberately exposes **no raw-PHI field**, because the audit log never stores one. There is
+        no such property on `AuditRecord` to omit, redact, or accidentally leak. Full model prompt
+        and response belong to a separate optional restricted, encrypted diagnostic store, which is
+        not reachable through this API and is out of Phase 1 scope.
+
+        Records are returned in ascending timestamp order. `chain_verified` reports the result of
+        hash-chain verification over the records returned: a relational database alone does not make
+        a log immutable, so tampering evidence is verified on read rather than asserted.
+      parameters:
+        - $ref: '#/components/parameters/RequestIdQueryParam'
+        - $ref: '#/components/parameters/FunctionQueryParam'
+        - $ref: '#/components/parameters/DispositionQueryParam'
+        - $ref: '#/components/parameters/SinceQueryParam'
+        - $ref: '#/components/parameters/LimitQueryParam'
+      responses:
+        '200':
+          description: Matching audit records, oldest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditRecordCollection'
+        '400':
+          $ref: '#/components/responses/MalformedRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/UnexpectedError'
+
+  /v1/audit/records/{request_id}:
+    get:
+      tags: [audit]
+      operationId: getAuditRecord
+      summary: Read back the audit record for a single request ID.
+      description: |
+        Returns the append-only audit record for one request ID, with the same stored fields and the
+        same absence of raw PHI as the collection endpoint. A request ID that produced both
+        processing events and a final disposition returns the merged record.
+
+        If no record exists for the supplied request ID, `404` is returned. The audit log is
+        append-only and is never rewritten, so a record that exists cannot disappear.
+      parameters:
+        - $ref: '#/components/parameters/RequestIdPathParam'
+      responses:
+        '200':
+          description: The audit record for the supplied request ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditRecord'
+        '400':
+          $ref: '#/components/responses/MalformedRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AuditRecordNotFound'
+        '500':
+          $ref: '#/components/responses/UnexpectedError'
+
+components:
+
+  securitySchemes: {}
+
+  parameters:
+
+    FunctionNamePathParam:
+      name: function_name
+      in: path
+      required: true
+      description: >-
+        The function to execute. A closed enum: unknown functions are rejected rather than processed.
+        Phase 1 implements the privacy pipeline around these functions, not their full clinical
+        behaviour.
+      schema:
+        $ref: '#/components/schemas/FunctionName'
+
+    RequestIdPathParam:
+      name: request_id
+      in: path
+      required: true
+      description: The request ID of the execution, as returned in the execution response or block receipt.
+      schema:
+        $ref: '#/components/schemas/RequestId'
+
+    RequestIdHeader:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: >-
+        Optional caller-supplied request ID, honoured if present and recorded in the audit log and
+        echoed in the response. If omitted, the server generates one. This is a **header**, not a
+        body field: the request ID identifies the request rather than being part of the extraction
+        input, and a header is still available when the body is unparseable. The design does not fix
+        this choice; the spec does.
+      schema:
+        $ref: '#/components/schemas/RequestId'
+      example: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
+
+    RequestIdQueryParam:
+      name: request_id
+      in: query
+      required: false
+      description: Filter to a single request ID.
+      schema:
+        $ref: '#/components/schemas/RequestId'
+
+    FunctionQueryParam:
+      name: function
+      in: query
+      required: false
+      description: Filter to one function.
+      schema:
+        $ref: '#/components/schemas/FunctionName'
+
+    DispositionQueryParam:
+      name: disposition
+      in: query
+      required: false
+      description: Filter to one final disposition.
+      schema:
+        $ref: '#/components/schemas/FinalDisposition'
+
+    SinceQueryParam:
+      name: since
+      in: query
+      required: false
+      description: Return only records with a timestamp at or after this instant (RFC 3339).
+      schema:
+        type: string
+        format: date-time
+
+    LimitQueryParam:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of records to return.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+
+  responses:
+
+    Blocked:
+      description: >-
+        Privacy-policy block. The request was well-formed and authorized, but the privacy pipeline
+        could not produce a policy-compliant payload, so **nothing was transmitted** to a provider in
+        either implemented mode. Raw PHI values never appear in this body.
+
+        This is the `422` counterpart to `403`. A caller distinguishes a privacy block from an
+        authorization failure by status code alone: `422` here, `403` there.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BlockReceipt'
+          examples:
+            unresolvedNerCandidate:
+              summary: Design §6 row 4 — layer 2 NER candidate below confidence threshold, or with no deterministic replacer.
+              value:
+                status: blocked
+                request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
+                layer: D.2
+                action_codes: [NER_UNRESOLVED]
+                policy_version: ps315-baseline-v1
+            fieldOutsideAllowlist:
+              summary: Design §6 row 2 — field outside the function allowlist; rejected by A, no downstream processing.
+              value:
+                status: blocked
+                request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
+                layer: A
+                action_codes: [FIELD_NOT_ALLOWLISTED, UNKNOWN_FUNCTION]
+                policy_version: ps315-baseline-v1
+            deterministicReplacementFailed:
+              summary: Design §6 row 3 — layer 1 could not deterministically remove or replace a required structured field.
+              value:
+                status: blocked
+                request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
+                layer: D.1
+                action_codes: [DETERMINISTIC_REPLACEMENT_FAILED]
+                policy_version: ps315-baseline-v1
+            contractViolation:
+              summary: >-
+                Design §6 row 5 — layer 3 contract violation (missing/extra field, unshifted date, missing
+                surrogate, leftover pattern match, or hash mismatch).
+              value:
+                status: blocked
+                request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
+                layer: D.3
+                action_codes: [CONTRACT_VIOLATION, HASH_MISMATCH]
+                policy_version: ps315-baseline-v1
+            policyEngineFailClosed:
+              summary: >-
+                Design §6 row 6 — unresolved disposition, unknown or missing policy version, or policy
+                configuration error. Blocks in every implemented mode.
+              value:
+                status: blocked
+                request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
+                layer: E
+                action_codes: [UNRESOLVED_DISPOSITION, UNKNOWN_POLICY_VERSION, POLICY_CONFIG_ERROR]
+                policy_version: ps315-baseline-v1
+            gatewayRejection:
+              summary: >-
+                Design §6 row 7 — payload was not the exact object E approved, or the model identifier is
+                unknown. No provider call is made.
+              value:
+                status: blocked
+                request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
+                layer: F
+                action_codes: [PAYLOAD_MISMATCH, UNKNOWN_MODEL]
+                policy_version: ps315-baseline-v1
+            rejectedInputShape:
+              summary: >-
+                Design §6 row 1 (input-shape half) — an arbitrary DICOM object or free-form prompt was
+                supplied. Rejected at this surface; the request never entered the pipeline.
+              value:
+                status: blocked
+                request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
+                layer: J
+                action_codes: [ARBITRARY_DICOM_OBJECT_REJECTED, FREE_FORM_PROMPT_REJECTED]
+                policy_version: ps315-baseline-v1
+
+    MalformedRequest:
+      description: >-
+        The request could not be understood as a request at all: unparseable body, wrong media type,
+        or a JSON document that does not match the request schema. This is a request-construction
+        failure (design §6 row 1) and is distinct from both `403` (authorization) and `422`
+        (privacy block). Nothing entered the pipeline.
+
+        Where the request is well-formed JSON but violates the schema, the body is a `ValidationError`
+        listing the offending fields. Where the body is unparseable, it is a `ProblemDetail`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          examples:
+            schemaViolation:
+              summary: Well-formed JSON that does not match the execution request schema.
+              value:
+                type: https://medarx.invalid/problems/request-validation
+                title: Request does not match the execution request schema
+                status: 400
+                detail: >-
+                  Unrecognized or disallowed properties present: dicom_object, prompt. Medarx does not
+                  accept arbitrary DICOM objects or free-form prompts at this surface.
+                request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
+                errors:
+                  - field: body.dicom_object
+                    message: Additional properties are not permitted.
+                  - field: body.prompt
+                    message: Additional properties are not permitted.
+            unparseableBody:
+              summary: The body could not be parsed as JSON.
+              value:
+                type: https://medarx.invalid/problems/malformed-request
+                title: Malformed request
+                status: 400
+                detail: Request body is not valid JSON.
+                request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
+
+    Forbidden:
+      description: >-
+        Authorization failure: the caller is not permitted to execute this function, or the study
+        context is outside the caller's authorized scope (design §6 row 1).
+
+        This is `403` and never `422`. It is deliberately distinct from a privacy-policy block: the
+        request here was not permitted in the first place, whereas a `422` means the request was
+        permitted and well-formed but the privacy pipeline refused it. A caller must be able to tell
+        these apart by status code alone, without parsing the body.
+
+        Phase 1 exercises a **synthetic** scope; the design's per-user authorization model (roles,
+        per-user permissions) is deferred to Phase 6. No authentication scheme is defined for this
+        API.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          examples:
+            functionNotPermitted:
+              summary: The function is not permitted for this caller.
+              value:
+                type: https://medarx.invalid/problems/function-not-permitted
+                title: Function not permitted
+                status: 403
+                detail: The requested function is not permitted in the caller's scope.
+                request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
+            studyScopeUnauthorized:
+              summary: The study context is outside the caller's authorized scope.
+              value:
+                type: https://medarx.invalid/problems/study-scope-unauthorized
+                title: Study scope not authorized
+                status: 403
+                detail: The requested study is not within the caller's authorized scope.
+                request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
+
+    UnsupportedMediaType:
+      description: >-
+        The request media type is not `application/json`. This API accepts structured JSON only; it
+        does not accept DICOM multipart payloads, so `multipart/related` and `application/dicom` are
+        rejected here by design.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+
+    FunctionNotFound:
+      description: >-
+        The `function_name` path segment does not name one of the three closed functions
+        (`Draft`, `Prior Summary`, `Ask`). The function set is closed, not free-form, so an
+        unrecognized name is not processed; a request naming an unknown function never enters the
+        pipeline. This path-shaped case is reported as `404` because no such function resource
+        exists; the same condition arriving as a body field against a valid path is reported as a
+        `422` block with `layer: A` and `action_codes` containing `UNKNOWN_FUNCTION`, since the design
+        assigns unknown-function rejection to component A.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+
+    ExecutionNotFound:
+      description: No execution exists for the supplied request ID.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+
+    AuditRecordNotFound:
+      description: No audit record exists for the supplied request ID.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+
+    UnexpectedError:
+      description: >-
+        An unexpected server-side failure. Sensitive-data filtering is applied to application logs,
+        exception traces, and tracing spans under the same policy as the audit log, so no raw PHI is
+        disclosed through this response or its logs.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+
+  schemas:
+
+    FunctionName:
+      type: string
+      title: FunctionName
+      description: >-
+        The closed set of Medarx functions. The set is closed by design: functions are a fixed,
+        enumerated surface, not free-form.
+
+        Phase 1 implements the **privacy pipeline around** these functions, not their full clinical
+        behaviour. Phase 1 exercises the pipeline with report text and metadata; `Draft`'s automated
+        output validation is a Phase 4 concern, and `Prior Summary` / `Ask` contract validation is a
+        Phase 5 concern. What Phase 1 proves for each is authorization, allowlisted extraction,
+        pseudonymization, layered redaction, and policy approval or refusal before transmission.
+      enum:
+        - Draft
+        - Prior Summary
+        - Ask
+
+    RequestId:
+      type: string
+      description: >-
+        Identifier of a single API request. Generated by the server when the caller does not supply
+        one; carried on every block receipt, every successful execution response, and every audit
+        record.
+      examples: [7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34]
+
+    PolicyVersion:
+      type: string
+      description: >-
+        The de-identification policy version in force. Appears in block receipts, execution
+        responses, and audit records. An unknown or missing policy version causes a fail-closed block
+        in every implemented mode.
+      examples: [ps315-baseline-v1]
+
+    PolicyMode:
+      type: string
+      description: >-
+        The configured policy mode (component E). Fixed per deployment; never selectable per request.
+      enum:
+        - strict_local
+        - cloud
+        - authorized_local
+
+    Layer:
+      type: string
+      description: >-
+        The flagging component on a block receipt, corresponding to the design's §6 enforcement table.
+        `J` is the application API itself (input-shape rejection at the surface); `A` is the
+        structured payload extractor; `D.1`, `D.2`, and `D.3` are layered redaction layers 1–3; `E` is
+        the policy engine; `F` is the model gateway.
+      enum:
+        - J
+        - A
+        - D.1
+        - D.2
+        - D.3
+        - E
+        - F
+
+    ActionCode:
+      type: string
+      description: >-
+        A non-raw disposition code from component G's action-code table. Codes classify what was
+        done or refused; they never carry a raw value, so a block receipt is safe to log and return
+        in full. The set is an open enumeration at the schema level because G's table is the
+        authoritative source and is expected to grow; the values below are the ones Phase 1 emits.
+      examples:
+        - NER_UNRESOLVED
+      enum:
+        - NER_UNRESOLVED
+        - DETERMINISTIC_REPLACEMENT_FAILED
+        - CONTRACT_VIOLATION
+        - HASH_MISMATCH
+        - LEFTOVER_PATTERN_MATCH
+        - UNSHIFTED_DATE
+        - MISSING_SURROGATE
+        - FIELD_NOT_ALLOWLISTED
+        - UNKNOWN_FUNCTION
+        - UNRESOLVED_DISPOSITION
+        - UNKNOWN_POLICY_VERSION
+        - POLICY_CONFIG_ERROR
+        - PAYLOAD_MISMATCH
+        - UNKNOWN_MODEL
+        - ARBITRARY_DICOM_OBJECT_REJECTED
+        - FREE_FORM_PROMPT_REJECTED
+        - UNAUTHORIZED_SCOPE
+        - FUNCTION_NOT_PERMITTED
+        - UNKNOWN_DICOM_ATTRIBUTE
+        - UNRESOLVED_EMPTY_BODY
+        - UNAPPROVED_PAYLOAD
+        - MALFORMED_METADATA
+
+    StudyContext:
+      type: object
+      additionalProperties: false
+      required:
+        - study_reference
+      description: >-
+        Study-scoped context for the request. In Phase 1 all study and prior records are synthetic.
+        The study reference is an internal reference; the pseudonymization service exchanges it for a
+        stable surrogate before anything is sent to a model provider.
+      properties:
+        study_reference:
+          type: string
+          description: >-
+            Internal study reference. Replaced by a stable surrogate identifier within an authorized
+            scope before the payload reaches the model gateway. It is not a DICOM StudyInstanceUID and
+            is never transmitted as-is.
+          examples: ['STUDY-SYN-000041']
+        accession_reference:
+          type: string
+          description: >-
+            Internal accession reference, if known. Detected by the mandatory custom clinical
+            recognizer for accession number; surrogate-substituted on the same path.
+          examples: ['ACC-SYN-0000417']
+        encounter_reference:
+          type: string
+          description: Internal encounter reference, if known. Surrogate-substituted on the same path.
+          examples: ['ENC-SYN-0000417']
+        modality:
+          type: string
+          description: >-
+            Modality of the source study, as reported. Metadata only — Medarx performs no diagnostic
+            image interpretation and never derives findings from pixels.
+          examples: [CT]
+
+    PriorStudyReference:
+      type: object
+      additionalProperties: false
+      required:
+        - prior_study_reference
+      description: >-
+        A reference to a prior study, as supplied by the caller. Only the reference is carried; prior
+        study content is not inlined into the request, and Orthanc/DICOMweb integration is deferred to
+        Phase 2. The reference is surrogate-substituted by the pseudonymization service.
+      properties:
+        prior_study_reference:
+          type: string
+          examples: ['STUDY-SYN-000012']
+        study_date:
+          type: string
+          format: date
+          description: >-
+            Date of the prior study. Subject to the consistent per-patient date shift, which
+            preserves sequence and duration.
+
+    AllowlistedDicomMetadata:
+      type: object
+      additionalProperties: false
+      required: []
+      description: >-
+        A **closed, allowlisted** set of DICOM metadata fields carried alongside the report text.
+
+        This is the structural expression of the design's load-bearing constraint that the API never
+        accepts arbitrary DICOM objects. An arbitrary DICOM object cannot be expressed here: there is
+        no property for a raw object, a byte payload, an element stream, or a file reference, and
+        `additionalProperties` is `false` so unknown elements are rejected. A field outside the
+        function's allowlist is rejected by component A before any downstream processing.
+
+        Values are the caller-supplied metadata strings, not DICOM datatypes. Full PS3.15-conformant
+        de-identification of DICOM objects is component B's responsibility, and component B is
+        explicitly **not** on the model path.
+      properties:
+        patient_id:
+          type: string
+          description: >-
+            PatientID. Covered by a mandatory custom `PatternRecognizer` — the stock NER stack ships
+            no recognizer for it, and a bare digit string misread as a date corrupts the payload
+            rather than merely leaving it unredacted.
+          examples: ['4452819']
+        accession_number:
+          type: string
+          description: >-
+            Accession number. Also covered by a mandatory custom recognizer; Presidio ships none.
+          examples: ['ACC0000417']
+        study_date:
+          type: string
+          format: date
+          description: Study date. Shifted per patient; sequence and duration preserved.
+        study_description:
+          type: string
+          description: Study description, if supplied.
+        body_part_examined:
+          type: string
+          description: Body part examined, if supplied.
+        referring_service:
+          type: string
+          description: Referring service, if supplied.
+        institution_name:
+          type: string
+          description: >-
+            Institution name, if supplied. Treated as an identifier candidate by layered redaction.
+
+    ReportText:
+      type: object
+      additionalProperties: false
+      required:
+        - text
+      description: >-
+        Clinician-supplied report text — the single free-text input on this surface.
+
+        It is a documented pipeline input, **not** a prompt. It is not a free-form instruction to a
+        model: it is allowlisted content that the extraction, pseudonymization, and redaction layers
+        process before any model call. Free-form prompts are rejected at this surface.
+
+        Text is subject to the full redaction pipeline: a candidate in this field that the detectors
+        cannot confidently sanitize is exactly the load-bearing block case (design §4 Beat 2).
+      properties:
+        text:
+          type: string
+          minLength: 1
+          description: >-
+            The report text as the clinician wrote it, before pseudonymization and redaction. It is
+            never transmitted to a model provider in this form.
+          examples:
+            - 'FINDINGS: 7 mm nodule in the right upper lobe. Correlate with prior MRN 4452819.'
+        source:
+          type: string
+          description: Where the text came from, for the audit record's input-source attribution.
+          enum:
+            - synthetic_corpus
+            - clinician_supplied
+
+    ExecutionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - study_context
+        - report_text
+      description: >-
+        An execution request. Every property is one the design places on this surface: a function, a
+        study context, report text, an allowlisted set of DICOM metadata fields, and any prior-study
+        references.
+
+        The schema closes on `additionalProperties: false` precisely so that an arbitrary DICOM
+        object, a raw pixel/element payload, or a free-form prompt field cannot be supplied. Unknown
+        properties are a malformed request (`400`), and any attempt to smuggle one in through a
+        property like `dicom_object`, `pixel_data`, or `prompt` is rejected at the surface with
+        nothing entering the pipeline.
+
+        There is deliberately **no** `policy_mode` property: the policy mode is a deployment
+        configuration, not a caller choice.
+      properties:
+        function:
+          $ref: '#/components/schemas/FunctionName'
+        study_context:
+          $ref: '#/components/schemas/StudyContext'
+        report_text:
+          $ref: '#/components/schemas/ReportText'
+        dicom_metadata:
+          $ref: '#/components/schemas/AllowlistedDicomMetadata'
+        prior_studies:
+          type: array
+          description: Prior-study references relevant to this request, if any.
+          items:
+            $ref: '#/components/schemas/PriorStudyReference'
+        model_id:
+          type: string
+          description: >-
+            Optional model identifier for component F, validated against the model registry. An
+            unknown identifier causes a fail-closed block attributed to `F` with no provider call
+            made. Omit to use the deployment's configured default.
+          examples: ['openrouter/default']
+        requested_language:
+          type: string
+          description: Optional output language hint passed through to the gateway. Not a prompt.
+          examples: [en]
+
+    ModelResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - content
+        - draft
+      description: >-
+        The model gateway's response, returned **as a draft**. There is no path by which this becomes
+        clinical content without an explicit human decision recorded via `recordHumanApproval`.
+      properties:
+        model_id:
+          type: string
+          description: The model that produced the response, as validated by the gateway.
+        content:
+          type: string
+          description: The response text. Generated from the approved, redacted payload only.
+        finish_reason:
+          type: string
+          description: The provider's finish reason, as returned over the OpenAI wire spec.
+          examples: [stop]
+        usage:
+          type: object
+          additionalProperties: false
+          description: Token accounting, as reported by the provider.
+          properties:
+            prompt_tokens:
+              type: integer
+            completion_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+
+    ExecutionResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - request_id
+        - draft
+        - policy_version
+      description: >-
+        The approved-path response: the model response plus the request ID, the identity of the
+        approved payload that was transmitted, and the policy version under which it was approved.
+
+        The payload is identified by hash. The hash is what egress verification checks observed
+        outbound bytes against, using two observers that are both external to the Medarx process —
+        Medarx's own audit log is explicitly not accepted as evidence of what left.
+      properties:
+        status:
+          type: string
+          const: approved
+          description: The pipeline approved the payload and the gateway returned a response.
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        function:
+          $ref: '#/components/schemas/FunctionName'
+        policy_version:
+          $ref: '#/components/schemas/PolicyVersion'
+        policy_mode:
+          $ref: '#/components/schemas/PolicyMode'
+        selected_model:
+          type: string
+          description: The model the gateway used.
+        approved_payload_hash:
+          type: string
+          description: >-
+            Hash of the exact approved payload object transmitted. Computed at redaction layer 3 and
+            verified against observed egress bytes by component I.
+          examples: ['sha256:2f1a0c9d4b7e6a3f5c8d1e0b2a4f6c8d0e2b4a6c8e0f2d4b6a8c0e2f4d6b8a0']
+        input_hash:
+          type: string
+          description: Hash of the caller's input as received, for audit correlation.
+        draft:
+          allOf:
+            - $ref: '#/components/schemas/ModelResponse'
+          description: >-
+            The model response, presented as a draft requiring explicit human sign-off. It has **not**
+            been approved and has not been written to any clinical system.
+
+    BlockReceipt:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - request_id
+        - layer
+        - action_codes
+        - policy_version
+      description: >-
+        The structured block receipt returned on any refusal to transmit (HTTP `422`).
+
+        **Raw PHI values never appear in a block receipt.** `layer` names the flagging component and
+        `action_codes` are the non-raw disposition codes; both classify the refusal without quoting
+        the content that caused it, so a receipt is safe to return in full and to log.
+
+        The receipt is returned in every block condition, and the two independent egress observers
+        record zero outbound bytes for a blocked request.
+      properties:
+        status:
+          type: string
+          const: blocked
+          description: Always `blocked`. The only value this schema admits.
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        layer:
+          allOf:
+            - $ref: '#/components/schemas/Layer'
+          description: "The flagging component: J, A, D.1, D.2, D.3, E, or F."
+        action_codes:
+          type: array
+          minItems: 1
+          description: >-
+            One or more non-raw disposition codes from component G's action-code table. These
+            classify what the pipeline refused to do; they never carry a value.
+          items:
+            $ref: '#/components/schemas/ActionCode'
+        policy_version:
+          $ref: '#/components/schemas/PolicyVersion'
+
+    ValidationError:
+      type: object
+      additionalProperties: false
+      required:
+        - field
+        - message
+      description: A single request-shape violation.
+      properties:
+        field:
+          type: string
+          description: Dotted path to the offending property, e.g. `body.dicom_metadata.patient_name`.
+        message:
+          type: string
+          description: What is wrong with it, in terms the caller can act on.
+
+    ProblemDetail:
+      type: object
+      description: >-
+        RFC 9457 problem document, used for `400`, `403`, `404`, `409`, and `415` responses. Used in
+        preference to the `BlockReceipt` wherever the request was never a valid request; a privacy
+        block always uses the `BlockReceipt` instead.
+      required:
+        - type
+        - title
+        - status
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Stable problem-type URI.
+        title:
+          type: string
+          description: Short human-readable summary of the problem type.
+        status:
+          type: integer
+          description: The HTTP status code, repeated for clients that do not read the status line.
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence.
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        errors:
+          type: array
+          description: Per-field detail, present on schema violations.
+          items:
+            $ref: '#/components/schemas/ValidationError'
+
+    HumanApprovalRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - decision
+        - reviewer
+      description: >-
+        A human sign-off decision. The draft is identified by request ID and is neither modified nor
+        resubmitted through this path; editing a draft requires a new execution, which re-runs the
+        full privacy pipeline.
+      properties:
+        decision:
+          type: string
+          description: The human's decision. Only an explicit human decision counts; there is no default.
+          enum:
+            - approved
+            - rejected
+        reviewer:
+          type: string
+          minLength: 1
+          description: >-
+            Identity of the human reviewer. Synthetic in Phase 1, since the design's per-user
+            authorization model is deferred to Phase 6.
+          examples: [synthetic-reviewer-01]
+        note:
+          type: string
+          description: >-
+            Optional free-text rationale recorded in the audit log. Recorded as a reviewer note and
+            subject to the same sensitive-data filtering as every other log surface; it is not
+            transmitted to any model provider.
+
+    HumanApprovalResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - request_id
+        - decision
+        - recorded_at
+      description: >-
+        Confirmation that a human decision was appended to the audit log. This is a record of a
+        human judgement, not a transmission of anything: no clinical system is written to.
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        decision:
+          type: string
+          enum:
+            - approved
+            - rejected
+        recorded_at:
+          type: string
+          format: date-time
+          description: When the decision was appended to the audit log.
+        final_disposition:
+          $ref: '#/components/schemas/FinalDisposition'
+
+    FinalDisposition:
+      type: string
+      description: >-
+        The end state of a request as recorded in the audit log.
+      enum:
+        - approved
+        - blocked
+        - pending_human_approval
+        - approved_by_human
+        - rejected_by_human
+
+    PolicyConfiguration:
+      type: object
+      additionalProperties: false
+      required:
+        - policy_mode
+        - policy_version
+        - implemented_modes
+      description: >-
+        The policy configuration in force, as read from component E. The mode is a deployment
+        configuration and is fixed; no request may select it.
+      properties:
+        policy_mode:
+          $ref: '#/components/schemas/PolicyMode'
+        policy_version:
+          $ref: '#/components/schemas/PolicyVersion'
+        implemented_modes:
+          type: array
+          description: >-
+            The modes implemented in v1: `strict_local` and `cloud`, each the default in its
+            deployment. `authorized_local` is a documented architectural extension only and is
+            deliberately absent from this list.
+          items:
+            type: string
+            enum:
+              - strict_local
+              - cloud
+        fail_closed:
+          type: boolean
+          const: true
+          description: >-
+            Always `true`. Every failure mode trends to block, never to send, in every implemented
+            mode.
+        extensions:
+          type: array
+          description: >-
+            Documented modes that are **not** implemented. Present so a reader is not left guessing
+            whether `authorized_local` is available.
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - name
+              - implemented
+              - note
+            properties:
+              name:
+                type: string
+                enum:
+                  - authorized_local
+              implemented:
+                type: boolean
+                const: false
+              note:
+                type: string
+                description: >-
+                  Documented as an architectural extension only. It is never implemented against
+                  identifiable data in the demo, and its definition of a "trusted environment" is
+                  deferred beyond Phase 6.
+
+    AuditRecord:
+      type: object
+      additionalProperties: false
+      required:
+        - request_id
+        - timestamp
+        - function
+        - policy_version
+        - final_disposition
+      description: >-
+        One record from the append-only, tamper-evident audit log.
+
+        The properties below are **exactly** the fields the storage policy persists: request ID and
+        timestamp, function and selected model, de-identification policy version, input and
+        approved-payload hashes, redacted field names and action codes, human approval, and final
+        disposition.
+
+        There is no raw-PHI property on this schema, and that absence is the design, not an omission
+        in the documentation: raw PHI is never stored in the normal audit log, so there is no such
+        field to return. Full model prompt and response live only in a separate optional restricted,
+        encrypted diagnostic store, which this API does not expose.
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        timestamp:
+          type: string
+          format: date-time
+          description: When the event was appended.
+        function:
+          $ref: '#/components/schemas/FunctionName'
+        selected_model:
+          type: string
+          description: The model used, if the request reached the gateway. Absent for a blocked request.
+        policy_version:
+          $ref: '#/components/schemas/PolicyVersion'
+        policy_mode:
+          $ref: '#/components/schemas/PolicyMode'
+        input_hash:
+          type: string
+          description: Hash of the caller's input as received.
+        approved_payload_hash:
+          type: string
+          description: >-
+            Hash of the exact approved payload transmitted. Absent for a blocked request, since
+            nothing was approved.
+        redacted_field_names:
+          type: array
+          description: >-
+            Names of the fields the redaction layers acted on. Field **names** only — never the
+            values they held. This is a deliberate record of what was processed without becoming a
+            second store of what was in it.
+          items:
+            type: string
+          examples: [report_text, dicom_metadata.patient_id, dicom_metadata.accession_number]
+        action_codes:
+          type: array
+          description: Non-raw disposition codes recorded for this request.
+          items:
+            $ref: '#/components/schemas/ActionCode'
+        human_approval:
+          oneOf:
+            - $ref: '#/components/schemas/HumanApprovalState'
+            - type: 'null'
+          description: >-
+            The recorded human sign-off, or `null` while the draft is still awaiting review. A
+            `null` here means "not yet decided", never "decided not to review".
+        final_disposition:
+          $ref: '#/components/schemas/FinalDisposition'
+        chain_verified:
+          type: boolean
+          description: >-
+            Result of hash-chain verification over the records returned by this query. A relational
+            database alone does not make a log immutable, so tamper evidence is verified on read
+            rather than asserted.
+          examples: [true]
+
+    HumanApprovalState:
+      type: object
+      additionalProperties: false
+      required:
+        - decision
+        - recorded_at
+      description: A recorded human sign-off decision.
+      properties:
+        decision:
+          type: string
+          enum:
+            - approved
+            - rejected
+        recorded_at:
+          type: string
+          format: date-time
+        reviewer:
+          type: string
+          description: Identity of the reviewing human. Synthetic in Phase 1.
+
+    AuditRecordCollection:
+      type: object
+      additionalProperties: false
+      required:
+        - records
+        - count
+      description: A page of audit records, oldest first.
+      properties:
+        records:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditRecord'
+        count:
+          type: integer
+          description: Number of records in this response.
+        chain_verified:
+          type: boolean
+          description: >-
+            Aggregate result of hash-chain verification across the returned records. `false` means
+            at least one record in the chain did not verify and the log's integrity is in question.
+        input_source:
+          type: string
+          description: >-
+            Attributed input source for the matched records, where the caller recorded one.
+          enum:
+            - synthetic_corpus
+            - clinician_supplied

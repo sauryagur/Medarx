@@ -3,6 +3,11 @@
 The privacy kernel: allowlisted extraction, pseudonymization, four-layer
 redaction, and a fail-closed policy engine, in front of a model gateway.
 
+The normative API contract is `contracts/openapi.yaml` at the repo root — it is
+tracked, because code that depends on it is tracked. `test_openapi_contract.py`
+enforces conformance: it sweeps every action code emitted under
+`backend/src/medarx/` and fails if any is missing from the `ActionCode` enum.
+
 ## Setup
 
 Run these four commands in order from this directory (`backend/`):
