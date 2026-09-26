@@ -39,8 +39,8 @@ from medarx.redaction.layers import (
     layer3_validation,
 )
 
-if TYPE_CHECKING:  # pragma: no cover - the engine arrives in a later task
-    from medarx.policy.engine import PolicyEngine
+if TYPE_CHECKING:  # pragma: no cover - the engine is injected, never imported here
+    from medarx.policy.policy_engine import PolicyEngine
 
 __all__ = ["RedactionOutcome", "run_privacy_kernel", "run_redaction"]
 

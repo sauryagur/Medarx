@@ -424,10 +424,15 @@ def test_every_action_code_a_published_example_names_is_a_contract_member():
 
 
 #: The `(layer, code)` pairs a published example advertises for a layer the
-#: package has not written: the request-shape gate `J`, the policy engine `E`
-#: and the egress gateway `F` name codes that nothing emits, because the
-#: component that would emit them does not exist. Every other pair must be
-#: found by the AST emission sweep in `test_openapi_contract.py`.
+#: package has not written: the request-shape gate `J` and the egress gateway
+#: `F` name codes that nothing emits, because the component that would emit
+#: them does not exist. `E` is here for one code only, and the reason is a
+#: decision rather than an omission: the policy engine blocks an unresolved
+#: disposition under the disposition's own code, because the layer that
+#: raised it is the one a reader has to look at. A second engine-level code for
+#: that same refusal would give one refusal two different receipts depending on
+#: which component the caller asked. Every other pair must be found by the AST
+#: emission sweep in `test_openapi_contract.py`.
 #:
 #: This is a list of pending implementation, not of tolerated failures, and
 #: `test_a_pending_pair_is_not_already_emitted` fails the moment one of them
@@ -438,8 +443,6 @@ _NOT_YET_EMITTED: frozenset[tuple[str, str]] = frozenset(
         ("J", "ARBITRARY_DICOM_OBJECT_REJECTED"),
         ("J", "FREE_FORM_PROMPT_REJECTED"),
         ("E", "UNRESOLVED_DISPOSITION"),
-        ("E", "UNKNOWN_POLICY_VERSION"),
-        ("E", "POLICY_CONFIG_ERROR"),
         ("F", "PAYLOAD_MISMATCH"),
         ("F", "UNKNOWN_MODEL"),
     }

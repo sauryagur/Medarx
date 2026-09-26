@@ -182,3 +182,61 @@ would hand the model path the re-identification key the store exists to
 withhold. `AuditKeyRequired` is deliberately not a `MedarxError`: it is a
 deployment misconfiguration, not a privacy block, so it carries no layer and no
 action code and cannot be rendered into a receipt.
+
+## Component E — policy engine
+
+`medarx.policy` decides; it never transmits. `decision_table.RULES` is design
+§6 transcribed as data — one `Rule` per row, in row order, with the layer tag
+that row governs — so a reviewer can diff it against the design, and
+`rules_for("D")` folds the three redaction rows together the way a caller that
+only knows the component needs. `policy_engine.CHECKS` is the ordered list
+`decide` walks, one entry per block condition, each carrying the §6 row it
+enforces; the engine returns on the first that fires, so the fail-closed
+ordering is a property of a list rather than of the control flow around it.
+
+**Two modes run, and a third is refused.** `IMPLEMENTED_MODES` is
+`{strict_local, cloud}`. `authorized_local` is in the contract's `PolicyMode`
+enum as an architectural extension published `implemented: false`, and
+selecting it **blocks** — it does not fall through to a weaker mode, because a
+deployment that asked for a stronger policy and received a weaker one would
+have a receipt naming neither. The mode is read from `Settings` and from nowhere
+else; `decide` takes no mode parameter, so a request cannot select or escalate
+its own policy.
+
+**A block is a refusal, and the reasons trend to block.** An unidentifiable
+policy version, an unimplemented mode, a missing payload, a payload no
+redaction layer validated, and any unresolved disposition all refuse. A blank
+`policy_version` is treated as *missing* even when the presented version equals
+it, because two blank strings compare equal and a payload approved under a
+policy nobody can name is the case a bare `!=` misses.
+
+**"No dispositions" blocks only when nothing validated the payload.** Layers 1–3
+record what they *did*, so a report with no identifiers in it produces no
+dispositions at all — measured, not assumed:
+`"FINDINGS: 7mm nodule."` through the real pipeline yields `dispositions == []`
+and a layer-3 hash. An empty list from a completed run is the shape of a clean
+result, and blocking on it would refuse every ordinary report while reporting a
+healthy deployment as a configuration error. The block is therefore on the
+pair — no dispositions **and** no layer-3 hash — which is the only version of
+the condition that is both fail-closed (no layer ran, so the dispositions that
+should exist were never produced) and satisfiable.
+
+**Only the approved payload may leave, and the check is on the object.**
+`authorize_payload(payload, approved_hash)` requires two things to equal the
+approved hash: the `payload_hash` the object carries, and the hash recomputed
+from its content. The claim alone is a hole with a one-line hole-punch —
+`StructuredPayload` is frozen but not sealed, so `model_copy(update=...)` swaps
+`report_text` and leaves the approved `payload_hash` untouched. The re-hash is
+what stops that, and it also means a payload no layer ever hashed is refused
+rather than approved. `models.payload_hash_of` is the one definition of that
+hash, shared with redaction layer 3; two copies of it could drift, and a drift
+there is a boundary that refuses everything or authorises everything.
+
+**Internal reasons are not wire codes.** `Decision.reason_code` is descriptive
+and never serialised; `WIRE_CODE_BY_REASON` maps each reason the engine *invents*
+to the one `ActionCode` member that describes it, and `wire_code_for` raises on
+anything else rather than substituting a plausible code. A block whose reason
+came from a disposition is deliberately not in that table: the receipt belongs
+to the layer that raised the disposition, under that layer's tag, and a second
+engine-level code for the same refusal would give one refusal two different
+receipts depending on which component the caller asked.

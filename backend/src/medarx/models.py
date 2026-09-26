@@ -30,6 +30,7 @@ __all__ = [
     "PriorStudyReference",
     "StructuredPayload",
     "canonical_hash",
+    "payload_hash_of",
 ]
 
 #: An action code classifies a refusal; it never carries what was refused. The
@@ -68,6 +69,23 @@ def canonical_hash(value: Any) -> str:
     """
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def payload_hash_of(payload: "StructuredPayload") -> str:
+    """The canonical hash of a payload's *content*, excluding the hash field.
+
+    One definition, two users, because the two must agree. Redaction layer 3
+    writes `payload_hash` with it, and the policy engine re-derives it to
+    confirm that the object it is about to authorize is the one that was
+    approved. A second copy of this expression in the engine would be a hash
+    definition that can drift from the one it is checking against, and a drift
+    there is a boundary that refuses everything or authorises everything.
+
+    The field is excluded because it is the output: including it would make
+    the value a function of itself, and a payload carrying no hash could never
+    be given one.
+    """
+    return canonical_hash(payload.model_dump(mode="json", exclude={"payload_hash"}))
 
 
 def check_codes(codes: list[str]) -> list[str]:

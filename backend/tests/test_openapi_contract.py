@@ -48,6 +48,11 @@ EXPECTED_EMISSION_SITES: frozenset[str] = frozenset(
         # the one code it can raise on its own.
         "backend/src/medarx/redaction/layers.py",
         "backend/src/medarx/redaction/pipeline.py",
+        # Component E. The policy engine names every wire code it can put in a
+        # receipt as a module constant, including the codes its internal
+        # reasons translate to, so the sweep covers what component J will
+        # serialise.
+        "backend/src/medarx/policy/policy_engine.py",
     }
 )
 

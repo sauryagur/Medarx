@@ -78,7 +78,7 @@ from dataclasses import dataclass
 
 from medarx.config import Settings
 from medarx.extraction.allowlists import ALLOWED_FIELDS
-from medarx.models import LAYERS, StructuredPayload, canonical_hash
+from medarx.models import LAYERS, StructuredPayload, payload_hash_of
 from medarx.pseudonym.mapping_store import MappingStore
 from medarx.pseudonym.pseudonymize import SURROGATE_SHAPE, shift_dicom_date
 from medarx.redaction.ner import TRUNCATED_TEXT, EntityHit, scan_entities
@@ -627,11 +627,7 @@ def layer3_validation(
                     action_code=_ACTION_CODE_LEFTOVER_PATTERN_MATCH, resolved=False,
                 ))
 
-    hashed = payload.model_copy(update={
-        "payload_hash": canonical_hash(
-            payload.model_dump(mode="json", exclude={"payload_hash"})
-        ),
-    })
+    hashed = payload.model_copy(update={"payload_hash": payload_hash_of(payload)})
     return hashed, dispositions
 
 
