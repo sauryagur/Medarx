@@ -45,7 +45,11 @@ class Settings(BaseSettings):
     # -- Model gateway -----------------------------------------------------
     gateway_base_url: str = "http://127.0.0.1:8080/v1"
     gateway_model: str = "medarx-demo-model"
-    gateway_api_key: str = "medarx-demo-key"
+    # Empty by default: the Phase 1 observer requires no authentication, and a
+    # credential baked into source is the kind of thing that gets copied into a
+    # real deployment. The gateway client MUST omit the Authorization header
+    # entirely when this is empty rather than sending an empty one.
+    gateway_api_key: str = ""
     gateway_timeout_s: float = 120.0
     # -- Request intake ----------------------------------------------------
     max_body_bytes: int = 1_048_576

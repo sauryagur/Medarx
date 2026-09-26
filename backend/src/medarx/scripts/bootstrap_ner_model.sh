@@ -9,7 +9,10 @@
 # The wheel filename MUST carry the version string; uv rejects an unversioned
 # name with: The wheel filename "ensm.whl" is invalid: Must have a version.
 #
-# Idempotent: exits 0 immediately if the model already loads.
+# Idempotent: exits 0 immediately if the pinned model version is already
+# installed. The guard compares the *installed distribution version*, not just
+# the model name, so a stale build is reinstalled rather than reported as
+# already-present.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -25,14 +28,18 @@ if [ ! -x "$VENV_PYTHON" ]; then
   exit 1
 fi
 
-if "$VENV_PYTHON" -c "import spacy; spacy.load('${MODEL_NAME}')" >/dev/null 2>&1; then
-  echo "${MODEL_NAME} ${MODEL_VERSION} already installed -- nothing to do"
+if "$VENV_PYTHON" -c "import importlib.metadata as m, sys; sys.exit(0 if m.version('${MODEL_NAME}') == '${MODEL_VERSION}' else 1)" >/dev/null 2>&1; then
+  echo "${MODEL_NAME} ${MODEL_VERSION} is installed at the pinned version -- nothing to do"
   exit 0
 fi
 
 cd "$BACKEND_DIR"
 
-curl -sSL -o "$WHEEL" "$WHEEL_URL"
+# --fail makes a 404/500 abort instead of writing an HTML error page into the
+# wheel; the download lands on a temp name so a failed run never leaves a
+# corrupt .whl behind for the next one to trip over.
+curl -sSL --fail --show-error -o "${WHEEL}.part" "$WHEEL_URL"
+mv -f "${WHEEL}.part" "$WHEEL"
 uv pip install --python "$VENV_PYTHON" "./$WHEEL"
 rm -f "./$WHEEL"
 

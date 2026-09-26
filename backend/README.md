@@ -45,10 +45,25 @@ environment**; every other component takes the `Settings` object returned by
 | `MEDARX_NER_SCORE_THRESHOLD` | `0.50` |
 | `MEDARX_NER_TEXT_LIMIT` | `200000` |
 | `MEDARX_DICOM_UID_ROOT` | `1.2.826.0.1.3680043.10.1338.` |
-| `MEDARX_AUDIT_KEY` | *(none — must be supplied)* |
+| `MEDARX_AUDIT_KEY` | `""` (empty — see [Credentials](#credentials)) |
 | `MEDARX_AUDIT_RETENTION_DAYS` | `2555` |
 | `MEDARX_GATEWAY_BASE_URL` | `http://127.0.0.1:8080/v1` |
 | `MEDARX_GATEWAY_MODEL` | `medarx-demo-model` |
-| `MEDARX_GATEWAY_API_KEY` | `medarx-demo-key` |
+| `MEDARX_GATEWAY_API_KEY` | `""` (empty — see [Credentials](#credentials)) |
 | `MEDARX_GATEWAY_TIMEOUT_S` | `120.0` |
 | `MEDARX_MAX_BODY_BYTES` | `1048576` |
+
+### Credentials
+
+Both `MEDARX_AUDIT_KEY` and `MEDARX_GATEWAY_API_KEY` default to the empty
+string. No credential is baked into source, because a default that looks like a
+working key is the kind of thing that gets copied into a real deployment.
+
+Two obligations follow, and they belong to the tasks that own those code paths:
+
+- **The audit store must fail closed on an empty `audit_key`.** Silently
+  writing an unauthenticated audit event is worse than refusing to write one.
+- **The gateway client must omit the `Authorization` header entirely when
+  `gateway_api_key` is empty**, rather than send an empty one. The Phase 1
+  observer needs no authentication, so nothing in this phase sends one by
+  default.
