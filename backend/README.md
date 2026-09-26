@@ -10,7 +10,8 @@ enforces conformance: it sweeps every action code emitted under
 
 ## Setup
 
-Run these three commands in order from this directory (`backend/`):
+**`uv sync` is a two-step operation here, and both halves are mandatory.** Run
+these three commands in order from this directory (`backend/`):
 
 ```bash
 uv sync
@@ -28,14 +29,27 @@ uv run pytest
    `uv pip install` instead.
 3. **`uv run pytest`** — run the test suite.
 
+**Step 1 without step 2 is a broken environment, not a delayed one.** The
+model is not a declared dependency, so `uv sync` prunes it from the venv —
+`uv` reports it as `Uninstalled 1 package: - en-core-web-sm==3.8.0` — and the
+bootstrap script is the only thing that installs it. Re-run the bootstrap after
+**every** `uv sync`, and after **any** change to `pyproject.toml` that is
+followed by a sync. Treat the two commands as a pair, always; the ordering
+below is not a one-time initialisation.
+
+**A missing model does not say it is missing.** It surfaces as a spaCy
+recogniser failure —
+`OSError: [E050] Can't find model 'en_core_web_sm'. It doesn't seem to be a
+Python package or a valid path to a data directory.` — raised from whichever
+recogniser tried to load it, so the error points at the recogniser rather than
+at the missing dependency. On that error, re-run
+`bash src/medarx/scripts/bootstrap_ner_model.sh`; do not debug the recognisers.
+
 There is no schema-initialisation step, and there does not need to be one.
 `MappingStore.__init__` creates its own tables, so component C is usable the
 moment the store is constructed. The audit store (component G) is a later task
 and has no module yet, so a command for it would only be a `ModuleNotFoundError`
 in the middle of a setup sequence.
-
-> `uv sync` prunes the manually-installed NER model, because the model is not a
-> declared dependency. If you run it after step 2, run step 2 again.
 
 > The virtual environment lives in `backend/.venv`, inside the project
 > directory — never under `/tmp`, because `/tmp` is a tmpfs and a venv there
