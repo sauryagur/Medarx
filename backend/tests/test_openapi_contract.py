@@ -8,7 +8,9 @@ root and is tracked.
 The sweep below is the durable part. It reads every emission site in
 `backend/src/medarx/` rather than a hand-written list, so adding a code
 without adding it to the contract fails here, and dropping a member the code
-still emits fails here too.
+still emits fails here too. A name the sweep cannot resolve to a module-level
+assignment is an assertion failure rather than a skipped element, so a route
+it cannot read is reported instead of passing quietly.
 """
 
 from __future__ import annotations
@@ -67,65 +69,151 @@ def _string_literals(node: ast.AST) -> list[str]:
     ]
 
 
+def _module_assignments(tree: ast.Module) -> dict[str, ast.AST]:
+    """Every module-level assignment target -> value node.
+
+    Plain and annotated alike, since `CODES: tuple[str, ...] = ("X",)` is the
+    natural way to write one.
+    """
+    assignments: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assignments[target.id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.value is not None:
+                assignments[node.target.id] = node.value
+    return assignments
+
+
+def _codes_in_value(node: ast.AST, assignments: dict[str, ast.AST], where: str) -> list[str]:
+    """The action codes in an `action_codes=` value, resolving names.
+
+    A `Name` is resolved to its module-level assignment **at any depth** — as
+    the whole argument (`action_codes=CODES`) or as an element of a tuple or
+    list (`action_codes=(_CODE,)`). Only names are resolved; other nodes are
+    read for their string literals, so this does not over-collect unrelated
+    strings that merely happen to sit inside the value.
+
+    An unresolvable name is an assertion failure, never a silent skip: the
+    sweep must be able to say "I could not look here" rather than reporting
+    nothing and looking like it found nothing.
+    """
+    if isinstance(node, ast.Name):
+        resolved = assignments.get(node.id)
+        assert resolved is not None, (
+            f"{where}: action_codes={node.id!r} does not resolve to a "
+            "module-level assignment; the sweep cannot see what it emits"
+        )
+        return _string_literals(resolved)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        codes: list[str] = []
+        for element in node.elts:
+            codes.extend(_codes_in_value(element, assignments, where))
+        return codes
+    return _string_literals(node)
+
+
+def _emitted_codes_in_tree(tree: ast.Module, where: str) -> list[str]:
+    """The action codes emitted anywhere in one parsed module."""
+    assignments = _module_assignments(tree)
+    codes: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg == "action_codes":
+                    codes.extend(_codes_in_value(kw.value, assignments, where))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(
+                isinstance(t, ast.Name) and "ACTION_CODE" in t.id.upper()
+                for t in targets
+            ):
+                codes.extend(_string_literals(node.value))
+    return codes
+
+
 def _emitted_action_codes() -> dict[str, list[str]]:
     """Every action code this package can emit, keyed by source file.
 
-    Two shapes are collected, and a third is resolved through to the second:
+    Three shapes are collected, and every name is resolved to the module's
+    top-level assignment before its strings are read:
 
     - a string literal passed directly as `action_codes=("X",)`;
     - a module-level constant whose name marks it as an action-code collection
       (contains `ACTION_CODE`), such as a shared `CODES` tuple;
-    - `action_codes=SOME_CONSTANT`, where the argument is a `Name` rather than
-      a literal. The name is resolved to its module-level assignment and the
-      string elements of that assignment are collected, so routing an
-      emission through a constant does not hide it from the sweep.
+    - an `action_codes=` value that *names* a module-level constant, whether
+      bare (`action_codes=CODES`) or nested inside the tuple
+      (`action_codes=(_CODE,)`).
 
-    All three are found by parsing, so a new site cannot be missed by
-    forgetting to register it here.
+    A name that resolves to nothing is an assertion failure, not a skipped
+    element — see `_codes_in_value`. All three are found by parsing, so a new
+    site cannot be missed by forgetting to register it here.
     """
     found: dict[str, list[str]] = {}
     for path in sorted(SOURCE_ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-
-        # Every module-level assignment — plain and annotated alike, since
-        # `CODES: tuple[str, ...] = ("X",)` is the natural way to write one —
-        # so an `action_codes=NAME` argument can be resolved to its value.
-        assignments: dict[str, ast.AST] = {}
-        for node in tree.body:
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        assignments[target.id] = node.value
-            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-                if node.value is not None:
-                    assignments[node.target.id] = node.value
-
-        codes: list[str] = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                for kw in node.keywords:
-                    if kw.arg != "action_codes":
-                        continue
-                    if isinstance(kw.value, ast.Name):
-                        resolved = assignments.get(kw.value.id)
-                        assert resolved is not None, (
-                            f"{path.relative_to(REPO_ROOT)}: action_codes="
-                            f"{kw.value.id!r} does not resolve to a module-level "
-                            "assignment; the sweep cannot see what it emits"
-                        )
-                        codes.extend(_string_literals(resolved))
-                    else:
-                        codes.extend(_string_literals(kw.value))
-            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                if any(
-                    isinstance(t, ast.Name) and "ACTION_CODE" in t.id.upper()
-                    for t in targets
-                ):
-                    codes.extend(_string_literals(node.value))
+        codes = _emitted_codes_in_tree(tree, str(path.relative_to(REPO_ROOT)))
         if codes:
             found[str(path.relative_to(REPO_ROOT))] = codes
     return found
+
+
+def test_a_name_nested_in_a_tuple_is_resolved_rather_than_skipped():
+    # The regression this exists for: `action_codes=(_CODE,)` is a natural way
+    # to write an emission, and while names were resolved only as the whole
+    # argument, the sweep read the tuple, found no string constant in it, and
+    # reported nothing — leaving the code uncovered with the suite still green.
+    snippet = (
+        '_CODE = "SOME_CODE"\n'
+        "def refuse():\n"
+        "    raise Refusal(action_codes=(_CODE,))\n"
+    )
+    assert _emitted_codes_in_tree(ast.parse(snippet), "snippet.py") == ["SOME_CODE"]
+
+
+def test_a_name_nested_in_a_list_is_resolved_too():
+    snippet = (
+        '_CODE = "SOME_CODE"\n'
+        "def refuse():\n"
+        "    raise Refusal(action_codes=[_CODE])\n"
+    )
+    assert _emitted_codes_in_tree(ast.parse(snippet), "snippet.py") == ["SOME_CODE"]
+
+
+def test_a_bare_name_and_a_tuple_of_literals_still_resolve():
+    snippet = (
+        "CODES = ('FIRST_CODE',)\n"
+        "def a():\n"
+        "    raise Refusal(action_codes=CODES)\n"
+        "def b():\n"
+        "    raise Refusal(action_codes=('SECOND_CODE',))\n"
+    )
+    codes = _emitted_codes_in_tree(ast.parse(snippet), "snippet.py")
+    assert sorted(codes) == ["FIRST_CODE", "SECOND_CODE"]
+
+
+def test_an_unresolvable_name_fails_the_sweep_instead_of_being_skipped():
+    # Silence must mean "nothing to find", never "I could not look": a name
+    # that is not a module-level assignment cannot be resolved, and that is a
+    # broken sweep rather than a clean result.
+    snippet = (
+        "def refuse():\n"
+        "    raise Refusal(action_codes=(_NEVER_ASSIGNED_,))\n"
+    )
+    with pytest.raises(AssertionError, match="does not resolve to a module-level"):
+        _emitted_codes_in_tree(ast.parse(snippet), "snippet.py")
+
+
+def test_the_sweep_sees_every_code_component_c_emits():
+    emitted = _emitted_action_codes()
+    codes = set(emitted["backend/src/medarx/pseudonym/pseudonymize.py"])
+    assert codes == {
+        "MISSING_SURROGATE",
+        "SURROGATE_SHAPED_REFERENCE_REJECTED",
+        "UNSHIFTED_DATE",
+    }
 
 
 def test_the_sweep_actually_finds_emission_sites():
