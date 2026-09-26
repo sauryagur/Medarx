@@ -677,6 +677,31 @@ components:
         - SURROGATE_SHAPED_REFERENCE_REJECTED
         - LOW_CONFIDENCE_NER_UNRESOLVED
 
+    PipelineStage:
+      type: string
+      title: PipelineStage
+      description: >-
+        A stage boundary of the privacy pipeline, in pipeline order. These are the boundaries the
+        audit log (component G) is partitioned into, and the stages the UI's privacy-details drawer
+        renders: `Fields selected` is component A's allowlisted extraction, `Pseudonymized` is
+        component C, `Text screened` is redaction layers 1 and 2, `Payload validated` is layer 3,
+        `Policy decision` is component E, and `Model request` is component F.
+
+        The set is closed and the order is part of the contract: a request either reached the model
+        or it did not, and the stages it reached are the ones recorded. It is published here rather
+        than derived from an implementation detail so that a later change to what the log records
+        is a change to a published vocabulary, not a rename of audit records that already exist.
+
+        A stage name carries no value and no PHI: it says which boundary this is, never what passed
+        through it.
+      enum:
+        - Fields selected
+        - Pseudonymized
+        - Text screened
+        - Payload validated
+        - Policy decision
+        - Model request
+
     StudyContext:
       type: object
       additionalProperties: false

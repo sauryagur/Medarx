@@ -45,11 +45,15 @@ recogniser tried to load it, so the error points at the recogniser rather than
 at the missing dependency. On that error, re-run
 `bash src/medarx/scripts/bootstrap_ner_model.sh`; do not debug the recognisers.
 
-There is no schema-initialisation step, and there does not need to be one.
-`MappingStore.__init__` creates its own tables, so component C is usable the
-moment the store is constructed. The audit store (component G) is a later task
-and has no module yet, so a command for it would only be a `ModuleNotFoundError`
-in the middle of a setup sequence.
+Neither store needs a schema step to be *usable*: `MappingStore.__init__` and
+`AuditLog.__init__` each create their own tables when they are missing, so
+either component works the moment its store is constructed. For a deployment
+there is one command that creates the whole Phase 1 store —
+`uv run python -m medarx.audit.schema_init --db-url <url>` — and it is
+idempotent. It is not a migration: it creates what is absent and leaves an
+existing table alone, so versioned DDL for a real database belongs with the
+compose task. The database URL is an argument rather than an environment
+variable because only `config.py` may read the environment.
 
 > The virtual environment lives in `backend/.venv`, inside the project
 > directory — never under `/tmp`, because `/tmp` is a tmpfs and a venv there
