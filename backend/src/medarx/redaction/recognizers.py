@@ -92,13 +92,21 @@ CONTEXT: dict[str, list[str]] = {
 #: performs no enhancement (which is why the unit tests here see exactly 0.30),
 #: but `AnalyzerEngine._enhance_using_context` runs
 #: `LemmaContextAwareEnhancer`, which adds `context_similarity_factor = 0.35`
-#: and then floors at 0.4. On this module's own fixture — "Ref ticket
-#: ZX-99-ALPHA issued at the counter." — the words `ref`, `ticket` and `issued`
-#: are all in the same sentence, so attaching this context lifts the score from
-#: 0.30 to **0.65**, above `Settings.ner_score_threshold` (0.50). Measured
-#: through a real engine, not inferred. The recognizer is therefore built with
-#: an empty context: `LemmaContextAwareEnhancer.enhance_using_context` skips
-#: any recognizer whose `context` is falsy, so 0.30 reaches the engine intact.
+#: and then floors at 0.4.
+#:
+#: The mechanism: the enhancer lifts a hit when the text *surrounding* the match
+#: contains one of the recognizer's declared context words. The declared list is
+#: the vocabulary it looks for; the prose is where it looks. On this module's
+#: own fixture — "Ref ticket ZX-99-ALPHA issued at the counter." — `ref`,
+#: `ticket` and `issued` are all in the same sentence, so attaching this context
+#: lifts the score from 0.30 to **0.65**, above `Settings.ner_score_threshold`
+#: (0.50). Measured through a real engine: with the context attached, that
+#: sentence scores 0.65 while "the value ZX-99-ALPHA stands alone" scores 0.30.
+#:
+#: An empty context therefore removes the *vocabulary*, not the looking: with
+#: no declared words there is nothing the surrounding prose can match, so no
+#: sentence can lift the score. `enhance_using_context` skips a recognizer whose
+#: `context` is falsy, and 0.30 reaches the engine intact.
 #:
 #: This protects only the *score*. What makes the blocked beat deterministic is
 #: that no replacer is registered for `AMBIGUOUS_REFERENCE`: a detected entity

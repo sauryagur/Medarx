@@ -226,6 +226,17 @@ def test_mrn_does_not_match_clinical_or_common_words(text):
     assert _spans("MRN", text) == []
 
 
+def test_the_case_insensitive_label_exception_cannot_be_widened_silently():
+    # The pin test above compares each pattern against the brief's literal
+    # string, with `PATIENT_ID` replaced by the documented `(?i:...)` form. A
+    # second entry in that exception dict would make the comparison certify
+    # itself: the test would compare the pattern against whatever the exception
+    # said, and a drifted pattern would pass. This assertion makes widening the
+    # exception a deliberate, visible act — if a future entity genuinely needs
+    # a case-folded label, this fails and the reasoning gets written down.
+    assert set(BRIEF_PATTERNS_WITH_CASE_INSENSITIVE_LABEL) == {"PATIENT_ID"}
+
+
 # -- ACCESSION_NUMBER ------------------------------------------------------
 
 
