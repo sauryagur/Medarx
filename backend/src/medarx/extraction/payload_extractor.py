@@ -5,11 +5,18 @@ never accepts an arbitrary DICOM object or a free-form prompt: it validates
 the function, rejects any attribute the known-attribute table does not name,
 and copies across only the fields the function's allowlist blesses.
 
-The deliberate asymmetry: a *known* attribute that the function's allowlist
-does not name is **dropped** (it is not a privacy event); an attribute the
-table does not know at all — including anything under `PixelData` — is
-**rejected**, because a caller reaching for something outside the table is
-signalling an intent this boundary refuses rather than filters.
+Three refusals, in order:
+
+- an unknown `function` -> `UNKNOWN_FUNCTION`;
+- an attribute the known-attribute table does not name, including anything
+  under `PixelData` -> `UNKNOWN_DICOM_ATTRIBUTE`;
+- a known attribute that maps to a real payload field the function's
+  allowlist does not name -> `FIELD_NOT_ALLOWLISTED`. A caller asking for a
+  field it may not have is refused, not quietly given less.
+
+Known identifier attributes (`PatientID`, `AccessionNumber`, `PatientName`,
+`InstitutionName`) and `StudyInstanceUID` map to no payload field at all and
+are dropped; they are never carried, so refusing them would be noise.
 """
 
 from __future__ import annotations
@@ -22,7 +29,7 @@ from medarx.extraction.allowlists import ALLOWED_FIELDS
 from medarx.extraction.study_context import StudyContext
 from medarx.models import ExtractionRequest, StructuredPayload, canonical_hash
 
-__all__ = ["pipeline_for", "KNOWN_DICOM_ATTRIBUTES"]
+__all__ = ["extract", "pipeline_for", "KNOWN_DICOM_ATTRIBUTES"]
 
 LAYER = "A"
 
@@ -53,10 +60,10 @@ _ATTRIBUTE_TO_FIELD: dict[str, str] = {
     "PriorStudyDate": "prior_study_date",
 }
 
-#: Never carried into the payload, whatever the allowlist says.
-_NEVER_CARRIED: frozenset[str] = frozenset(
-    {"PatientID", "AccessionNumber", "PatientName", "InstitutionName"}
-)
+#: Field names that make a function a "prior" function: only these functions
+#: carry `prior_study_refs` into the payload.
+_PRIOR_FIELDS: frozenset[str] = frozenset({"prior_report_text", "prior_study_date"})
+
 
 _AGE = re.compile(r"^(\d{3})([YMD])$")
 
@@ -95,24 +102,25 @@ def pipeline_for(
         )
     allowed = ALLOWED_FIELDS[function]
 
-    known_field_names = {field for names in ALLOWED_FIELDS.values() for field in names}
-
     for key in dicom_metadata:
-        if key in _ATTRIBUTE_TO_FIELD or key in KNOWN_DICOM_ATTRIBUTES:
-            continue
-        # A field name the tables know but this function does not bless is a
-        # policy refusal; anything else is an unknown attribute.
-        if key in known_field_names:
+        if key not in KNOWN_DICOM_ATTRIBUTES:
+            raise ExtractionError(
+                layer=LAYER,
+                action_codes=("UNKNOWN_DICOM_ATTRIBUTE",),
+                message=f"{key!r} is not a known DICOM attribute",
+            )
+        field = _ATTRIBUTE_TO_FIELD.get(key)
+        if field is not None and field not in allowed:
+            # A real field this function may not carry. Refusing is the point:
+            # the caller asked for something outside the allowlist.
             raise ExtractionError(
                 layer=LAYER,
                 action_codes=("FIELD_NOT_ALLOWLISTED",),
-                message=f"{key!r} is not allowlisted for function {function!r}",
+                message=f"{field!r} is not allowlisted for function {function!r}",
             )
-        raise ExtractionError(
-            layer=LAYER,
-            action_codes=("UNKNOWN_DICOM_ATTRIBUTE",),
-            message=f"{key!r} is not a known DICOM attribute",
-        )
+        # Known attributes with no payload field (the identifier attributes and
+        # StudyInstanceUID) are dropped here and never carried.
+
     dicom_fields: dict[str, str] = {}
     for key, value in dicom_metadata.items():
         field = _ATTRIBUTE_TO_FIELD.get(key)
@@ -130,21 +138,26 @@ def pipeline_for(
         }
     )
 
+    prior_study_refs = (
+        tuple(study.prior_study_refs) if allowed & _PRIOR_FIELDS else ()
+    )
+
     return StructuredPayload(
         function=function,
         report_text=report_text,
         dicom_fields=dicom_fields,
         study_ref=study.study_ref,
-        prior_study_refs=(),
+        prior_study_refs=prior_study_refs,
         policy_version=policy_version,
         input_hash=input_hash,
+        # Pre-redaction provenance only. Redaction layer 3 overwrites this.
         payload_hash=canonical_hash(
             {
                 "function": function,
                 "report_text": report_text,
                 "dicom_fields": dicom_fields,
                 "study_ref": study.study_ref,
-                "prior_study_refs": (),
+                "prior_study_refs": prior_study_refs,
                 "policy_version": policy_version,
                 "input_hash": input_hash,
             }

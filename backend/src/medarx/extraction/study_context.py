@@ -14,8 +14,10 @@ __all__ = ["StudyContext"]
 @dataclass(frozen=True, slots=True)
 class StudyContext:
     """Immutable context for one extraction call."""
-
     study_uid: str
     study_ref: str
     patient_ref: str
     function: str
+    #: Prior-study references relevant to this request, in request order.
+    #: Carried only by the functions whose allowlist names prior fields.
+    prior_study_refs: tuple[str, ...] = ()

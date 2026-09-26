@@ -42,8 +42,14 @@ class StructuredPayload(BaseModel):
     """The only shape permitted past layer A.
 
     `dicom_fields` holds canonical snake_case names drawn from the function's
-    allowlist. `input_hash` covers what came in; `payload_hash` covers what
-    this payload is, and is recomputed at the layer-3 contract check.
+    allowlist.
+
+    `input_hash` covers what came in and is carried through pseudonymization
+    unchanged. `payload_hash` is a **pre-redaction** value written here for
+    provenance only: redaction layers 1 and 2 transform the payload in place,
+    so the layer-3 contract check MUST overwrite it with a hash of the approved
+    payload rather than recompute or trust this one. It stays `None` until
+    layer 3 sets it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -55,4 +61,4 @@ class StructuredPayload(BaseModel):
     prior_study_refs: tuple[str, ...] = ()
     policy_version: str
     input_hash: str = ""
-    payload_hash: str = ""
+    payload_hash: str | None = None
