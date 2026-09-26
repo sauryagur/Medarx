@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,7 +29,13 @@ import yaml
 from sqlalchemy import create_engine, inspect, text
 
 from medarx.audit.audit_log import ALLOWED_AUDIT_FIELDS, AUDIT_METADATA, AuditLog
-from medarx.audit.code_table import CODE_TABLE, PIPELINE_STAGES, STAGE_COMPONENTS
+from medarx.audit.code_table import (
+    CODE_TABLE,
+    LAYER_STAGE,
+    PIPELINE_STAGES,
+    STAGE_COMPONENTS,
+    stages_reached,
+)
 from medarx.audit.hash_chain import GENESIS, canonical, chain_hash
 from medarx.audit.schema_init import main as schema_init_main
 from medarx.errors import MedarxError
@@ -60,12 +67,20 @@ DRAWER_STAGES = (
 )
 
 
+#: Real digests, because the storage policy refuses a hash-shaped field holding
+#: anything that is not one — and "h0" is not.
+INPUT_HASH = canonical_hash({"seed": "input"})
+PAYLOAD_HASH = canonical_hash({"seed": "approved-payload"})
+
+
 def ev(**kw):
     base = dict(request_id="req-1", timestamp=NOW, function="draft",
                 selected_model="medarx-demo-model", policy_version="medarx-policy-1.0.0",
-                policy_mode="cloud", input_hash="h0", approved_payload_hash="p0",
+                policy_mode="cloud", input_hash=INPUT_HASH,
+                approved_payload_hash=PAYLOAD_HASH,
                 redacted_field_names=["report_text"], action_codes=[],
-                final_disposition="approved", chain_hash="", previous_hash=GENESIS)
+                final_disposition="approved", layer=None,
+                chain_hash="", previous_hash=GENESIS)
     base.update(kw)
     return AuditEvent(**base)
 
@@ -124,8 +139,8 @@ def test_the_allowlist_is_exactly_what_the_table_persists():
     # something; an allowlisted field with no column is a record that silently
     # loses evidence.
     persisted = set(AUDIT_METADATA.tables["audit_event"].columns.keys())
-    assert persisted - {"ordinal", "purged"} == ALLOWED_AUDIT_FIELDS
-    assert "ordinal" in persisted and "purged" in persisted
+    assert persisted - {"ordinal"} == ALLOWED_AUDIT_FIELDS
+    assert "ordinal" in persisted
 
 
 # -- The chain -----------------------------------------------------------------
@@ -207,12 +222,11 @@ def test_deleting_every_row_is_detected_by_the_head_anchor(log):
 
 
 def test_a_chain_cut_and_re_appended_to_does_not_verify(log):
-    # The gap a head digest alone leaves: delete the tail and append again, and
-    # the new row's digest matches the anchor the append just wrote, so the head
-    # check alone would pass. What catches it here is the new row's own link —
-    # SQLite reuses the freed ordinal, so it lands at position 0 still chained
-    # to a record that no longer exists. The anchor's row count disagrees too;
-    # the walk simply reaches the link first.
+    # Cut the chain and append again. The new row's digest matches the anchor
+    # the append just wrote, so the head *digest* agrees; what does not is the
+    # new row's own link, because SQLite reuses the freed ordinal and it lands
+    # at position 0 still chained to a record that no longer exists. The anchor's
+    # count is inside the MAC and disagrees too — the walk reaches the link first.
     log.append(ev(request_id="r1"))
     log.append(ev(request_id="r2"))
     with log.connection() as c:
@@ -373,20 +387,48 @@ def test_retention_purges_but_keeps_the_anchor_ordinal(log):
     assert log.verify_chain().ok
 
 
-def test_a_purged_record_keeps_its_position_but_loses_its_content(log):
+def test_a_purged_record_becomes_a_tombstone_that_still_verifies(log):
+    # The brief's "a purged row leaves a tombstone ordinal": a tombstone is a
+    # row in its own table carrying the position and the chain fields, not a
+    # flag on the record it replaced.
     log.append(ev(request_id="r1"))
     log.append(ev(request_id="r2", timestamp=NOW + timedelta(days=1000)))
-    with log.connection() as c:
-        first = c.execute(text("SELECT chain_hash, previous_hash FROM audit_event "
-                               "WHERE ordinal=1")).one()
     assert log.purge_expired(now=NOW + timedelta(days=3000), retention_days=2555) == 1
     assert log.get("r1") == []
+    assert log.get("r2") != []
     with log.connection() as c:
-        after = c.execute(text("SELECT chain_hash, previous_hash, purged, request_id "
-                               "FROM audit_event WHERE ordinal=1")).one()
-    assert tuple(after) == (first[0], first[1], 1, None)
+        gone = c.execute(text("SELECT count(*) FROM audit_event "
+                              "WHERE request_id='r1'")).scalar_one()
+        tomb = c.execute(text("SELECT ordinal, previous_hash, chain_hash, purged_at, "
+                              "retention_cutoff FROM audit_tombstone")).one()
+    assert gone == 0
+    assert tomb.ordinal == 1 and tomb.previous_hash == GENESIS
+    assert tomb.purged_at and tomb.retention_cutoff
     r = log.verify_chain()
-    assert r.ok and r.checked == 2
+    assert r.ok and r.checked == 2, "a tombstone verifies by the same rule as a record"
+
+
+def test_a_purge_re_chains_everything_after_it(log):
+    # The purge is a re-chain, not an edit: the record after the purged one gets
+    # a new previous hash and a new digest, because the tombstone took its place.
+    log.append(ev(request_id="r1"))
+    before = log.append(ev(request_id="r2", timestamp=NOW + timedelta(days=1000)))
+    assert log.purge_expired(now=NOW + timedelta(days=3000), retention_days=2555) == 1
+    after = log.get("r2")[0]
+    assert after.previous_hash != before.previous_hash
+    assert after.chain_hash != before.chain_hash
+    assert after.previous_hash == log.get("r2")[0].previous_hash
+    assert log.verify_chain().ok
+
+
+def test_two_purges_in_one_pass_still_verify(log):
+    log.append(ev(request_id="r1"))
+    log.append(ev(request_id="r2", timestamp=NOW + timedelta(days=1)))
+    log.append(ev(request_id="r3", timestamp=NOW + timedelta(days=1000)))
+    assert log.purge_expired(now=NOW + timedelta(days=3000), retention_days=2555) == 2
+    assert log.get("r3") != []
+    r = log.verify_chain()
+    assert r.ok and r.checked == 3
 
 
 def test_retention_keeps_a_record_inside_the_window(log):
@@ -547,7 +589,8 @@ def test_schema_init_creates_the_whole_phase_one_store(tmp_path):
         names = set(inspect(engine).get_table_names())
     finally:
         engine.dispose()
-    assert {"audit_event", "pseudonym_study", "pseudonym_patient"} <= names
+    assert {"audit_event", "audit_tombstone", "audit_chain_head",
+            "pseudonym_study", "pseudonym_patient"} <= names
 
 
 def test_schema_init_is_idempotent(tmp_path):
@@ -571,3 +614,239 @@ def test_the_tables_schema_init_creates_are_the_ones_the_stores_use(tmp_path):
         assert store.verify_chain().ok
     finally:
         store.close()
+
+
+# -- The two attacks the first round of this component let through ---------------
+
+
+def test_a_keyless_writer_cannot_hide_a_rewrite_behind_a_purge_flag(log):
+    # The attack, executed: rewrite a record's disposition *and* mark it purged,
+    # which under the first design made verification skip the record entirely.
+    # There is no flag to set now — a purge is a tombstone whose digest is keyed
+    # — so the only thing this tamper can do is break the chain, which is the
+    # point.
+    log.append(ev(request_id="r1"))
+    log.append(ev(request_id="r2", final_disposition="blocked"))
+    log.append(ev(request_id="r3"))
+    with log.connection() as c:
+        c.execute(text("UPDATE audit_event SET final_disposition='approved', "
+                       "action_codes='[]' WHERE request_id='r2'"))
+        # The attacker's best move if a flag existed. There is no such column,
+        # so assert that as well as the outcome.
+        columns = {row[1] for row in c.execute(text("PRAGMA table_info(audit_event)"))}
+    assert "purged" not in columns
+    r = log.verify_chain()
+    assert not r.ok and r.broken_at_index == 1
+
+
+def test_a_keyless_writer_cannot_authorise_a_deletion_with_a_tombstone(log):
+    # A forged tombstone is a keyed digest of a blanked record, which is exactly
+    # what they cannot produce.
+    log.append(ev(request_id="r1"))
+    log.append(ev(request_id="r2", timestamp=NOW + timedelta(days=1000)))
+    with log.connection() as c:
+        c.execute(text("DELETE FROM audit_event WHERE request_id='r1'"))
+        c.execute(text("INSERT INTO audit_tombstone "
+                       "(ordinal, previous_hash, chain_hash, purged_at, retention_cutoff) "
+                       "VALUES (1, :p, :h, :a, :a)").bindparams(
+                           p=GENESIS, h="0" * 64, a=NOW_TEXT))
+    r = log.verify_chain()
+    assert not r.ok, "a forged tombstone must not verify"
+
+
+def test_deleting_the_tail_and_repointing_the_anchor_is_detected(log):
+    # C2's attack, executed. Repointing the anchor at the surviving head is what
+    # makes the remaining chain verify; it is only possible because the anchor
+    # used to be a plain row. The anchor is now MACed with the audit key, so the
+    # repoint no longer matches and the chain fails.
+    log.append(ev(request_id="r1"))
+    log.append(ev(request_id="r2"))
+    with log.connection() as c:
+        c.execute(text("DELETE FROM audit_event WHERE ordinal=2"))
+        c.execute(text("UPDATE audit_chain_head SET head_hash="
+                       "(SELECT chain_hash FROM audit_event WHERE ordinal=1), "
+                       "row_count=1"))
+    r = log.verify_chain()
+    assert not r.ok and r.broken_at_index == r.checked == 1
+
+
+def test_deleting_the_log_and_resetting_the_anchor_is_detected(log):
+    log.append(ev(request_id="r1"))
+    log.append(ev(request_id="r2"))
+    with log.connection() as c:
+        c.execute(text("DELETE FROM audit_event"))
+        c.execute(text("DELETE FROM audit_tombstone"))
+        c.execute(text("UPDATE audit_chain_head SET head_hash=:g, row_count=0"),
+                  {"g": GENESIS})
+    assert not log.verify_chain().ok
+
+
+def test_deleting_the_anchor_row_itself_is_detected(log):
+    # Verification fails closed when the anchor is gone and records remain: an
+    # absent anchor is a fresh database, and this one is not.
+    log.append(ev(request_id="r1"))
+    with log.connection() as c:
+        c.execute(text("DELETE FROM audit_chain_head"))
+    r = log.verify_chain()
+    assert not r.ok and r.checked == 0 and r.broken_at_index == 0
+
+
+def test_an_empty_database_with_no_anchor_verifies(log):
+    assert log.verify_chain().ok
+
+
+def test_a_whole_database_deletion_is_the_one_thing_the_anchor_cannot_see(tmp_path):
+    # Stated as a test so it stays stated: with every table emptied *and* the
+    # anchor gone, a reader with no external copy of the head sees an empty log
+    # that verifies. Nothing inside the database can distinguish it from one that
+    # was never written. That is what external time-stamping is for (Phase 6).
+    url = f"sqlite:///{tmp_path / 'a.db'}"
+    log = AuditLog(url, KEY)
+    try:
+        log.append(ev(request_id="r1"))
+        with log.connection() as c:
+            c.execute(text("DELETE FROM audit_event"))
+            c.execute(text("DELETE FROM audit_tombstone"))
+            c.execute(text("DELETE FROM audit_chain_head"))
+        assert log.verify_chain().ok, (
+            "this is the documented limit, not a fixable defect: a reader with no "
+            "external copy of the head cannot tell an emptied log from an empty one"
+        )
+    finally:
+        log.close()
+
+
+# -- Values in fields that should hold names ------------------------------------
+
+
+@pytest.mark.parametrize("field,value", [
+    ("redacted_field_names", ["MRN 4452819 belongs to John Smith, DOB 1961-04-02"]),
+    ("redacted_field_names", ["report_text for John Smith"]),
+    ("function", "draft for John Smith"),
+    ("policy_version", "medarx policy 1.0.0 for John Smith"),
+    ("request_id", "7f3c1a90 2b6e John Smith"),
+    ("input_hash", "the report said the patient was John Smith"),
+    ("approved_payload_hash", "h0"),
+])
+def test_a_value_where_a_name_belongs_is_refused(log, field, value):
+    with pytest.raises(ValueError) as ei:
+        log.append(ev(**{field: value}))
+    assert field in str(ei.value)
+    assert log.get("req-1") == []
+
+
+def test_a_reviewer_naming_a_person_is_refused(log):
+    approval = HumanApproval(decision="approved", recorded_at=NOW,
+                             reviewer="Dr John Smith")
+    with pytest.raises(ValueError):
+        log.append(ev(human_approval=approval))
+    assert log.get("req-1") == []
+
+
+def test_a_dotted_field_name_is_accepted(log):
+    # The gate is a shape, not a keyword list: `dicom_metadata.patient_id` is a
+    # field name and is exactly what this field is for.
+    log.append(ev(redacted_field_names=["report_text", "dicom_metadata.patient_id"]))
+    assert log.get("req-1")[0].redacted_field_names == [
+        "report_text", "dicom_metadata.patient_id"]
+
+
+# -- Stage and layer are different axes ----------------------------------------
+
+
+def test_an_approved_record_reached_every_stage(log):
+    # `layer` is absent when nothing refused it, which is the approved case.
+    stored = log.append(ev(final_disposition="approved"))
+    assert stored.layer is None
+    assert log.stages_for(stored) == DRAWER_STAGES
+
+
+def test_a_d2_block_reached_three_stages_and_no_model_request(log):
+    # Stage says how far it got; layer says who refused. A D.2 block never
+    # reached E or F, and neither axis is derivable from the other.
+    stored = log.append(ev(final_disposition="blocked", layer="D.2",
+                           approved_payload_hash=None,
+                           action_codes=["NER_UNRESOLVED"]))
+    assert stored.layer == "D.2"
+    assert log.stages_for(stored) == (
+        "Fields selected", "Pseudonymized", "Text screened")
+
+
+def test_the_request_surface_reached_no_stage_at_all(log):
+    stored = log.append(ev(final_disposition="blocked", layer="J",
+                           approved_payload_hash=None,
+                           action_codes=["ARBITRARY_DICOM_OBJECT_REJECTED"]))
+    assert log.stages_for(stored) == ()
+
+
+def test_the_layer_to_stage_map_is_derived_not_hand_written():
+    # One table, one direction of maintenance: an added D.4 has to be given a
+    # stage in `STAGE_COMPONENTS`, and the inverse follows without anyone
+    # remembering to update it.
+    assert LAYER_STAGE == {"A": "Fields selected", "C": "Pseudonymized",
+                           "D.1": "Text screened", "D.2": "Text screened",
+                           "D.3": "Payload validated", "E": "Policy decision",
+                           "F": "Model request"}
+    assert set(LAYER_STAGE) == set(LAYERS) - {"J"}
+    for stage, components in STAGE_COMPONENTS.items():
+        for layer in components:
+            assert LAYER_STAGE[layer] == stage
+
+
+def test_the_stages_projection_covers_every_layer_that_has_one():
+    covered = {stages_reached(layer) for layer in LAYERS}
+    assert () in covered, "J has no stage and must project to none"
+    assert PIPELINE_STAGES in covered, "an approved request reaches every stage"
+    for layer in LAYERS:
+        stages = stages_reached(layer)
+        assert list(stages) == list(PIPELINE_STAGES[: len(stages)]), (
+            f"{layer} projects a non-prefix of the pipeline: {stages}"
+        )
+
+
+def test_the_record_carries_a_layer_but_never_a_stored_stage(log):
+    # Nothing about the stage list is stored: the chain body is exactly the
+    # record's own fields, so adding the projection re-chains nothing.
+    stored = log.append(ev(layer="E", final_disposition="blocked",
+                           approved_payload_hash=None,
+                           action_codes=["UNKNOWN_POLICY_VERSION"]))
+    assert set(stored.model_dump()) == ALLOWED_AUDIT_FIELDS
+    assert "stages" not in stored.model_dump()
+    assert log.verify_chain().ok
+
+
+def test_a_layer_the_kernel_does_not_have_is_refused(log):
+    with pytest.raises(ValueError):
+        ev(layer="D")
+
+
+# -- Concurrency ----------------------------------------------------------------
+
+
+def test_concurrent_appends_do_not_fork_the_chain(tmp_path):
+    # A deferred transaction locks nothing until its first write and the head is
+    # *read* before the insert, so without serialisation two appends read the
+    # same head and the chain forks. The first round of this component claimed
+    # the opposite; the suite reproduced twenty forked records with no error.
+    log = AuditLog(f"sqlite:///{tmp_path / 'a.db'}", KEY)
+    errors: list[Exception] = []
+
+    def worker(n: int) -> None:
+        try:
+            for i in range(5):
+                log.append(ev(request_id=f"r{n}-{i}",
+                              timestamp=NOW + timedelta(seconds=n * 10 + i)))
+        except Exception as exc:  # noqa: BLE001 - the assertion is about the chain
+            errors.append(exc)
+
+    try:
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert not errors, errors
+        r = log.verify_chain()
+        assert r.ok and r.checked == 20, r
+    finally:
+        log.close()

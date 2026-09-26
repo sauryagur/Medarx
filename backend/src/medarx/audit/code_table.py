@@ -21,7 +21,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["CODE_TABLE", "PIPELINE_STAGES", "STAGE_COMPONENTS", "CodeEntry"]
+__all__ = [
+    "CODE_TABLE",
+    "LAYER_STAGE",
+    "PIPELINE_STAGES",
+    "STAGE_COMPONENTS",
+    "CodeEntry",
+    "stages_reached",
+]
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,47 @@ STAGE_COMPONENTS: dict[str, tuple[str, ...]] = {
     "Policy decision": ("E",),
     "Model request": ("F",),
 }
+
+
+def _layer_stage() -> dict[str, str]:
+    """The layer → stage map, *derived* from `STAGE_COMPONENTS` on every call.
+
+    Derived rather than written out because a hand-maintained copy is a second
+    table that can drift: a new D.4 would be added to `LAYERS` and to
+    `STAGE_COMPONENTS`, and an inverse written out separately would keep
+    answering for the old set. One table, one direction of maintenance.
+
+    A layer with no stage is `J`: the request surface refuses before anything
+    enters the pipeline, so no stage was ever behind the request.
+    """
+    mapping: dict[str, str] = {}
+    for stage in PIPELINE_STAGES:
+        for layer in STAGE_COMPONENTS[stage]:
+            mapping[layer] = stage
+    return mapping
+
+
+LAYER_STAGE: dict[str, str] = _layer_stage()
+
+
+def stages_reached(layer: str | None) -> tuple[str, ...]:
+    """The pipeline stages a record with blocking `layer` got through.
+
+    A *stage* answers "how far did it get" and a *layer* answers "who refused",
+    so neither is derivable from the other — but together one gives the other:
+    everything up to and including the stage that owns the blocking layer was
+    behind the request, and nothing after it was.
+
+    `None` means nothing refused it, so it got through all six. A layer with no
+    stage of its own (`J`) is the request surface, which refused before the
+    pipeline started: no stage was behind the request at all.
+    """
+    if layer is None:
+        return PIPELINE_STAGES
+    stage = LAYER_STAGE.get(layer)
+    if stage is None:
+        return ()
+    return PIPELINE_STAGES[: PIPELINE_STAGES.index(stage) + 1]
 
 
 #: The table. Ordered by layer, then by code, so it reads the way the pipeline

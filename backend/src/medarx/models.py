@@ -276,11 +276,14 @@ class AuditEvent(BaseModel):
       tamper-evidence inputs the contract describes as "hash chaining over
       appended records"; the contract describes that chaining but models no
       schema for it, because the storage schema is a Phase 1 decision.
-    - `chain_verified` is absent. The contract defines it as a result computed
-      on read, not a stored field.
+    - `chain_verified` and `stages` are absent. The contract defines both as
+      results computed on read, not stored fields: `stages` is the pipeline
+      prefix derived from `layer`, so nothing about it is persisted and no
+      already-chained record's digest changes.
 
     No field here can hold payload text: the event carries hashes, field
-    *names*, and codes only.
+    *names*, classifiers and codes only, and `medarx.audit.audit_log` holds the
+    free-form ones to a shape so a value cannot ride in on an allowlisted name.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -297,8 +300,27 @@ class AuditEvent(BaseModel):
     action_codes: list[str] = Field(default_factory=list)
     human_approval: HumanApproval | None = None
     final_disposition: FinalDisposition
+    layer: str | None = None
     chain_hash: str
     previous_hash: str
+
+    @field_validator("layer")
+    @classmethod
+    def _layer_is_a_known_layer(cls, layer: str | None) -> str | None:
+        """Refuse a layer tag the kernel does not have.
+
+        A *layer* answers "who refused"; a *stage* answers "how far did it get".
+        Neither is derivable from the other, so the record carries the one it can
+        know: a request that reached the model has no layer, and a request that
+        stopped at D.2 has one and stopped well short of the model. The set is
+        `LAYERS` — the closed set with no bare "D".
+        """
+        if layer is not None and layer not in LAYERS:
+            raise ValueError(
+                f"{layer!r} is not a kernel layer: expected one of "
+                f"{', '.join(LAYERS)}"
+            )
+        return layer
 
     @field_validator("action_codes")
     @classmethod

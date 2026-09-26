@@ -400,7 +400,10 @@ _AUDIT_STORAGE_ONLY_FIELDS: frozenset[str] = frozenset(
 
 #: Fields the contract's `AuditRecord` models that the stored event deliberately
 #: lacks, because the contract defines them as results computed on read.
-_AUDIT_COMPUTED_ON_READ: frozenset[str] = frozenset({"chain_verified"})
+#: `stages` joined `chain_verified` here when the `PipelineStage` enum was wired:
+#: both are projections, neither is stored, and neither enters the chain body —
+#: which is what keeps every already-chained record's digest unchanged.
+_AUDIT_COMPUTED_ON_READ: frozenset[str] = frozenset({"chain_verified", "stages"})
 
 
 def _contract_layer_tags() -> set[str]:

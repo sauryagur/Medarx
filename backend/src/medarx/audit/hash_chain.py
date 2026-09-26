@@ -43,9 +43,10 @@ from medarx.pseudonym.errors import AuditKeyRequired
 __all__ = [
     "GENESIS",
     "ChainReport",
-    "iso_utc",
+    "anchor_mac",
     "canonical",
     "chain_hash",
+    "iso_utc",
     "require_audit_key",
 ]
 
@@ -164,4 +165,26 @@ def chain_hash(record: Mapping[str, Any], previous_hash: str, key: str) -> str:
     body = {**record, "previous_hash": previous_hash}
     return hmac.new(
         require_audit_key(key).encode("utf-8"), canonical(body), hashlib.sha256
+    ).hexdigest()
+
+
+def anchor_mac(head_hash: str, row_count: int, key: str) -> str:
+    """The keyed digest of the chain head, so the anchor cannot be repointed.
+
+    A plain hash chain cannot see deletion at the tail: remove the last records
+    and the survivors are still internally consistent. The head anchor is what
+    says how far the chain went — and an *unkeyed* anchor is a value the same
+    adversary can rewrite, so a repointed anchor would restore a clean
+    verification. MACing it with the same key closes that: repointing the head
+    now requires the audit key, exactly as re-chaining a record does.
+
+    It does not close the case where the *entire* database is removed: a
+    reader with no external copy of the head cannot tell an empty log from a
+    deleted one. That is what external time-stamping is for, and the design
+    defers it to Phase 6.
+    """
+    return hmac.new(
+        require_audit_key(key).encode("utf-8"),
+        canonical({"head_hash": head_hash, "row_count": row_count}),
+        hashlib.sha256,
     ).hexdigest()

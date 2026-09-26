@@ -647,8 +647,18 @@ components:
       description: >-
         A non-raw disposition code from component G's action-code table. Codes classify what was
         done or refused; they never carry a raw value, so a block receipt is safe to log and return
-        in full. The set is an open enumeration at the schema level because G's table is the
-        authoritative source and is expected to grow; the values below are the ones Phase 1 emits.
+        in full.
+
+        The set is an open enumeration at the schema level because G's table is the authoritative
+        source and is expected to grow. The values below are **not** all emitted in Phase 1:
+        `ARBITRARY_DICOM_OBJECT_REJECTED`, `FREE_FORM_PROMPT_REJECTED`, `FUNCTION_NOT_PERMITTED` and
+        `UNAUTHORIZED_SCOPE` belong to the application API (component J), which is not written yet,
+        and `UNRESOLVED_DISPOSITION` is declared and deliberately unemitted because component E
+        blocks an unresolved disposition under the disposition's own code. Those five are *reserved*,
+        not implemented, and each is tracked as pending in
+        `backend/tests/test_contract_schemas.py::_NOT_YET_EMITTED`, which fails the moment the
+        package starts emitting one. A code published for a block the kernel cannot produce would be
+        a claim about behaviour, so this description does not make one.
       examples:
         - NER_UNRESOLVED
       enum:
@@ -681,16 +691,17 @@ components:
       type: string
       title: PipelineStage
       description: >-
-        A stage boundary of the privacy pipeline, in pipeline order. These are the boundaries the
-        audit log (component G) is partitioned into, and the stages the UI's privacy-details drawer
-        renders: `Fields selected` is component A's allowlisted extraction, `Pseudonymized` is
-        component C, `Text screened` is redaction layers 1 and 2, `Payload validated` is layer 3,
-        `Policy decision` is component E, and `Model request` is component F.
+        A stage boundary of the privacy pipeline, in pipeline order, and the stages the UI's
+        privacy-details drawer renders: `Fields selected` is component A's allowlisted extraction,
+        `Pseudonymized` is component C, `Text screened` is redaction layers 1 and 2, `Payload
+        validated` is layer 3, `Policy decision` is component E, and `Model request` is component F.
 
-        The set is closed and the order is part of the contract: a request either reached the model
-        or it did not, and the stages it reached are the ones recorded. It is published here rather
-        than derived from an implementation detail so that a later change to what the log records
-        is a change to a published vocabulary, not a rename of audit records that already exist.
+        The set is closed and the order is part of the contract. **No stage is stored.** A record
+        carries the `layer` that refused it, and `stages` on `AuditRecord` is derived from that at
+        read time: the prefix of this enumeration up to and including the stage owning the layer, and
+        all six when there is no layer because nothing refused the request. A stage says *how far a
+        request got*; a layer says *who refused it*; neither is derivable from the other, and the
+        readback publishes both.
 
         A stage name carries no value and no PHI: it says which boundary this is, never what passed
         through it.
@@ -1284,6 +1295,25 @@ components:
             database alone does not make a log immutable, so tamper evidence is verified on read
             rather than asserted.
           examples: [true]
+        layer:
+          oneOf:
+            - $ref: '#/components/schemas/Layer'
+            - type: 'null'
+          description: >-
+            The component that refused the request, or `null` when nothing refused it, which is the
+            approved case. A classifier with no value in it, and the only field on this schema from
+            which `stages` is derived.
+        stages:
+          type: array
+          readOnly: true
+          description: >-
+            The pipeline stages this request reached, derived at read time from `layer` and not
+            stored: the prefix of `PipelineStage` up to and including the stage owning that layer,
+            and all six when there is no layer. A request blocked at `D.2` reached three stages and
+            never reached `Policy decision` or `Model request`; deriving it is what keeps the two
+            from being able to disagree.
+          items:
+            $ref: '#/components/schemas/PipelineStage'
 
     HumanApprovalState:
       type: object

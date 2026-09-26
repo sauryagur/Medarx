@@ -3,9 +3,9 @@
 Phase 1 has two stores — the audit log (G) and the pseudonym mapping store (C) —
 and two places that create their own tables when they are missing. This command
 is what a deployment runs, so there is one thing to run and one thing to point
-at a database: it creates `audit_event`, `audit_chain_head`, `pseudonym_study`
-and `pseudonym_patient`, in whichever database URL it is given, and it is
-idempotent.
+at a database: it creates `audit_event`, `audit_tombstone`, `audit_chain_head`,
+`pseudonym_study` and `pseudonym_patient`, in whichever database URL it is
+given, and it is idempotent.
 
 **What it is not.** It is not a migration. It creates what is missing and
 leaves every existing table exactly as it is, so the versioned-DDL story for a
