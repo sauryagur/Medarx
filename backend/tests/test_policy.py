@@ -127,9 +127,14 @@ def test_each_rule_names_the_leading_code_the_contract_publishes_for_its_row():
     # `Rule.action_code` is one code per row, and a row names several
     # conditions and therefore several codes. It is the row's *leading* code:
     # the first of the codes the contract's own block example advertises for
-    # that row, which is a real code a block at that row can carry. This reads
-    # the contract rather than restating it, so an example that moved and a
-    # table that did not would fail here.
+    # that row. That it is a contract `ActionCode` member is what this asserts;
+    # that the kernel *emits* it is not asserted and is false for row 6, whose
+    # leading code is `UNRESOLVED_DISPOSITION` — component E deliberately does
+    # not emit that, because a block caused by an unresolved disposition is
+    # reported under the disposition's own code and the layer that raised it.
+    # Rows 1, 2 and 7 are the same shape for the same reason: those components
+    # are unwritten. This test reads the contract rather than restating it, so
+    # an example that moved and a table that did not would fail here.
     published: dict[str, tuple[str, ...]] = {
         layer: codes for _where, layer, codes in _example_receipts(_contract())
     }
