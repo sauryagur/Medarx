@@ -55,3 +55,47 @@ def test_authz_error_is_not_a_privacy_block():
     err = AuthzError("out of scope")
     assert not hasattr(err, "layer")
     assert not hasattr(err, "action_codes")
+
+
+def test_a_receipt_rejects_an_action_code_that_carries_a_digit_run():
+    # The prefix-plus-digits form is the one that got through before: a medical
+    # record number is digits, so a code that permits digits permits PHI wearing
+    # a classifier's clothes.
+    with pytest.raises(ValidationError):
+        BlockReceipt(request_id="req-1", layer="D.2", action_codes=["MRN4452819"],
+                     policy_version="medarx-policy-1.0.0")
+
+
+def test_a_receipt_rejects_a_code_with_a_trailing_newline():
+    # A newline inside a code that is logged is a log-injection primitive, and
+    # `$` in the pattern used to match before one.
+    with pytest.raises(ValidationError):
+        BlockReceipt(request_id="req-1", layer="D.2", action_codes=["NER_UNRESOLVED\n"],
+                     policy_version="medarx-policy-1.0.0")
+
+
+def test_a_receipt_accepts_a_real_contract_action_code():
+    # So the rejection tests cannot pass by rejecting everything: a genuine
+    # member of the contract's ActionCode enum still builds.
+    r = BlockReceipt(request_id="req-1", layer="D.3",
+                     action_codes=["LEFTOVER_PATTERN_MATCH", "UNSHIFTED_DATE"],
+                     policy_version="medarx-policy-1.0.0")
+    assert r.action_codes == ["LEFTOVER_PATTERN_MATCH", "UNSHIFTED_DATE"]
+
+
+def test_an_error_rejects_a_bare_d_layer():
+    # There is no bare "D": the three redaction layers are tagged individually.
+    # The base class is where that is enforced, so an error cannot be built
+    # carrying a layer tag the contract does not have.
+    with pytest.raises(ValueError):
+        PolicyError(action_codes=("UNRESOLVED_DISPOSITION",), layer="D")
+
+
+def test_an_error_rejects_an_action_code_that_carries_a_digit_run():
+    with pytest.raises(ValueError):
+        PolicyError(action_codes=("MRN4452819",))
+
+
+def test_a_well_formed_error_constructs():
+    err = PolicyError(action_codes=("UNKNOWN_POLICY_VERSION",), message="no such policy")
+    assert (err.layer, err.action_codes) == ("E", ("UNKNOWN_POLICY_VERSION",))

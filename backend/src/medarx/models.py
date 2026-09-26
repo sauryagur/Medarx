@@ -26,20 +26,28 @@ __all__ = [
     "HumanApproval",
     "ModelRequest",
     "ModelResponse",
+    "PolicyMode",
     "PriorStudyReference",
     "StructuredPayload",
     "canonical_hash",
 ]
 
-#: An action code classifies a refusal; it never carries what was refused. A
-#: code with a space, a digit run, or lowercase text is a raw value trying to
-#: become evidence, and the models that accept codes reject it.
-CODE_SHAPE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+#: An action code classifies a refusal; it never carries what was refused. The
+#: rule is deliberately the strictest one that admits every contract member:
+#: uppercase letters joined by single underscores, and **no digits at all** —
+#: a digit run is how a medical record number with a prefix ("MRN4452819")
+#: turns into evidence, and no classifier in the `ActionCode` enum needs one.
+#: `\A`…`\Z` rather than `^`…`$`, because `$` also matches before a trailing
+#: newline, and a newline inside a logged code is a log-injection primitive.
+CODE_SHAPE = re.compile(r"\A[A-Z]+(?:_[A-Z]+)*\Z")
 
 #: The complete closed set of layer tags, mirroring the `Layer` enum in
 #: contracts/openapi.yaml. There is no bare "D": the three redaction layers are
 #: tagged D.1, D.2, and D.3 individually.
 LAYERS = ("J", "A", "C", "D.1", "D.2", "D.3", "E", "F")
+
+#: The contract's `PolicyMode` enum. Fixed per deployment, never per request.
+PolicyMode = Literal["strict_local", "cloud", "authorized_local"]
 
 FinalDisposition = Literal[
     "approved",
@@ -65,12 +73,21 @@ def canonical_hash(value: Any) -> str:
 def check_codes(codes: list[str]) -> list[str]:
     """Reject any action code that is not a bare classifier.
 
-    A code carrying a space, a digit run, or lowercase text is a raw value
-    trying to become evidence, and every model that accepts codes runs this
-    check. Membership in the contract's `ActionCode` enum is enforced separately
-    by `tests/test_openapi_contract.py`; this is the structural half of the
-    rule, so a code that is not in the enum cannot reach a receipt even from
-    code written before the enum gained it.
+    A code carrying a space, a digit run, lowercase text, or a trailing newline
+    is a raw value trying to become evidence, and every model that accepts
+    codes runs this check on construction.
+
+    What that check is, precisely — the two halves of the rule live in different
+    places, and only one of them is here:
+
+    - **shape** is enforced at *runtime*, by this function, on every value that
+      reaches a receipt or an error;
+    - **membership** in the contract's `ActionCode` enum is enforced at *test
+      time*, by the AST sweep in `tests/test_openapi_contract.py`, and only
+      over statically declared emission sites.
+
+    So a code built dynamically at runtime is caught by neither. The shape rule
+    narrows that gap; it does not close it, and nothing here claims it does.
     """
     for code in codes:
         if not CODE_SHAPE.match(code):
@@ -168,12 +185,19 @@ class ModelRequest(BaseModel):
 
 
 class ModelResponse(BaseModel):
-    """A provider's reply, plus the raw provider body for capture and audit.
+    """A provider's reply, as the gateway sees it.
 
-    `raw` is the decoded provider JSON as received. It is the gateway's own
-    record of what came back, never an input to anything, and it is not part of
-    the API surface; the wire-facing response is the contract's `ModelResponse`
-    as nested in `ExecutionResponse`.
+    This class is **not** the contract's `ModelResponse` schema, despite the
+    shared name: the contract's is the API-facing object nested in
+    `ExecutionResponse` (`content`, `model_id`, `finish_reason`, `usage`), while
+    this one is the gateway-internal reply plus `raw`, the decoded provider body
+    kept for capture and audit. The name collision is deliberate for now —
+    renaming is a call for the owner, not a silent edit here — and this
+    docstring is the note meant to prevent a wrong import.
+
+    `raw` is unbounded by type: the only unvalidated field in the package.
+    Nothing reads it back into a request, and the gateway task should give it a
+    dedicated model when it lands.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -196,12 +220,21 @@ class HumanApproval(BaseModel):
 class AuditEvent(BaseModel):
     """One append-only audit record.
 
-    Field names match the contract's `AuditRecord` so the storage layer and the
-    readback layer cannot drift. No field here can hold payload text: the event
-    carries hashes, field *names*, and codes only. `chain_hash` and
-    `previous_hash` are the tamper-evidence inputs the contract describes as
-    "hash chaining over appended records"; `chain_verified` is not stored here
-    because the contract defines it as a result computed on read.
+    Every field the contract models in `AuditRecord` is named as the contract
+    names it, and `test_audit_event_names_match_the_contract_audit_record`
+    pins that intersection, so the storage layer and the readback layer cannot
+    drift on the shared names. The set is *not* an exact match in both
+    directions, and the differences are deliberate:
+
+    - `chain_hash` and `previous_hash` are additional. They are the
+      tamper-evidence inputs the contract describes as "hash chaining over
+      appended records"; the contract describes that chaining but models no
+      schema for it, because the storage schema is a Phase 1 decision.
+    - `chain_verified` is absent. The contract defines it as a result computed
+      on read, not a stored field.
+
+    No field here can hold payload text: the event carries hashes, field
+    *names*, and codes only.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -211,7 +244,7 @@ class AuditEvent(BaseModel):
     function: str
     selected_model: str | None = None
     policy_version: str
-    policy_mode: str | None = None
+    policy_mode: PolicyMode | None = None
     input_hash: str
     approved_payload_hash: str | None = None
     redacted_field_names: list[str] = Field(default_factory=list)

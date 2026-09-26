@@ -171,6 +171,18 @@ def test_contract_member_is_non_empty_upper_snake_case(code):
     assert code and code.replace("_", "").isupper(), f"malformed ActionCode member: {code!r}"
 
 
+#: Fields `AuditEvent` carries that the contract's `AuditRecord` does not
+#: model, each with the reason it is legitimate rather than a naming drift.
+#: Asserted by `test_audit_event_names_match_the_contract_audit_record`.
+_AUDIT_STORAGE_ONLY_FIELDS: frozenset[str] = frozenset(
+    {"chain_hash", "previous_hash"}
+)
+
+#: Fields the contract's `AuditRecord` models that the stored event deliberately
+#: lacks, because the contract defines them as results computed on read.
+_AUDIT_COMPUTED_ON_READ: frozenset[str] = frozenset({"chain_verified"})
+
+
 def _contract_layer_tags() -> set[str]:
     schema = _load_contract()["components"]["schemas"]["Layer"]
     return set(schema["enum"])
@@ -292,4 +304,47 @@ def test_the_code_layer_set_equals_the_contract_enum():
 def test_contract_layer_tag_is_non_empty_string(tag):
     assert isinstance(tag, str) and tag.strip() == tag and tag, (
         f"malformed Layer member: {tag!r}"
+    )
+
+
+def _audit_record_properties() -> set[str]:
+    schema = _load_contract()["components"]["schemas"]["AuditRecord"]
+    return set(schema["properties"])
+
+
+def test_audit_event_names_match_the_contract_audit_record():
+    """Pin the shared field names; do not pretend the two sets are identical.
+
+    `AuditEvent` is the storage-side event and the contract's `AuditRecord` is
+    the API-facing schema, so the sets differ by design: the event adds
+    `chain_hash` and `previous_hash` (tamper-evidence inputs the contract
+    describes but does not schema) and omits `chain_verified` (computed on
+    read). What must never drift is the naming of the fields both have — a
+    storage field called `model` behind a readback that expects `selected_model`
+    is a silent read-time miss, not an error.
+    """
+    from medarx.models import AuditEvent
+
+    event_fields = set(AuditEvent.model_fields)
+    contract_fields = _audit_record_properties()
+
+    shared = event_fields & contract_fields
+    assert shared, (
+        "the event and the contract schema share no field names; the "
+        "comparison below would be vacuous"
+    )
+    event_only = {
+        f for f in event_fields - contract_fields
+        if f not in _AUDIT_STORAGE_ONLY_FIELDS
+    }
+    assert not event_only, (
+        "AuditEvent carries fields the contract does not model and that are "
+        f"not declared storage-side: {sorted(event_only)}; declare them in "
+        "_AUDIT_STORAGE_ONLY_FIELDS with a reason, or rename them to the "
+        "contract's name"
+    )
+    assert not (contract_fields - event_fields - _AUDIT_COMPUTED_ON_READ), (
+        "the contract's AuditRecord models fields the stored event does not "
+        "have, other than those computed on read: "
+        f"{sorted(contract_fields - event_fields - _AUDIT_COMPUTED_ON_READ)}"
     )

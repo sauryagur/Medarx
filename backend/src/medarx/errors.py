@@ -1,11 +1,20 @@
 """The error taxonomy of the privacy kernel.
 
-Every fail-closed refusal is a `MedarxError`: it carries a `layer` drawn from
-the closed set {"J", "A", "C", "D.1", "D.2", "D.3", "E", "F"} (the `Layer` enum in
-`contracts/openapi.yaml`) and a non-empty tuple of `action_codes` that are
-members of the contract's `ActionCode` enum. Codes classify a refusal; they
-never carry a raw value, so an error built this way is safe to render into a
-block receipt and to log.
+Every fail-closed refusal is a `MedarxError`, and both of its payload fields are
+validated when it is constructed: `layer` must be a member of the closed set
+{"J", "A", "C", "D.1", "D.2", "D.3", "E", "F"} (the `Layer` enum in
+`contracts/openapi.yaml`; there is no bare "D"), and `action_codes` must be a
+non-empty tuple of classifier-shaped codes — uppercase words joined by single
+underscores, with no digits, spaces, or newlines. A code that fails that shape
+check is refused, so no error can be built carrying a value in a code.
+
+That is the guarantee, stated at its actual strength: the *shape* of a code is
+enforced here, at runtime, on every value. Whether a code is a *member* of the
+contract's `ActionCode` enum is enforced at test time by the AST sweep in
+`tests/test_openapi_contract.py`, and only over statically declared emission
+sites — a code assembled dynamically at runtime is checked for shape and for
+nothing else. An error built this way is safe to render into a block receipt
+and to log, subject to that one gap.
 
 `AuthzError` is deliberately **not** a `MedarxError`. An authorization failure
 returns 403 and a privacy block returns 422, and a caller must be able to tell
@@ -15,6 +24,8 @@ carries no `layer` and no `action_codes` to leak into a receipt.
 """
 
 from __future__ import annotations
+
+from medarx.models import LAYERS, check_codes
 
 __all__ = [
     "AuthzError",
@@ -34,8 +45,12 @@ class MedarxError(Exception):
     only where the layer tag is not fixed (redaction, which spans three).
 
     Attributes:
-        layer: closed-set layer tag, a member of the contract `Layer` enum.
-        action_codes: non-empty tuple of contract `ActionCode` values.
+        layer: a member of the closed layer set, checked on construction.
+        action_codes: non-empty tuple of classifier-shaped codes, also checked
+            on construction. This is what makes "safe to log" true at the
+            source: an error cannot be built carrying a bare "D" layer or a
+            code with a medical record number in it, so nothing downstream has
+            to be trusted to re-check what a caller constructed.
     """
 
     #: Closed-set layer tag for this refusal; see the `Layer` enum.
@@ -50,7 +65,15 @@ class MedarxError(Exception):
     ) -> None:
         if not action_codes:
             raise ValueError("action_codes must not be empty")
+        # Same authority as the receipt's `layer` Literal and the same check the
+        # receipt runs on its codes — one set, one rule, no second copy.
+        check_codes(list(action_codes))
         self.layer = self.LAYER if layer is None else layer
+        if self.layer not in LAYERS:
+            raise ValueError(
+                f"layer {self.layer!r} is not a member of the contract Layer enum "
+                f"{LAYERS}; there is no bare 'D' — the redaction layers are D.1, D.2, and D.3"
+            )
         self.action_codes = tuple(action_codes)
         self.message = message
         super().__init__(message or f"{self.layer}: {', '.join(self.action_codes)}")
