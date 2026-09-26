@@ -737,10 +737,10 @@ components:
         A DICOM `DA` (date) value: exactly eight digits, `YYYYMMDD`.
 
         **Not** ISO 8601. `format: date` in this document means `YYYY-MM-DD`, which is a different
-        string; component C accepts only the `DA` form, so a request carrying an ISO date reaches
-        redaction layer 3 as an unshiftable date and blocks with `UNSHIFTED_DATE` every time. The
-        `DA` form is used rather than the format so that the document says the thing the pipeline
-        actually enforces.
+        string. Component C accepts only the `DA` form, so a request carrying an ISO date is refused
+        there — layer `C`, `UNSHIFTED_DATE` — every time, and nothing reaches the model gateway.
+        The `DA` form is used rather than the format so that the document says the thing the
+        pipeline actually enforces.
 
         `pattern` states the shape only. Whether the eight digits name a real calendar day
         (`20260230` does not) is judged by the pipeline, which refuses rather than forwarding a

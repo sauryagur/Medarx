@@ -100,6 +100,12 @@ def pseudonymize_payload(
     carried through unchanged; `payload_hash` is left as it arrived (see the
     module docstring).
 
+    Raises `PseudonymError` with `MISSING_SURROGATE` when the patient, the
+    `study_ref`, or any entry in `prior_study_refs` is blank — the refusal
+    names the offending index; with
+    `SURROGATE_SHAPED_REFERENCE_REJECTED` when
+    any study reference already has the shape of a surrogate (a distinct
+    condition, not a missing one — see `_REJECTED_CODE`); and with
     `UNSHIFTED_DATE` when a date field holds something that is not a DICOM
     `YYYYMMDD` date. A blank date field is left as it is: there is no date
     there to leak or to shift.

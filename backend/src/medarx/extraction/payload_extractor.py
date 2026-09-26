@@ -70,11 +70,15 @@ _PRIOR_FIELDS: frozenset[str] = frozenset({"prior_report_text", "prior_study_dat
 #: as `MALFORMED_METADATA`.
 _AGE = re.compile(r"^(\d{3})([DWMY])$")
 
-#: How many months one unit is worth, used to bring every age onto one scale
-#: before it is banded. `D` and `W` are the mean lengths of a year and a month,
-#: because a DICOM `AS` value carries no calendar context to be exact against:
-#: `030D` can be read as "about a month" and no more precisely than that. `M`
-#: and `Y` are exact, since months and years are the units they are given in.
+#: How many months one unit is worth, used to bring every age onto a common
+#: scale before it is banded. `M` and `Y` are exact. `D` and `W` are not, and
+#: cannot be: an `AS` value carries no calendar, so 365 days and 52 weeks are
+#: the conventional year lengths and the conversion is a mean rather than date
+#: arithmetic. The measured cost of that: the same real age spelled in days and
+#: in the nearest whole weeks lands one month apart for 12 of 1000 day-values,
+#: and every one of those 12 is on a band boundary, where the two roundings
+#: fall either side. That is inherent to the VR. The alternative is not
+#: converting at all, which is how `030D` came to mean a 30-year-old.
 _MONTHS_PER_UNIT: dict[str, float] = {"D": 12 / 365, "W": 12 / 52, "M": 1, "Y": 12}
 
 #: The width of an infant band, in months, and the suffix that marks a band as
@@ -82,12 +86,13 @@ _MONTHS_PER_UNIT: dict[str, float] = {"D": 12 / 365, "W": 12 / 52, "M": 1, "Y": 
 _INFANT_BAND_MONTHS = 3
 _MONTH_BAND_SUFFIX = "M"
 
-#: Every age from here up shares one band. Not a compliance claim — Medarx does
-#: not assert HIPAA conformance — but the grouping is the standard reference
-#: implementation of age de-identification, and above ninety the ten-year band
-#: stops describing the population well: `100-109` is a band a real cohort
-#: barely populates, and it isolates a person who is genuinely unusual. One
-#: band, `090+`, and the boundary is exact.
+#: Every age from here up shares one band. A de-identification-strength
+#: choice, not a compliance claim — Medarx does not assert HIPAA conformance.
+#: Grouping is the standard reference implementation for the top of the age
+#: range, and what it buys here is stated plainly: ages 90 and over are ten
+#: distinguishable values in decade bands and one afterwards. Nothing below the
+#: cut changes, because the decade bands are already as coarse as this module
+#: goes anywhere.
 _OLDEST_BAND_LOW = 90
 _OLDEST_BAND = "090+"
 
@@ -101,15 +106,17 @@ def _age_band(value: str) -> str:
     age wrong by thirty years. So the value is first brought onto a common
     scale in months and only then banded.
 
-    **A sub-year age is banded in months, not in years.** `000-009` would place
-    a neonate, a 7-month-old and a 9-year-old in one bucket, which is both
-    clinically useless and no more private than the decade bands above it — the
-    privacy comes from *banding at all*, not from the width. So below one year
-    the band is `_INFANT_BAND_MONTHS` wide and carries a trailing `M`, which
-    keeps `003-005M` from being read as three-to-five *years*. This is a real
-    choice rather than a forced one: an alternative is to report every age
-    under ten in months, which is finer, and is rejected because it makes the
-    under-tens more identifiable than the adults without buying any privacy.
+    **A sub-year age is banded in months, not in years.** `000-009` would put a
+    neonate, a 7-month-old and a 9-year-old in one bucket. That is useless to
+    anything reading the payload, and it buys nothing in privacy, because
+    every other band is already a decade wide — narrowing the top of the range
+    to three months is what makes it a *different* band, not a safer one. So
+    below one year the band is `_INFANT_BAND_MONTHS` wide and carries a
+    trailing `M`, which keeps `003-005M` from being read as three-to-five
+    *years*. This is a choice, not a forced one: the alternative is to report
+    every age under ten in months, which is finer, and is rejected because it
+    makes the under-tens more distinguishable than the adults while leaving
+    them no less identifiable to anyone who already knows the age.
 
     **From one year up the band is a decade of years**, so `018M` — 18 months,
     one year and a half — lands in `000-009` alongside nine-year-olds. That

@@ -45,12 +45,11 @@ _UID_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
 #: real studies.
 _MAX_UID_LENGTH = 64
 
-
 #: The greatest number of nested levels *below* the top-level dataset that will
 #: be walked. Depth counts levels below the top: the top-level dataset is depth
 #: 0, a sequence item in it is depth 1, and an item found at depth 33 is refused.
-#: Real instances nest a handful of levels; the cap exists so that a pathological
-#: or hand-built structure is rejected rather than walked forever.
+#: Real instances nest a handful of levels; the cap exists so a pathological or
+#: hand-built structure is rejected rather than walked forever.
 _MAX_NESTING_DEPTH = 32
 
 
@@ -118,7 +117,7 @@ def make_uid(seed: str, root: str) -> str:
     dataset that warns on every read and is invalid on write.
     """
     if not root.endswith("."):
-        raise ValueError(f"root {root!r} must end in '.'")
+        raise ValueError(f"root {root!r} must end with '.'")
     return f"{root}{_derived_component(seed, root)}"
 
 
