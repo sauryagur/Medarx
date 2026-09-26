@@ -10,12 +10,11 @@ enforces conformance: it sweeps every action code emitted under
 
 ## Setup
 
-Run these four commands in order from this directory (`backend/`):
+Run these three commands in order from this directory (`backend/`):
 
 ```bash
 uv sync
 bash src/medarx/scripts/bootstrap_ner_model.sh
-MEDARX_AUDIT_KEY=... uv run python -m medarx.audit.schema_init
 uv run pytest
 ```
 
@@ -27,10 +26,16 @@ uv run pytest
    is not on PATH, and the `uv` shim intercepts the call with "No virtual
    environment found". It downloads the wheel and installs it with
    `uv pip install` instead.
-3. **`MEDARX_AUDIT_KEY=... uv run python -m medarx.audit.schema_init`** —
-   initialize the audit schema: the `audit_event`, `pseudonym_study` and
-   `pseudonym_patient` tables.
-4. **`uv run pytest`** — run the test suite.
+3. **`uv run pytest`** — run the test suite.
+
+There is no schema-initialisation step, and there does not need to be one.
+`MappingStore.__init__` creates its own tables, so component C is usable the
+moment the store is constructed. The audit store (component G) is a later task
+and has no module yet, so a command for it would only be a `ModuleNotFoundError`
+in the middle of a setup sequence.
+
+> `uv sync` prunes the manually-installed NER model, because the model is not a
+> declared dependency. If you run it after step 2, run step 2 again.
 
 > The virtual environment lives in `backend/.venv`, inside the project
 > directory — never under `/tmp`, because `/tmp` is a tmpfs and a venv there
@@ -127,20 +132,31 @@ representable calendar, which saturates at `date.max` / `date.min` rather than
 raising, and so loses the duration guarantee for that single date.
 
 `pseudonymize.pseudonymize_payload(payload, patient_ref, store)` is the entry
-point that applies the store to a `StructuredPayload`: it maps `study_ref` and
-every entry in `prior_study_refs` to surrogates, shifts `study_date` and
-`prior_study_date` by the one offset for that patient, and returns a copy. It
-**never touches `report_text`** — free text passes through byte-identical,
-because finding identifiers inside it is the redaction layers' job, not this
-one. It leaves `payload_hash` exactly as it arrived: that is component A's
-pre-redaction provenance value and layer 3 overwrites it.
+point that applies the store to a `StructuredPayload`: it records the patient,
+maps `study_ref` and every entry in `prior_study_refs` to surrogates, shifts
+`study_date` and `prior_study_date` by the one offset for that patient, and
+returns a copy. It **never touches `report_text`** — free text passes through
+byte-identical, because finding identifiers inside it is the redaction layers'
+job, not this one. It leaves `payload_hash` exactly as it arrived: that is
+component A's pre-redaction provenance value and layer 3 overwrites it.
+
+Recording the patient is not bookkeeping. `offset_for_patient` derives the shift
+and writes nothing, and `surrogate_for_patient` is the only method that writes
+the `pseudonym_patient` row, so without that call the shift applied to a
+payload would leave no record of which shift it was — the "explained later"
+claim above would not hold for any pseudonymized payload. A blank patient, a
+blank `study_ref`, and a blank entry in `prior_study_refs` are all refused with
+`MISSING_SURROGATE`, the last naming the offending index.
 
 **Call it once per payload.** It cannot tell whether a date it is handed has
 already been shifted, so a second application would shift every date again and
 return a payload whose intervals are silently wrong. Rather than let that pass,
 a study reference that already has the exact shape of a surrogate
-(`medarx-study-` plus 8 lowercase hex) is **refused** with `MISSING_SURROGATE`.
-That also closes an injection channel: `StudyContext.study_reference` is
+(`medarx-study-` plus 8 lowercase hex) is **refused** with
+`SURROGATE_SHAPED_REFERENCE_REJECTED` — deliberately *not* `MISSING_SURROGATE`,
+which the same module emits for a genuinely blank reference, so a receipt can
+always tell a missing surrogate from a pre-minted one. That also closes an
+injection channel: `StudyContext.study_reference` is
 caller-supplied, so a forged surrogate-shaped string would otherwise pass
 through unrecorded and be indistinguishable from a system-minted one. The
 check is anchored, so a legitimate reference that merely contains the domain —
