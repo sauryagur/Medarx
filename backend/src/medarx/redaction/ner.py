@@ -46,6 +46,7 @@ Six things here are load-bearing, and each is asserted in the tests:
 """
 
 import functools
+import threading
 from dataclasses import dataclass
 from typing import Callable
 
@@ -182,18 +183,43 @@ def build_engine():
     )
 
 
-@functools.lru_cache(maxsize=1)
+#: Serialises the first build. `functools.lru_cache` does **not** do this: its
+#: own documentation says the wrapped function "may be called more than once
+#: if another thread makes a call before the initial call has completed", so a
+#: decorator alone leaves the race open.
+_ENGINE_BUILD_LOCK = threading.Lock()
+
+
 def _shared_engine():
     """Return the process-wide engine, building it on first use.
 
-    `lru_cache` rather than a module global so the first call is atomic: two
-    threads racing here previously each built an engine and one was discarded,
-    costing a redundant ~2.9 s model load and a transiently doubled model
-    footprint. It was never a wrong answer — `AnalyzerEngine.analyze` holds no
-    mutable scan state — but the race costs one decorator to remove, and the
-    property is structural rather than something a timing-based test would
-    have to guess at.
+    **The lock is what makes the first call atomic, not the cache.** Two threads
+    racing here each used to build an engine and one was discarded, costing a
+    redundant ~2.9 s model load and a transiently doubled model footprint — the
+    exact moment the footprint is largest. It was never a wrong answer:
+    `AnalyzerEngine.analyze` holds no mutable scan state, so whichever engine a
+    caller got was equivalent. It was a cost, and it was paid on the first
+    concurrent burst, which is the first request burst of a deployment.
+
+    The lock is taken *outside* the cached call, which is what makes it work.
+    Inside it, the losers would queue behind the winner and then build anyway:
+    the cache is only populated once the wrapped call returns, so a thread that
+    arrived during the first build would find a miss on its own entry and call
+    `build_engine` a second time. Here the losers queue, and by the time they
+    are through the lock the value is cached, so they get it without building.
+
+    `lru_cache` rather than a module global for two reasons: it keeps the engine
+    out of module state that a test or a reload could rebind, and it gives
+    `cache_clear()`, which is how the suite resets the slot around the race
+    test without leaving the process holding a stub.
     """
+    with _ENGINE_BUILD_LOCK:
+        return _build_shared_engine()
+
+
+@functools.lru_cache(maxsize=1)
+def _build_shared_engine():
+    """The one permitted build. Callers go through `_shared_engine`."""
     return build_engine()
 
 

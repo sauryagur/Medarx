@@ -452,6 +452,62 @@ def test_scan_reuses_one_engine_rather_than_rebuilding_it():
     assert ner._shared_engine() is ner._shared_engine()
 
 
+#: How many threads race the first build. More than one is the point; a test
+#: that raced two would still catch a missing lock, and eight makes the
+#: redundancy obvious in the failure message.
+ENGINE_BUILD_THREADS = 8
+
+
+def test_concurrent_first_calls_build_the_engine_exactly_once():
+    # The regression. `functools` documents that an `lru_cache`d function "may
+    # be called more than once if another thread makes a call before the
+    # initial call has completed" — so the decorator alone did not make the
+    # first build atomic, and every thread that got in during the ~2.9 s spaCy
+    # load built its own engine and threw it away, doubling the model footprint
+    # at the exact moment it is largest. The docstring claimed otherwise.
+    #
+    # The stub sleeps, so a second thread can get in while the first is still
+    # inside the wrapped call: without a yield point the GIL alone would hide
+    # the race and the test would pass against the broken code.
+    import threading
+    import time
+
+    from medarx.redaction import ner
+
+    builds: list[int] = []
+    original = ner.build_engine
+    start = threading.Barrier(ENGINE_BUILD_THREADS)
+
+    def slow_build():
+        builds.append(1)
+        time.sleep(0.05)
+        return object()
+
+    ner._build_shared_engine.cache_clear()
+    ner.build_engine = slow_build
+    try:
+        results: list[object] = []
+
+        def first_call():
+            start.wait()
+            results.append(ner._shared_engine())
+
+        threads = [threading.Thread(target=first_call) for _ in range(ENGINE_BUILD_THREADS)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        ner.build_engine = original
+        ner._build_shared_engine.cache_clear()
+        # Repopulate with the real engine so the rest of the suite pays for
+        # this one load, not for a second one later.
+        ner._shared_engine()
+
+    assert len(builds) == 1, f"{len(builds)} engines were built for one cache slot"
+    assert len({id(result) for result in results}) == 1
+
+
 def test_mrn_is_detected_as_mrn_and_never_as_a_date():
     # Presidio's own `DATE_TIME` recognizer scores a bare seven-digit MRN at
     # 0.85, which redacts it as though it were a date. The custom recognizer
