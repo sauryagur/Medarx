@@ -1,6 +1,9 @@
+import warnings
+
 import pytest
 from pydicom.dataset import Dataset, FileDataset
 from pydicom.sequence import Sequence
+from pydicom.uid import UID
 
 from medarx.config import load_settings
 from medarx.deident.dicom_deidentifier import deidentify, make_uid
@@ -136,6 +139,100 @@ def test_surrogate_uids_are_deterministic_and_within_the_ps35_length_limit():
     assert first.startswith(ROOT)
     assert not first.startswith("2.25.")
     assert len(first) <= 64
+
+
+def test_the_sop_instance_uid_still_matches_its_file_meta_copy():
+    """PS3.10: the two hold the same value, so the two must stay the same value.
+
+    The fixture sets `SOPInstanceUID` and `file_meta.MediaStorageSOPInstanceUID`
+    to the same source UID, and the applier seeded its derivation on
+    `f"{keyword}:{value}"` — so each attribute got a *different* surrogate from
+    the same source, and a written file pointed at an instance the dataset no
+    longer contained. `profiles.py` gives cross-references resolving to the
+    same object as the reason the attribute is replaced rather than removed, so
+    this is the code contradicting its own stated rationale.
+    """
+    out, _ = deidentify(make_synthetic_dataset(), ROOT)
+    assert out.SOPInstanceUID == out.file_meta.MediaStorageSOPInstanceUID
+
+
+def test_two_attributes_holding_one_uid_get_one_surrogate():
+    """The general case behind the file meta copy: the seed is the value alone."""
+    ds = make_synthetic_dataset()
+    ds.SeriesInstanceUID = ds.StudyInstanceUID
+    out, _ = deidentify(ds, ROOT)
+    assert out.StudyInstanceUID == out.SeriesInstanceUID
+    assert out.StudyInstanceUID.startswith(ROOT)
+
+
+def test_different_source_uids_still_differ_after_de_identification():
+    """Seeding on the value must not collapse the mapping.
+
+    One seed per UID rather than one per (keyword, UID) pair is the fix for the
+    cross-reference break; the failure mode that fix invites is two distinct
+    source objects sharing a surrogate, which would be a worse privacy defect
+    than the one it repairs. So both halves are asserted.
+    """
+    ds = make_synthetic_dataset()
+    surrogates = {out for out in (
+        deidentify(make_synthetic_dataset(), ROOT)[0].StudyInstanceUID,
+        deidentify(make_synthetic_dataset(), ROOT)[0].SeriesInstanceUID,
+        deidentify(make_synthetic_dataset(), ROOT)[0].SOPInstanceUID,
+        deidentify(make_synthetic_dataset(), ROOT)[0].FrameOfReferenceUID,
+    )}
+    source = make_synthetic_dataset()
+    assert len({source.StudyInstanceUID, source.SeriesInstanceUID,
+                source.SOPInstanceUID, source.FrameOfReferenceUID}) == len(surrogates)
+
+
+#: How many surrogates `test_every_surrogate_uid_is_legal` derives. The
+#: derivation previously produced a component with a leading zero — which
+#: PS3.5 §9.1 forbids and pydicom warns on — for roughly one seed in ten, so a
+#: sample has to be large enough to hit that tenth. Measured at 116 in 1000
+#: with the previous derivation.
+_SAMPLE_SIZE = 1000
+
+
+def _illegal_components(uid: str) -> list[str]:
+    """The components of `uid` that PS3.5 §9.1 does not permit.
+
+    Only the first component is exempt from the leading-zero rule: it is the
+    one that identifies the org root, and a leading zero there would change
+    which organisation a UID appears to belong to.
+    """
+    return [
+        component
+        for index, component in enumerate(uid.split("."))
+        if not component.isdigit() or (index > 0 and len(component) > 1 and component[0] == "0")
+    ]
+
+
+def test_every_surrogate_uid_is_legal(_sample_size=_SAMPLE_SIZE):
+    """A thousand seeds, every one of them checked — a sample of three would
+    have missed a one-in-ten failure entirely, which is how it survived.
+
+    The width of the component is the whole defence: `uuid5(...).int %
+    10**36` is below `10**35` about a tenth of the time, and `zfill` then
+    padded the front with a zero to reach the 36 characters the 64-character
+    limit allows. The docstring said the bound existed to keep the UID legal;
+    this is the test that makes that sentence true.
+    """
+    uids = [make_uid(f"seed-{index}", ROOT) for index in range(_sample_size)]
+    illegal = {uid: _illegal_components(uid) for uid in uids if _illegal_components(uid)}
+    assert not illegal, f"{len(illegal)} of {_sample_size} surrogates are illegal: {list(illegal)[:3]}"
+    assert all(len(uid) <= 64 for uid in uids)
+
+
+def test_every_surrogate_uid_is_accepted_by_a_dicom_reader():
+    """The same sample read back by pydicom, which warns on an illegal `UI`.
+
+    A structural check and a reader's verdict are different evidence: this one
+    is what a downstream system would actually see when it opened the file.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for index in range(_SAMPLE_SIZE):
+            assert UID(make_uid(f"seed-{index}", ROOT)) is not None
 
 
 def _nested_dataset(levels_below_top: int) -> Dataset:

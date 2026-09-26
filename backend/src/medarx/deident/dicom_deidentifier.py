@@ -38,27 +38,42 @@ _UID_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
 
 #: PS3.5 caps a whole UID at 64 characters. A UUIDv5 renders as up to 39 decimal
 #: digits, which does not fit under a 28-character org root, so the derived
-#: value is reduced modulo the number of digits that remain rather than the full
-#: 128 bits being emitted. The cost of that reduction is ~10^35 distinct
+#: value is reduced to the number of digits that remain rather than the full
+#: 128 bits being emitted. The cost of that reduction is ~9x10^35 distinct
 #: surrogates rather than 2^128: ample for a synthetic conformance fixture, not
 #: for production. Revisit the derivation before this is used to de-identify
 #: real studies.
 _MAX_UID_LENGTH = 64
 
+
 #: The greatest number of nested levels *below* the top-level dataset that will
 #: be walked. Depth counts levels below the top: the top-level dataset is depth
 #: 0, a sequence item in it is depth 1, and an item found at depth 33 is refused.
-#: Real instances nest a handful of levels; the cap exists so a pathological or
-#: hand-built structure is rejected rather than walked forever.
+#: Real instances nest a handful of levels; the cap exists so that a pathological
+#: or hand-built structure is rejected rather than walked forever.
 _MAX_NESTING_DEPTH = 32
 
 
 def _derived_component(seed: str, root: str) -> str:
-    """A zero-padded decimal component that fits under `root` within 64 chars."""
+    """A decimal component of exactly the right width, under `root`, within 64.
+
+    **Width, not padding.** PS3.5 §9.1: a UID component is a run of decimal
+    digits, and one other than the first "shall not have a leading zero". A
+    value below `10**(budget-1)` is narrower than the budget, and zero-padding
+    it to width — which this used to do — is exactly the leading zero the
+    standard forbids: with a 28-character root, `uuid5(...).int % 10**36` lands
+    below `10**35` about one time in ten, and every one of those produced a UID
+    pydicom warns about on read. So the value is *shifted* into the legal range
+    rather than padded into an illegal one.
+
+    Nothing is given up by that. The range `[10**(budget-1), 10**budget)` is
+    `9 * 10**(budget-1)` values wide, so the component keeps the full `budget`
+    digits; only the leading digit is confined to 1-9, which is the rule.
+    """
     budget = _MAX_UID_LENGTH - len(root)
     if budget < 1:
         raise ValueError(f"root {root!r} leaves no room for a UID component")
-    return str(uuid.uuid5(_UID_NAMESPACE, seed).int % (10**budget)).zfill(budget)
+    return str(uuid.uuid5(_UID_NAMESPACE, seed).int % (9 * 10 ** (budget - 1)) + 10 ** (budget - 1))
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,17 +96,29 @@ def make_uid(seed: str, root: str) -> str:
 
     The result is `root` followed by a decimal component derived from a UUIDv5
     of `seed`, so it sits under the organisation's own OID arc and is
-    reproducible: the same seed and root always give the same UID, and two
-    different seeds do not collide. It is deliberately *not* the `2.25.` form —
-    that arc is for UUID-derived UIDs, and the org root is what identifies a
-    Medarx-de-identified instance to anyone downstream.
+    reproducible: the same seed and root always give the same UID. Distinct
+    seeds give distinct surrogates with overwhelming probability, not with
+    certainty — the component is a ~9x10^35 reduction of a 128-bit digest, so a
+    collision is possible in principle and improbable beyond counting. It is
+    deliberately *not* the `2.25.` form: that arc is for UUID-derived UIDs, and
+    the org root is what identifies a Medarx-de-identified instance to anyone
+    downstream.
+
+    **`seed` is the UID value and nothing else** — no attribute name, no
+    keyword. The same source UID in two attributes, or in the dataset and its
+    file meta, has to become the same surrogate, or the cross-references the
+    profile is remapping in order to preserve stop resolving: PS3.10 requires
+    `SOPInstanceUID` and `file_meta.MediaStorageSOPInstanceUID` to be equal, and
+    a written file whose file meta points at an instance the dataset does not
+    contain is broken. Keying on the value gives that for free; keying on the
+    attribute gave each copy its own surrogate and broke it.
 
     The component is bounded so the whole UID stays within the 64-character
     limit PS3.5 places on a UID; emitting an over-long UID would produce a
     dataset that warns on every read and is invalid on write.
     """
     if not root.endswith("."):
-        raise ValueError(f"root {root!r} must end with '.'")
+        raise ValueError(f"root {root!r} must end in '.'")
     return f"{root}{_derived_component(seed, root)}"
 
 
@@ -161,7 +188,7 @@ def _apply_rule(
         # re-deriving it would be what breaks idempotence.
         if str(current).startswith(root):
             return
-        setattr(container, keyword, make_uid(f"{keyword}:{current}", root))
+        setattr(container, keyword, make_uid(str(current), root))
         actions.append(DeidAction(tag=keyword, keyword=keyword, action="replace_uid"))
         return
 
