@@ -136,21 +136,25 @@ def test_the_sweep_actually_finds_emission_sites():
     it is a statement of where codes are emitted, not a liveness ping.
     """
     emitted = _emitted_action_codes()
-    assert emitted, (
-        "no action_codes emission sites were found under "
- f"{SOURCE_SOURCE}the sweep is broken"
-    )
     assert set(emitted) == EXPECTED_EMISSION_SITES, (
-        "the set of modules emitting action codes changed; update "
-        "EXPECTED_EMISSION_SITES deliberately. "
-        f"found={sorted(emitted)}"
+        "the set of modules emitting action codes does not match "
+        "EXPECTED_EMISSION_SITES. An empty result means the sweep stopped "
+        "finding emission sites and is broken — it would then pass silently "
+        "while an off-contract code shipped. A changed set means a site was "
+        "removed, renamed, or added and EXPECTED_EMISSION_SITES must be "
+        "updated deliberately. "
+        f"swept {SOURCE_ROOT.relative_to(REPO_ROOT)}; "
+        f"expected={sorted(EXPECTED_EMISSION_SITES)}; found={sorted(emitted)}"
     )
 
 
 def test_every_emitted_action_code_is_in_the_contract():
     contract_codes = _contract_action_codes()
     emitted = _emitted_action_codes()
-    assert emitted, "no emission sites found; the sweep is broken"
+    assert emitted, (
+        f"no action_codes emission sites were found under "
+        f"{SOURCE_ROOT.relative_to(REPO_ROOT)}; the sweep is broken"
+    )
     offenders = {
         source: sorted(set(codes) - contract_codes)
         for source, codes in emitted.items()
