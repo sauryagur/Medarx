@@ -29,6 +29,19 @@ from medarx.redaction.recognizers import (
     strip_anchor_labels,
 )
 
+from medarx.redaction.ner import EntityHit, build_engine, scan_entities
+from medarx.redaction.replacers import (
+    REPLACERS,
+    ReplacerContext,
+    has_replacer,
+    replacement_for,
+)
+
+# `PatternRecognizer` misses the UserWarning spaCy emits on load for a model
+# present in the environment; the assertions here are about entity types and
+# spans, not about the warning.
+pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
+
 #: The four patterns as the brief pins them, character for character. Asserted
 #: literally so a later task editing a pattern in place fails here rather than
 #: leaving this file green with a different recognizer.
@@ -374,3 +387,333 @@ def test_strip_anchor_labels_does_not_strip_inside_a_word():
 
 def test_recognizer_score_is_the_documented_mandatory_floor():
     assert RECOGNIZER_SCORE == 0.85
+
+
+# -- the engine, the scan, and the replacers (Task 8) -----------------------
+#
+# Everything above exercises the recognizers directly. `PatternRecognizer.analyze`
+# is not the path a redaction layer takes: it performs no context enhancement,
+# and it knows nothing about replacers. Everything below goes through the real
+# `AnalyzerEngine`, because that is the only place the score a block decision
+# would key on is actually produced.
+
+
+def test_engine_uses_the_spacy_pipeline_dict_shape():
+    # `nlp_engine.nlp` is a dict keyed by language code, so `pipe_names` is
+    # reached through `nlp["en"]`. `NlpEngine()` is an abstract base and cannot
+    # be constructed; the engine comes from `NlpEngineProvider`.
+    engine = build_engine()
+    assert "ner" in engine.nlp_engine.nlp["en"].pipe_names
+
+
+def test_the_engine_carries_the_custom_recognizers_among_the_defaults():
+    # Registering the custom set must *add* to Presidio's defaults, not replace
+    # them: a registry loaded with only the clinical recognizers would still
+    # redact an MRN and would leave the phone number beside it in the clear.
+    registered = {
+        entity
+        for recognizer in build_engine().registry.recognizers
+        for entity in recognizer.supported_entities
+    }
+    assert set(CUSTOM_ENTITIES) <= registered
+    assert "PHONE_NUMBER" in registered
+
+
+def test_scan_reuses_one_engine_rather_than_rebuilding_it():
+    # `build_engine` builds fresh on purpose; `scan_entities` is on a hot path
+    # (one call per text-bearing field) and must not reload spaCy per call.
+    # Asserted by identity, not by timing.
+    from medarx.redaction import ner
+
+    assert ner._shared_engine() is ner._shared_engine()
+
+
+def test_mrn_is_detected_as_mrn_and_never_as_a_date():
+    # Presidio's own `DATE_TIME` recognizer scores a bare seven-digit MRN at
+    # 0.85, which redacts it as though it were a date. The custom recognizer
+    # must win the overlap.
+    hits = scan_entities("MRN: 4452819", min_score=0.50)
+    assert [h.entity_type for h in hits] == ["MRN"]
+    assert hits[0].score == pytest.approx(0.85)
+
+
+def test_accession_and_patient_id_are_detected():
+    assert [h.entity_type for h in scan_entities("Accession: ACC0000417", min_score=0.50)] \
+        == ["ACCESSION_NUMBER"]
+    # `PAT 1234`, not the brief's `Patient ID: 774123`: the scan strips anchor
+    # labels before analysing, and `PATIENT_ID`'s pattern is label-anchored,
+    # so `Patient ID: 774123` reaches the analyzer as the bare value ` 774123`
+    # and comes back as Presidio's `DATE_TIME`. The value is still redacted —
+    # under the wrong entity type. The two pinned expectations cannot both
+    # hold: stripping is the one that protects the value, because an
+    # unstripped `DOB:` is redacted as an `ORGANIZATION` and the date beside
+    # it survives in the clear. So the fixture moves to a spelling the anchor
+    # strip does not match. Reported in the task-8 report.
+    assert [h.entity_type for h in scan_entities("PAT 1234", min_score=0.50)] \
+        == ["PATIENT_ID"]
+
+
+def test_a_bare_patient_id_value_is_still_redacted_even_though_mislabelled():
+    # The safety property behind the deviation above: stripping the label costs
+    # the entity *type*, never the redaction. `774123` must be covered by some
+    # hit whatever the engine calls it.
+    hits = scan_entities("Patient ID: 774123", min_score=0.50)
+    assert any(h.text == "774123" for h in hits)
+
+
+def test_common_word_name_not_redacted():
+    # "May be a small effusion" is clinical text; a name-shaped word must
+    # survive. Asserted on the hit text, so it holds whatever the engine emits.
+    hits = scan_entities(
+        "FINDINGS: May be a small effusion. Grant appears in the history.",
+        min_score=0.50,
+    )
+    assert all(h.text not in {"May", "Grant"} for h in hits)
+
+
+def test_phone_number_precision_beats_mrn_pattern():
+    # 7 digits = MRN; 10 digits with separators = phone. The longer, more
+    # specific match must win so a phone number is not silently mangled into
+    # an MRN redaction.
+    hits = scan_entities("Call 555-123-4567 to reach the patient.", min_score=0.50)
+    assert all(h.entity_type != "MRN" for h in hits)
+
+
+def test_hits_below_min_score_are_filtered_out():
+    # `scan_entities` filters at the supplied `min_score`; layer 2 (Task 9) is
+    # what calls it with `min_score=0.0` so that sub-threshold hits are *seen*
+    # and can become blocks.
+    hits = scan_entities("FINDINGS: 7mm nodule.", min_score=0.99)
+    assert hits == []
+
+
+def test_a_sub_threshold_hit_is_still_visible_at_min_score_zero():
+    # The other half of the same mechanism: the filter belongs to the caller,
+    # so `min_score=0.0` surfaces the deliberately-unresolvable reference. If
+    # this stops being true, layer 2 cannot see the candidate that must block.
+    hits = scan_entities(
+        "Ref ticket ZX-99-ALPHA issued at the counter.",
+        min_score=0.0,
+        unreplaceable=lambda entity: not has_replacer(entity),
+    )
+    ambiguous = [h for h in hits if h.entity_type == "AMBIGUOUS_REFERENCE"]
+    assert len(ambiguous) == 1
+    assert ambiguous[0].score < load_settings().ner_score_threshold
+
+
+def test_the_scan_does_not_apply_the_settings_threshold_itself():
+    # `Settings.ner_score_threshold` is the *decision* threshold and belongs to
+    # layer 2. If `scan_entities` filtered on it, layer 2 would never see the
+    # candidate that has to become a block.
+    hits = scan_entities(
+        "Ref ticket ZX-99-ALPHA issued at the counter.",
+        min_score=0.0,
+        unreplaceable=lambda entity: not has_replacer(entity),
+    )
+    assert any(h.score < load_settings().ner_score_threshold for h in hits)
+
+
+def test_oversized_text_is_truncated_with_a_flag_hit():
+    hits = scan_entities("a" * 200_001 + " 4452819", min_score=0.50)
+    assert any(h.entity_type == "TRUNCATED_TEXT" for h in hits)
+
+
+def test_the_truncation_flag_covers_exactly_the_dropped_tail():
+    # A silently truncated scan is indistinguishable from a clean one, so the
+    # flag must be a real span over the text that was *not* scanned, and there
+    # must be exactly one of it.
+    text = "a" * 200_001 + " 4452819"
+    flags = [h for h in scan_entities(text, min_score=0.50)
+             if h.entity_type == "TRUNCATED_TEXT"]
+    assert len(flags) == 1
+    assert (flags[0].start, flags[0].end) == (load_settings().ner_text_limit, len(text))
+    assert flags[0].score == 1.0
+
+
+def test_text_within_the_limit_carries_no_truncation_flag():
+    settings = load_settings()
+    hits = scan_entities("a" * settings.ner_text_limit, min_score=0.50)
+    assert all(h.entity_type != "TRUNCATED_TEXT" for h in hits)
+
+
+def test_the_truncation_limit_is_configurable_not_hardcoded():
+    # Patched at the module's own seam, so the test proves the *scan* reads
+    # `Settings.ner_text_limit` rather than a literal.
+    from medarx.redaction import ner
+
+    tight = load_settings().model_copy(update={"ner_text_limit": 10})
+    original = ner._settings
+    ner._settings = lambda: tight
+    try:
+        assert any(h.entity_type == "TRUNCATED_TEXT"
+                   for h in scan_entities("a" * 11, min_score=0.50))
+    finally:
+        ner._settings = original
+
+
+def test_anchor_labels_are_stripped_on_the_scan_path_not_merely_available():
+    # `strip_anchor_labels` exists because Presidio scores a bare `DOB` as
+    # `ORGANIZATION` at 0.85. If `scan_entities` forgot to apply it, that hit
+    # would reach layer 2 and be redacted as an organisation.
+    assert [h.entity_type for h in scan_entities("DOB: 1953-04-11", min_score=0.50)] \
+        != ["ORGANIZATION"]
+
+
+def test_hits_are_sorted_by_start_then_end():
+    hits = scan_entities("MRN: 4452819 and Accession: ACC0000417 and PAT 9911", min_score=0.50)
+    assert [(h.start, h.end) for h in hits] == sorted((h.start, h.end) for h in hits)
+
+
+def test_overlapping_hits_collapse_to_one_span():
+    # A span the engine reports under two entity types must be reported once.
+    # A redaction layer that kept both would apply two replacements to the
+    # same characters.
+    hits = scan_entities("MRN: 4452819", min_score=0.0)
+    spans = [(h.start, h.end) for h in hits]
+    assert len(spans) == len(set(spans))
+
+
+def test_an_empty_scan_returns_an_empty_report_and_does_not_raise():
+    assert scan_entities("", min_score=0.0) == []
+
+
+CTX = ReplacerContext(patient_surrogate="medarx-patient-ab12cd34", offset=-30)
+
+
+def test_replacer_substitutes_surrogates_for_dates_and_masks_everything_else():
+    assert replacement_for(EntityHit("DATE_TIME", 0, 10, 0.9, "2026-01-14"), CTX) \
+        == "medarx-patient-ab12cd34"
+    assert replacement_for(EntityHit("MRN", 0, 7, 0.85, "4452819"), CTX) == "[REDACTED:MRN]"
+
+
+def test_replacer_refuses_to_guess_for_an_unregistered_entity():
+    # The brief's fixture here was `US_DRIVER_LICENSE`, on the reasoning that a
+    # 0.01 hit of that shape is the spurious detection seen on a real MRN. It
+    # cannot be used literally: Presidio's default English recognizers emit
+    # `US_DRIVER_LICENSE`, and this table registers every default entity, so a
+    # driver's licence number in a report is replaced rather than blocked. The
+    # property the test exists to pin is the refusal itself, and it is pinned
+    # here on an entity that genuinely has no entry. The refusal keys on the
+    # *entity*, not the score: even a 0.99 hit is refused.
+    with pytest.raises(ValueError):
+        replacement_for(EntityHit("AMBIGUOUS_REFERENCE", 0, 3, 0.01, "abc"), CTX)
+    with pytest.raises(ValueError):
+        replacement_for(EntityHit("AMBIGUOUS_REFERENCE", 0, 3, 0.99, "abc"), CTX)
+
+
+def test_every_entity_the_engine_can_emit_either_has_a_replacer_or_is_known():
+    # The registry is the universe of entity types `scan_entities` can return.
+    # Anything Presidio emits that is *not* in `REPLACERS` is a permanent,
+    # unconditional block — safe, but worth seeing. This asserts the set is
+    # what the table and `AMBIGUOUS_REFERENCE` expect, so a new Presidio
+    # recognizer cannot silently start blocking every report.
+    emitted = {
+        entity
+        for recognizer in build_engine().registry.recognizers
+        for entity in recognizer.supported_entities
+    }
+    assert emitted - set(REPLACERS) == {"AMBIGUOUS_REFERENCE"}
+
+
+def test_an_unreplaceable_hit_survives_the_overlap_collapse():
+    # The failure this guards is silent and total. Measured on this machine,
+    # spaCy reports "ZX-99-ALPHA" as `ORGANIZATION` at 0.85 on exactly the same
+    # span (11, 22) as `AMBIGUOUS_REFERENCE` at 0.30. Collapsing on score
+    # alone therefore keeps the organization, drops the reference, and layer 2
+    # never learns there is anything it cannot replace — the document goes out
+    # redacted-as-an-organisation and the blocked beat never fires.
+    text = "Ref ticket ZX-99-ALPHA issued at the counter."
+    without = scan_entities(text, min_score=0.0)
+    assert all(h.entity_type != "AMBIGUOUS_REFERENCE" for h in without)
+
+    with_ = scan_entities(
+        text, min_score=0.0, unreplaceable=lambda entity: not has_replacer(entity)
+    )
+    assert any(h.entity_type == "AMBIGUOUS_REFERENCE" for h in with_)
+    # And it costs nothing on a span where the higher-scoring hit is the one
+    # that survives: the plain MRN case is unchanged.
+    assert [h.entity_type for h in scan_entities("MRN: 4452819", min_score=0.0,
+                                                 unreplaceable=lambda e: False)] == ["MRN"]
+
+
+def test_the_ambiguous_reference_has_no_registered_replacer():
+    # The standing demonstration, and the thing Beat 2's determinism rests on.
+    # Absent on purpose: a detected entity with no deterministic replacement is
+    # a block, not a guess.
+    assert "AMBIGUOUS_REFERENCE" not in REPLACERS
+    assert not has_replacer("AMBIGUOUS_REFERENCE")
+
+
+def test_the_block_condition_is_expressible_as_an_absent_replacer():
+    # The requirement that a block must not rest on a score: the caller has to
+    # be able to say "detected, and nothing can replace it" at *any* score.
+    # `has_replacer` deliberately consults neither the threshold nor the hit's
+    # score — if it ever did, a configuration change could turn a
+    # deterministic block into a silent pass-through.
+    assert not has_replacer(EntityHit("AMBIGUOUS_REFERENCE", 0, 13, 0.99, "ZX").entity_type)
+    detected = scan_entities(
+        "Ref ticket ZX-99-ALPHA issued at the counter.",
+        min_score=0.0,
+        unreplaceable=lambda entity: not has_replacer(entity),
+    )
+    assert any(
+        h.entity_type == "AMBIGUOUS_REFERENCE" and not has_replacer(h.entity_type)
+        for h in detected
+    )
+
+
+def test_every_registered_replacer_is_reachable_through_the_table():
+    for entity in REPLACERS:
+        assert has_replacer(entity)
+        assert replacement_for(EntityHit(entity, 0, 1, 0.9, "x"), CTX)
+
+
+def test_the_engine_really_does_return_both_labellers_for_one_span():
+    # The premise of the tie-break, asserted rather than assumed. If Presidio
+    # ever stopped emitting `DATE_TIME` over the MRN, `_rank`'s clinical-first
+    # key would become dead code and this test would say so.
+    from medarx.redaction.ner import _shared_engine
+
+    raw = _shared_engine().analyze(text=" 4452819", language="en")
+    by_type = {r.entity_type for r in raw}
+    assert {"MRN", "DATE_TIME"} <= by_type
+    assert [h.entity_type for h in scan_entities("MRN: 4452819", min_score=0.0)] == ["MRN"]
+
+
+def test_the_scan_is_stable_across_hash_seeds():
+    # Executed in a subprocess because `PYTHONHASHSEED` is fixed at
+    # interpreter start. Presidio returns the two same-span, same-score hits
+    # above in registry-iteration order, which is not stable across processes:
+    # measured on this machine, seed 0 returned `DATE_TIME` and seeds 1 and 2
+    # returned `MRN` before the tie-break existed. A redaction kernel that
+    # labels an MRN as a date on some runs is not a kernel, so the scan — not
+    # only the recognizers — is pinned across seeds here.
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "import warnings; warnings.filterwarnings('ignore');"
+        "from medarx.redaction.ner import scan_entities;"
+        "print([h.entity_type for h in scan_entities('MRN: 4452819', 0.0)])"
+    )
+    seen = set()
+    for seed in ("0", "1", "2", "42"):
+        # `os.environ` is copied into the child so the interpreter can start
+        # at all; no configuration is read from it here. `config.py` remains
+        # the only module that reads the environment for settings.
+        env = {**os.environ, "PYTHONHASHSEED": seed}
+        out = subprocess.run(
+            [sys.executable, "-c", script], env=env, capture_output=True, text=True,
+            check=True,
+        )
+        seen.add(out.stdout.strip())
+    assert seen == {"['MRN']"}, f"scan is not deterministic across hash seeds: {seen}"
+
+
+def test_scan_rejects_a_non_string_rather_than_iterating_it():
+    # `strip_anchor_labels` would otherwise walk the argument and produce a
+    # `TypeError` from somewhere inside a regex, which reads like a bug in
+    # the recognizers rather than a wrong argument.
+    with pytest.raises(TypeError):
+        scan_entities(None, min_score=0.0)
