@@ -46,7 +46,7 @@ from medarx.pseudonym.date_shift import shift_date
 from medarx.pseudonym.derivation import SURROGATE_HEX_CHARS
 from medarx.pseudonym.mapping_store import MappingStore
 
-__all__ = ["pseudonymize_payload"]
+__all__ = ["SURROGATE_SHAPE", "pseudonymize_payload", "shift_dicom_date"]
 
 #: The only payload fields that carry a date, named explicitly rather than
 #: matched by a suffix: a rule that shifted anything called `*_date` would
@@ -55,10 +55,14 @@ __all__ = ["pseudonymize_payload"]
 _DATE_FIELDS = ("study_date", "prior_study_date")
 
 #: The exact shape of a study surrogate: the study domain, then the number of
-#: hex characters `derivation.surrogate` keeps. Anchored by `fullmatch` at the
-#: call site, so a reference that merely *contains* the domain — a legitimate
-#: value such as `STU-medarx-study-1` — is not swept up by it.
-_SURROGATE_SHAPE = re.compile(
+#: hex characters `derivation.surrogate` keeps. Anchored by `fullmatch` at
+#: every call site, so a reference that merely *contains* the domain — a
+#: legitimate value such as `STU-medarx-study-1` — is not swept up by it.
+#:
+#: Public because the redaction layers must recognise exactly this shape when
+#: they check a reference, and a second copy of the expression would be free to
+#: drift from the one the store mints.
+SURROGATE_SHAPE = re.compile(
     rf"medarx-study-[0-9a-f]{{{SURROGATE_HEX_CHARS}}}",
 )
 
@@ -127,25 +131,43 @@ def pseudonymize_payload(
     )
 
 
+def shift_dicom_date(value: str, offset: int) -> str:
+    """`value`, a DICOM `DA` date, moved by `offset` days.
+
+    Raises `ValueError` when `value` is not exactly eight digits naming a real
+    calendar day, or when the shift runs off the end of the calendar. The
+    caller decides what that means: component C reports it as
+    `UNSHIFTED_DATE`, and redaction layer 1 reports it as a structured field
+    it cannot deterministically replace. One implementation, two reporting
+    policies — a second date parser in the redaction layer could disagree with
+    this one by a day, and a payload whose free-text dates and structured dates
+    disagree is a payload that has been silently corrupted.
+
+    A blank value is returned unchanged: there is no date there to shift, and
+    inventing one would put a date into a field the caller left empty.
+    """
+    if not value.strip():
+        return value
+    if len(value) != _DATE_LENGTH:
+        raise ValueError(f"not a DICOM date such as 20260114: {value!r}")
+    try:
+        parsed = date(int(value[0:4]), int(value[4:6]), int(value[6:8]))
+    except ValueError as exc:
+        raise ValueError(f"not a DICOM date such as 20260114: {value!r}") from exc
+    return shift_date(parsed, offset).strftime(_DATE_FORMAT)
+
+
 def _shift_field(key: str, value: str, offset: int) -> str:
     """`value` moved by `offset` days, if `key` is a date field."""
     if key not in _DATE_FIELDS:
         return value
-    if not value.strip():
-        return value
-    if len(value) != _DATE_LENGTH:
-        raise PseudonymError(
-            action_codes=("UNSHIFTED_DATE",),
-            message=f"{key!r} is not a DICOM date such as 20260114: {value!r}",
-        )
     try:
-        parsed = date(int(value[0:4]), int(value[4:6]), int(value[6:8]))
+        return shift_dicom_date(value, offset)
     except ValueError as exc:
         raise PseudonymError(
             action_codes=("UNSHIFTED_DATE",),
             message=f"{key!r} is not a DICOM date such as 20260114: {value!r}",
         ) from exc
-    return shift_date(parsed, offset).strftime(_DATE_FORMAT)
 
 
 def _refuse_if_surrogate_shaped(reference: str, where: str) -> None:
@@ -159,7 +181,7 @@ def _refuse_if_surrogate_shaped(reference: str, where: str) -> None:
     legitimate reference: the store mints exactly this shape and only this
     shape, and it will mint its own for any other value.
     """
-    if not _SURROGATE_SHAPE.fullmatch(reference):
+    if not SURROGATE_SHAPE.fullmatch(reference):
         return
     raise PseudonymError(
         action_codes=(_REJECTED_CODE,),

@@ -12,6 +12,7 @@ Presidio on this machine; they are executed facts, not intent.
 """
 
 import re
+from datetime import date
 
 import pytest
 from presidio_analyzer import Pattern, PatternRecognizer
@@ -661,10 +662,54 @@ def test_an_empty_scan_returns_an_empty_report_and_does_not_raise():
 CTX = ReplacerContext(patient_surrogate="medarx-patient-ab12cd34", offset=-30)
 
 
-def test_replacer_substitutes_surrogates_for_dates_and_masks_everything_else():
+def test_a_detected_date_is_shifted_by_the_patient_offset():
+    # The replacer shifts the date it was handed. It does not substitute the
+    # patient surrogate: one value cannot be the shifted form of every date in
+    # a text, and splicing a patient identifier in where a date stood both
+    # destroyed the interval and put an identifier into a clinical sentence.
+    # CTX's offset is -30, so 2026-01-14 becomes 2025-12-15.
     assert replacement_for(EntityHit("DATE_TIME", 0, 10, 0.9, "2026-01-14"), CTX) \
-        == "medarx-patient-ab12cd34"
+        == "2025-12-15"
     assert replacement_for(EntityHit("MRN", 0, 7, 0.85, "4452819"), CTX) == "[REDACTED:MRN]"
+
+
+def test_two_dates_in_one_text_keep_the_interval_between_them():
+    # The exact property the substitution destroyed. Before the fix both dates
+    # became the same patient identifier, so "on 2026-01-14, unchanged from
+    # 2025-12-01" redacted to two copies of one string and the 44-day interval
+    # was gone -- a redaction that passes every leak check while destroying the
+    # clinical fact the date shift exists to preserve.
+    a = replacement_for(EntityHit("DATE_TIME", 0, 10, 0.9, "2026-01-14"), CTX)
+    b = replacement_for(EntityHit("DATE_TIME", 0, 10, 0.9, "2025-12-01"), CTX)
+    assert a != b, "two different dates collapsed to one value"
+    assert (date(2026, 1, 14) - date(2025, 12, 1)).days == 44
+    assert (date.fromisoformat(a) - date.fromisoformat(b)).days == 44
+
+
+def test_a_shifted_date_is_written_back_in_the_format_it_arrived_in():
+    # A report mixes DICOM `DA` and ISO dates. Re-rendering every one of them
+    # as ISO would silently rewrite the clinical text around it, so the
+    # separator style and any time of day survive the shift.
+    assert replacement_for(EntityHit("DATE_TIME", 0, 8, 0.9, "20260114"), CTX) == "20251215"
+    assert replacement_for(EntityHit("DATE_TIME", 0, 10, 0.9, "2026-01-14"), CTX) \
+        == "2025-12-15"
+    assert replacement_for(
+        EntityHit("DATE_TIME", 0, 16, 0.9, "2026-01-14 10:30"), CTX
+    ) == "2025-12-15 10:30"
+
+
+def test_a_date_the_kernel_cannot_shift_is_refused_rather_than_guessed():
+    # `None` means "detected, and no safe replacement" -- the same condition
+    # an unregistered entity is in, expressed as a value rather than a
+    # missing table entry, so layer 2 has one mechanism and not two. Measured
+    # on this machine: Presidio reports the bare patient id "774123" as
+    # `DATE_TIME` at 0.85, a relative interval as "6 weeks" at 0.85, and
+    # "14 January 2026" at 0.85. Guessing a format for any of them produces a
+    # date that is wrong, which is data corruption that reads as a redaction.
+    assert replacement_for(EntityHit("DATE_TIME", 0, 6, 0.85, "774123"), CTX) is None
+    assert replacement_for(EntityHit("DATE_TIME", 0, 7, 0.85, "6 weeks"), CTX) is None
+    assert replacement_for(EntityHit("DATE_TIME", 0, 16, 0.85, "14 January 2026"), CTX) is None
+    assert replacement_for(EntityHit("DATE_TIME", 0, 10, 0.85, "2026-02-30"), CTX) is None
 
 
 def test_replacer_refuses_to_guess_for_an_unregistered_entity():
@@ -765,7 +810,12 @@ def test_the_block_condition_is_expressible_as_an_absent_replacer():
 def test_every_registered_replacer_is_reachable_through_the_table():
     for entity in REPLACERS:
         assert has_replacer(entity)
-        assert replacement_for(EntityHit(entity, 0, 1, 0.9, "x"), CTX)
+    # `DATE_TIME` is the one replacer that can decline: it needs a date it can
+    # shift, so a bare token is the wrong sample for it. A table whose entries
+    # are not reachable would let an entity look replaceable and block anyway.
+    for entity in REPLACERS:
+        sample = "2026-01-14" if entity == "DATE_TIME" else "x"
+        assert replacement_for(EntityHit(entity, 0, len(sample), 0.9, sample), CTX)
 
 
 def test_the_engine_really_does_return_both_labellers_for_one_span():
