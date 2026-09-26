@@ -1,0 +1,5 @@
+.venv/
+*.whl
+*.pcap
+capture/
+__pycache__/
