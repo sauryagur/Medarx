@@ -8,14 +8,16 @@ plus the fail-closed behaviour on an empty audit key.
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 from conftest import KEY  # noqa: F401  (the shared `store` fixture comes from conftest)
 from sqlalchemy import create_engine, insert, select
 from sqlalchemy.exc import IntegrityError
 
-from medarx.errors import MedarxError
+from medarx.errors import MedarxError, PseudonymError
+from medarx.models import StructuredPayload
 from medarx.pseudonym.date_shift import patient_offset, shift_date
 from medarx.pseudonym.derivation import audit_digest, surrogate
 from medarx.pseudonym.errors import AuditKeyRequired
@@ -26,6 +28,7 @@ from medarx.pseudonym.mapping_store import (
     _FILE_POOL_ARGS,
     _pool_args,
 )
+from medarx.pseudonym.pseudonymize import pseudonymize_payload
 
 STUDY_DOMAIN = "medarx-study"
 PATIENT_DOMAIN = "medarx-patient"
@@ -242,3 +245,196 @@ def _open(url: str) -> Iterator[MappingStore]:
         yield store
     finally:
         store.close()
+
+BASE = StructuredPayload(
+    function="draft",
+    report_text="FINDINGS: 7mm nodule. Patient 4452819.",
+    dicom_fields={
+        "modality": "CT",
+        "study_date": "20260114",
+        "patient_age_band": "040-049",
+    },
+    study_ref="STU-0001",
+    prior_study_refs=("STU-0000",),
+    policy_version="medarx-policy-1.0.0",
+    input_hash="h0",
+    payload_hash=None,
+)
+
+
+def test_references_become_surrogates_and_dates_shift(store):
+    out = pseudonymize_payload(BASE, "PAT-0001", store)
+    assert out.study_ref.startswith(STUDY_DOMAIN + "-")
+    assert all(r.startswith(STUDY_DOMAIN + "-") for r in out.prior_study_refs)
+    assert out.dicom_fields["study_date"] != "20260114"
+    assert out.dicom_fields["patient_age_band"] == "040-049"
+
+
+def test_no_raw_reference_survives_anywhere_in_the_payload(store):
+    out = pseudonymize_payload(BASE, "PAT-0001", store)
+    assert "STU-0001" not in out.study_ref
+    assert "STU-0000" not in out.prior_study_refs
+
+
+def test_surrogates_are_the_stores_own_for_those_references(store):
+    out = pseudonymize_payload(BASE, "PAT-0001", store)
+    assert out.study_ref == store.surrogate_for_study("STU-0001")
+    assert out.prior_study_refs == (store.surrogate_for_study("STU-0000"),)
+
+
+def test_dates_shift_by_exactly_the_patient_offset(store):
+    out = pseudonymize_payload(BASE, "PAT-0001", store)
+    offset = store.offset_for_patient("PAT-0001")
+    expected = (date(2026, 1, 14) + timedelta(days=offset)).strftime("%Y%m%d")
+    assert out.dicom_fields["study_date"] == expected
+
+
+def test_both_date_fields_shift_by_the_same_offset(store):
+    payload = BASE.model_copy(
+        update={
+            "dicom_fields": {
+                "study_date": "20260114",
+                "prior_study_date": "20250901",
+            }
+        }
+    )
+    out = pseudonymize_payload(payload, "PAT-0001", store)
+    offset = store.offset_for_patient("PAT-0001")
+    gap = (
+        date(2026, 1, 14) - date(2025, 9, 1)
+    ).days == (
+        _as_date(out.dicom_fields["study_date"]) - _as_date(out.dicom_fields["prior_study_date"])
+    ).days
+    assert gap, "the interval between a patient's two studies must survive the shift"
+    assert offset == store.offset_for_patient("PAT-0001")
+
+
+def test_free_text_passes_through_byte_identical(store):
+    out = pseudonymize_payload(BASE, "PAT-0001", store)
+    assert out.report_text == BASE.report_text
+    assert out.report_text.encode("utf-8") == BASE.report_text.encode("utf-8")
+
+
+def test_free_text_is_untouched_even_when_it_looks_like_a_reference(store):
+    # The composition is not a text scanner: a reference or a date inside the
+    # report is layer D's problem, and rewriting it here would alter clinical
+    # text on a rule nobody reviewed.
+    payload = BASE.model_copy(update={"report_text": "  Compared with 20260114 STU-0000.  "})
+    out = pseudonymize_payload(payload, "PAT-0001", store)
+    assert out.report_text == "  Compared with 20260114 STU-0000.  "
+
+
+def test_input_payload_is_not_mutated(store):
+    before = BASE.model_dump()
+    pseudonymize_payload(BASE, "PAT-0001", store)
+    assert BASE.model_dump() == before
+
+
+def test_result_does_not_alias_the_input_field_mapping(store):
+    out = pseudonymize_payload(BASE, "PAT-0001", store)
+    assert out.dicom_fields is not BASE.dicom_fields
+
+
+def test_input_hash_is_carried_through_and_payload_hash_is_left_alone(store):
+    payload = BASE.model_copy(update={"payload_hash": "pre-redaction"})
+    out = pseudonymize_payload(payload, "PAT-0001", store)
+    assert out.input_hash == payload.input_hash
+    # The pre-redaction hash is component A's provenance value; layer 3
+    # overwrites it. Recomputing it here could not agree with it.
+    assert out.payload_hash == "pre-redaction"
+
+
+def test_the_same_payload_and_patient_always_give_the_same_result(store):
+    once = pseudonymize_payload(BASE, "PAT-0001", store)
+    twice = pseudonymize_payload(BASE, "PAT-0001", store)
+    assert once.study_ref == twice.study_ref
+    assert once.prior_study_refs == twice.prior_study_refs
+    assert once.dicom_fields == twice.dicom_fields
+
+
+def test_a_surrogate_reference_is_not_mapped_a_second_time(store):
+    # Chaining must not mint a surrogate of a surrogate: the study would then
+    # have two identities, and nothing downstream could tell them apart.
+    once = pseudonymize_payload(BASE, "PAT-0001", store)
+    twice = pseudonymize_payload(once, "PAT-0001", store)
+    assert twice.study_ref == once.study_ref
+    assert twice.prior_study_refs == once.prior_study_refs
+
+
+def test_chaining_shifts_the_dates_again_by_the_same_offset(store):
+    # Pinned deliberately, not accepted quietly: the payload carries no record
+    # of a date having been shifted, so a second pass moves the date again.
+    # Callers must call this once per payload.
+    once = pseudonymize_payload(BASE, "PAT-0001", store)
+    twice = pseudonymize_payload(once, "PAT-0001", store)
+    offset = store.offset_for_patient("PAT-0001")
+    moved = _as_date(once.dicom_fields["study_date"])
+    again = moved + timedelta(days=offset)
+    assert twice.dicom_fields["study_date"] == again.strftime("%Y%m%d")
+
+
+def test_a_surrogate_shaped_source_reference_is_passed_through_unchanged(store):
+    # The documented trade-off of recognising surrogates: a source reference
+    # that already looks like a surrogate is left alone, so it is never
+    # recorded in the store and never gains a surrogate of its own.
+    payload = BASE.model_copy(update={"study_ref": STUDY_DOMAIN + "-deadbeef"})
+    out = pseudonymize_payload(payload, "PAT-0001", store)
+    assert out.study_ref == STUDY_DOMAIN + "-deadbeef"
+
+
+def test_pseudonymization_reads_no_environment():
+    import medarx.pseudonym.pseudonymize as module
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert "os.environ" not in source and "getenv" not in source
+
+def test_different_patients_get_different_dates_for_the_same_payload(store):
+    a = pseudonymize_payload(BASE, "PAT-0001", store)
+    b = pseudonymize_payload(BASE, "PAT-0002", store)
+    assert a.dicom_fields["study_date"] != b.dicom_fields["study_date"]
+
+
+@pytest.mark.parametrize("patient_ref", ["", " "])
+def test_empty_patient_ref_is_a_pseudonym_error(store, patient_ref):
+    with pytest.raises(PseudonymError) as ei:
+        pseudonymize_payload(BASE, patient_ref, store)
+    assert ei.value.action_codes == ("MISSING_SURROGATE",)
+    assert ei.value.layer == "C"
+
+
+def test_a_study_ref_that_cannot_be_surrogated_is_a_pseudonym_error(store):
+    with pytest.raises(PseudonymError) as ei:
+        pseudonymize_payload(BASE.model_copy(update={"study_ref": ""}), "PAT-0001", store)
+    assert ei.value.action_codes == ("MISSING_SURROGATE",)
+
+
+def test_a_date_that_cannot_be_shifted_is_refused_rather_than_passed_through(store):
+    payload = BASE.model_copy(update={"dicom_fields": {"study_date": "not-a-date"}})
+    with pytest.raises(PseudonymError) as ei:
+        pseudonymize_payload(payload, "PAT-0001", store)
+    assert ei.value.action_codes == ("UNSHIFTED_DATE",)
+
+
+def test_an_impossible_calendar_date_is_refused_rather_than_shifted(store):
+    payload = BASE.model_copy(update={"dicom_fields": {"study_date": "20260230"}})
+    with pytest.raises(PseudonymError):
+        pseudonymize_payload(payload, "PAT-0001", store)
+
+
+def test_a_blank_date_field_is_left_alone(store):
+    # There is no date here, so there is none to leak and none to shift.
+    payload = BASE.model_copy(update={"dicom_fields": {"study_date": ""}})
+    out = pseudonymize_payload(payload, "PAT-0001", store)
+    assert out.dicom_fields["study_date"] == ""
+
+
+def test_a_non_date_field_that_looks_like_a_date_is_not_shifted(store):
+    payload = BASE.model_copy(
+        update={"dicom_fields": {"study_date": "20260114", "patient_age_band": "040-049"}}
+    )
+    out = pseudonymize_payload(payload, "PAT-0001", store)
+    assert out.dicom_fields["patient_age_band"] == "040-049"
+
+
+def _as_date(value: str) -> date:
+    return date(int(value[:4]), int(value[4:6]), int(value[6:8]))

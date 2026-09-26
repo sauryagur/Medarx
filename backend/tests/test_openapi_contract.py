@@ -38,7 +38,10 @@ def _load_contract() -> dict:
 #: `test_the_sweep_actually_finds_emission_sites`, so the guard fails when
 #: coverage narrows or a new emitter appears, rather than on a count threshold.
 EXPECTED_EMISSION_SITES: frozenset[str] = frozenset(
-    {"backend/src/medarx/extraction/payload_extractor.py"}
+    {
+        "backend/src/medarx/extraction/payload_extractor.py",
+        "backend/src/medarx/pseudonym/pseudonymize.py",
+    }
 )
 
 
