@@ -27,7 +27,12 @@ packages = ["src/medarx"]
 
 [dependency-groups]
 dev = [
-    "jsonschema",
+    # `[format-nongpl]`: without it jsonschema's FORMAT_CHECKER silently
+    # accepts any `date-time` and any `uri`, so the contract's format
+    # assertions are unverified rather than violated — an invisible gap. The
+    # `nongpl` extra pulls `rfc3339-validator` / `rfc3986-validator` /
+    # `rfc3987-syntax`, not the GPL-licensed `rfc3987`.
+    "jsonschema[format-nongpl]",
     "pytest",
 ]
 

@@ -427,7 +427,7 @@ components:
                 status: blocked
                 request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
                 layer: D.3
-                action_codes: [CONTRACT_VIOLATION, HASH_MISMATCH]
+                action_codes: [UNSHIFTED_DATE, LEFTOVER_PATTERN_MATCH]
                 policy_version: ps315-baseline-v1
             policyEngineFailClosed:
               summary: >-

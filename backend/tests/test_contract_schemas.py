@@ -22,6 +22,15 @@ can shift. The metadata rule is one-way by design, because layer A's table also
 holds keywords that are deliberately not request-surface metadata (see
 `_DROPPED_ATTRIBUTES`); the date rule is one-way too, for a different reason
 that the test itself spells out.
+
+The examples are swept a second time for a different fault. Validating an
+example proves the *shape* is legal; it says nothing about whether the kernel
+can produce it, and a `Blocked` example is a claim about a receipt. A code
+stays in the `ActionCode` enum long after the condition it named stops being
+emitted, so the enum cannot make that claim true — the receipt sweep below
+resolves each published code through the AST emission sweep in
+`test_openapi_contract.py` instead. One example is additionally checked by
+running the layer that produces it, in `test_redaction_layers.py`.
 """
 
 from __future__ import annotations
@@ -38,6 +47,8 @@ from medarx.extraction.allowlists import ALLOWED_FIELDS
 from medarx.extraction.payload_extractor import KNOWN_DICOM_ATTRIBUTES, pipeline_for
 from medarx.extraction.study_context import StudyContext
 from medarx.pseudonym.pseudonymize import shift_dicom_date
+from test_openapi_contract import _emitted_action_codes
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = REPO_ROOT / "contracts" / "openapi.yaml"
@@ -102,9 +113,19 @@ def _validator_for(doc: dict, schema: dict, formats: bool = False) -> Draft20201
 
     The component table rides on the root document, so the contract's
     `#/components/schemas/...` refs resolve wherever they appear. `formats`
-    turns on `format` assertion, which is annotation-only by default: this
-    contract leans on `format: date` and `format: date-time` to say what a
-    value must look like, and a sweep that ignored them would not be reading it.
+    turns on `format` assertion, which is annotation-only by default, and
+    which asserts exactly as much as `Draft202012Validator.FORMAT_CHECKER`
+    can and no more.
+
+    This contract declares two formats, `date-time` and `uri`, and both are
+    enforced: the suite is installed with jsonschema's `[format-nongpl]`
+    extra, which supplies the checkers for them. Without that extra the
+    bundled checker is `['date', 'email', 'idn-email', 'idn-hostname', 'ipv4',
+    'ipv6', 'regex', 'uuid']` and *silently accepts* every `date-time` and
+    every `uri` — the contract's format assertions would then be decoration
+    that no test ever applies. `test_every_format_the_contract_declares_is_one_the_checker_enforces`
+    holds the declared set inside the checker's, so the next format added
+    without a checker behind it fails there rather than passing quietly here.
     """
     root = {"$ref": "#/__target__", "__target__": schema, "components": doc["components"]}
     return Draft202012Validator(
@@ -127,6 +148,83 @@ _FORMATS = {
     "date-time": "2026-01-14T09:30:00Z",
     "uri": "https://medarx.invalid/problems/example",
 }
+
+
+def _declared_formats(doc: dict) -> dict[str, list[str]]:
+    """Every `format` the contract declares anywhere, mapped to its sites."""
+    found: dict[str, list[str]] = {}
+
+    def walk(node: object, where: str) -> None:
+        if isinstance(node, dict):
+            name = node.get("format")
+            if isinstance(name, str):
+                found.setdefault(name, []).append(where)
+            for key, value in node.items():
+                walk(value, f"{where}.{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{where}[{index}]")
+
+    walk(doc, "root")
+    return found
+
+
+#: The formats this contract declares. Exact-set rather than containment: a
+#: new format has to be added here, and that is the moment to check a checker
+#: for it really exists and to re-read the claim in `_validator_for`'s
+#: docstring, rather than letting the format appear in the contract and in
+#: nobody's attention.
+_DECLARED_FORMATS = frozenset({"date-time", "uri"})
+
+
+def test_the_formats_this_contract_declares_are_the_ones_it_documents():
+    doc = _contract()
+    assert set(_declared_formats(doc)) == _DECLARED_FORMATS
+
+
+def test_the_format_declarations_the_sweep_reads_are_not_vacuous():
+    # The guard below is a subset assertion; if the walk stopped finding
+    # anything it would pass on an empty set and the five unenforced contract
+    # assertions this file exists to catch would be back. Measured at the
+    # time of writing: four `date-time` sites and one `uri` site.
+    declared = _declared_formats(_contract())
+    assert declared, "the format sweep found nothing; it is not reading the contract"
+    assert len(declared["date-time"]) + len(declared["uri"]) > 1
+
+
+def test_every_format_the_contract_declares_is_one_the_checker_enforces():
+    """The guard that makes an unenforceable format fail loudly.
+
+    A `format` with no checker registered is annotation: the value is ignored
+    and every one of them validates. The contract's assertions would then be
+    unverified rather than violated, which no validation test can report —
+    so the set of declared formats is held inside the checker's here.
+    """
+    declared = set(_declared_formats(_contract()))
+    unenforceable = declared - set(Draft202012Validator.FORMAT_CHECKER.checkers)
+    assert not unenforceable, (
+        f"the contract declares {sorted(unenforceable)} but "
+        "Draft202012Validator.FORMAT_CHECKER has no checker for it, so every "
+        "value passes and the declaration is unverified: install jsonschema's "
+        "[format-nongpl] extra, or drop the format and say what the value must be"
+    )
+
+
+def test_the_format_assertion_rejects_a_value_the_declared_format_forbids():
+    """Registration is not assertion; this checks the assertion bites.
+
+    The guard above can be satisfied by a checker that is present and inert.
+    This runs the same `_validator_for(..., formats=True)` the example sweep
+    uses, on a value of the shape the contract forbids, and requires the
+    rejection. Both formats are checked because they are the two the contract
+    declares.
+    """
+    doc = _contract()
+    for declared, bad in (("date-time", "14 January 2026 at half past nine"),
+                          ("uri", "definitely not a uri")):
+        schema = {"type": "string", "format": declared}
+        with pytest.raises(ValidationError):
+            _validator_for(doc, schema, formats=True).validate(bad)
 
 
 def _minimal(schema: dict, doc: dict) -> object:
@@ -282,6 +380,153 @@ def test_every_example_the_contract_publishes_validates_against_its_schema():
             _validator_for(doc, schema, formats=True).validate(value)
         except ValidationError as exc:
             pytest.fail(f"{where} publishes a value its own schema rejects: {exc.message}")
+
+
+# -- An example must describe a receipt the kernel can produce ----------------
+
+
+def _example_receipts(doc: dict) -> list[tuple[str, str, tuple[str, ...]]]:
+    """Every published example that is a block receipt: where, layer, codes.
+
+    A block receipt is the only shape the contract publishes that names both a
+    layer and a set of action codes, so the two sweeps below need nothing
+    else. The layer is read rather than assumed, because the question this
+    answers is which layer is being claimed to have produced which code.
+    """
+    found: list[tuple[str, str, tuple[str, ...]]] = []
+    for where, _schema, value in _published_examples(doc):
+        if isinstance(value, dict) and isinstance(value.get("action_codes"), list):
+            found.append((where, value.get("layer"), tuple(value["action_codes"])))
+    return found
+
+
+def test_every_action_code_a_published_example_names_is_a_contract_member():
+    """Membership: a typo in an example becomes a failure, not a receipt.
+
+    `CONTRACT_VIOLATION` remained in the `ActionCode` enum after layer 3
+    began emitting `UNSHIFTED_DATE` and `LEFTOVER_PATTERN_MATCH` for two of
+    its conditions, so an example naming the old codes kept validating while
+    describing a receipt the kernel cannot produce. Membership is necessary
+    and not sufficient; the next test is the sufficient half.
+    """
+    doc = _contract()
+    members = set(doc["components"]["schemas"]["ActionCode"]["enum"])
+    receipts = _example_receipts(doc)
+    assert receipts, "the receipt sweep found nothing; it is not reading the contract"
+    off_contract = {
+        where: sorted(set(codes) - members)
+        for where, _layer, codes in receipts
+        if set(codes) - members
+    }
+    assert not off_contract, (
+        f"examples name codes that are not ActionCode members: {off_contract}"
+    )
+
+
+#: The `(layer, code)` pairs a published example advertises for a layer the
+#: package has not written: the request-shape gate `J`, the policy engine `E`
+#: and the egress gateway `F` name codes that nothing emits, because the
+#: component that would emit them does not exist. Every other pair must be
+#: found by the AST emission sweep in `test_openapi_contract.py`.
+#:
+#: This is a list of pending implementation, not of tolerated failures, and
+#: `test_a_pending_pair_is_not_already_emitted` fails the moment one of them
+#: *is* emitted and left behind — the signal being to delete the entry, not to
+#: widen the exemption.
+_NOT_YET_EMITTED: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("J", "ARBITRARY_DICOM_OBJECT_REJECTED"),
+        ("J", "FREE_FORM_PROMPT_REJECTED"),
+        ("E", "UNRESOLVED_DISPOSITION"),
+        ("E", "UNKNOWN_POLICY_VERSION"),
+        ("E", "POLICY_CONFIG_ERROR"),
+        ("F", "PAYLOAD_MISMATCH"),
+        ("F", "UNKNOWN_MODEL"),
+    }
+)
+
+
+def test_every_action_code_a_published_example_shows_is_reachable_or_declared_pending():
+    """The reachability half: a legal code the kernel never emits is a lie.
+
+    A code in the `ActionCode` enum only has to be *legal*; nothing about the
+    enum says the kernel produces it, so an example is free to describe a
+    block that cannot happen. This is the weaker of the two readings of
+    "reachable" — it is static, resolving each code through the AST emission
+    sweep rather than by running the kernel and observing a receipt. The gap
+    that leaves is stated on `test_a_pending_pair_is_not_already_emitted` — a
+    code is matched against every emission site in the package rather than
+    against the layer that emitted it — and the example that was wrong is
+    closed by execution instead, in
+    `test_the_contract_publishes_a_d3_receipt_this_layer_actually_produces`
+    in `test_redaction_layers.py`.
+    """
+    emitted = {code for codes in _emitted_action_codes().values() for code in codes}
+    receipts = _example_receipts(_contract())
+    reachable = [
+        (where, layer, code)
+        for where, layer, codes in receipts
+        for code in codes
+        if code in emitted
+    ]
+    assert reachable, (
+        "no example code resolved to an emission site; the sweep is reading "
+        "nothing, so the assertion below would pass vacuously"
+    )
+    unreachable = {
+        f"{where} at {layer}": sorted(
+            {
+                code
+                for code in codes
+                if code not in emitted and (layer, code) not in _NOT_YET_EMITTED
+            }
+        )
+        for where, layer, codes in receipts
+        if any(
+            code not in emitted and (layer, code) not in _NOT_YET_EMITTED
+            for code in codes
+        )
+    }
+    assert not unreachable, (
+        f"examples show codes the kernel never emits, at layers it does "
+        f"implement: {unreachable}"
+    )
+
+
+def test_a_pending_pair_is_not_already_emitted():
+    """Keeps the exemption honest in the direction that matters.
+
+    The gap in the sweep above: a code is matched against the *union* of every
+    emission site in the package, not against the layer that emitted it. A
+    pending pair that the kernel has since started emitting is a stale entry,
+    and staleness is how an exemption quietly becomes a dumping ground.
+    """
+    emitted = {code for codes in _emitted_action_codes().values() for code in codes}
+    stale = sorted(
+        f"{layer}/{code}" for layer, code in _NOT_YET_EMITTED if code in emitted
+    )
+    assert not stale, (
+        f"{stale} are listed as pending implementation but the package emits "
+        "them; delete them from _NOT_YET_EMITTED so they are checked for reachability"
+    )
+
+
+def test_the_pending_pairs_are_exactly_the_ones_the_contract_actually_publishes():
+    """The exemption names pairs that exist, and omits none that are pending.
+
+    Equality in both directions against the contract, so the list cannot
+    quietly grow to cover a real failure: an entry that no example publishes
+    is dead, and a published pair that nothing emits must be listed or the
+    sweep above fails.
+ """
+    emitted = {code for codes in _emitted_action_codes().values() for code in codes}
+    published = {
+        (layer, code)
+        for _where, layer, codes in _example_receipts(_contract())
+        for code in codes
+        if code not in emitted
+    }
+    assert _NOT_YET_EMITTED == published
 
 
 # -- The contract and layer A must name the same things ------------------------

@@ -531,6 +531,40 @@ def test_layer3_rejects_a_leftover_deterministic_pattern(store, settings):
     assert [d.action_code for d in _unresolved(dispositions)] == ["LEFTOVER_PATTERN_MATCH"]
 
 
+def _blocked_example(name: str) -> dict:
+    """The `Blocked` response value the contract publishes under `name`."""
+    doc = yaml.safe_load(CONTRACT.read_text(encoding="utf-8"))
+    examples = doc["components"]["responses"]["Blocked"]["content"][
+        "application/json"
+    ]["examples"]
+    return examples[name]["value"]
+
+
+def test_the_contract_publishes_a_d3_receipt_this_layer_actually_produces(store, settings):
+    """The `contractViolation` example, run rather than read.
+
+    It carried `action_codes: [CONTRACT_VIOLATION, HASH_MISMATCH]` beneath a
+    summary naming "unshifted date, leftover pattern match", and it validated
+    throughout: `CONTRACT_VIOLATION` is still emitted, for the allowlist and
+    missing-field checks, and `HASH_MISMATCH` is still a legal enum member, so
+    no schema test could see that the example described a block the kernel
+    does not produce. So the example is checked here by building the payload
+    its summary describes — a study date still equal to the pre-shift value
+    and an MRN that the layer-1 patterns should have removed — and requiring
+    layer 3 to emit the published codes and no others.
+    """
+    example = _blocked_example("contractViolation")
+    payload, ctx = pseudonymized(f"{CLEAN} MRN: 4452819", store, settings)
+    tampered = payload.model_copy(
+        update={"dicom_fields": {**payload.dicom_fields, "study_date": "20260114"}}
+    )
+    _, dispositions = layer3_validation(tampered, ctx)
+    assert example["layer"] == "D.3"
+    assert {d.action_code for d in _unresolved(dispositions)} == set(
+        example["action_codes"]
+    )
+
+
 def test_layer3_accepts_a_payload_the_first_two_layers_have_approved(store, settings):
     # Run in order rather than on the raw pseudonymized payload: layer 3's job
     # is to check what the earlier layers *produced*, and the same payload
