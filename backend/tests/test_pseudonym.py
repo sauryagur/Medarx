@@ -343,6 +343,91 @@ def test_the_same_payload_and_patient_always_give_the_same_result(store):
 
 
 
+def test_the_patient_is_recorded_with_the_offset_that_was_applied(tmp_path):
+    # The regression. `pseudonymize_payload` asked the store for an *offset*,
+    # and `offset_for_patient` is a pure derivation that writes nothing. The one
+    # method that inserts a `pseudonym_patient` row is `surrogate_for_patient`,
+    # which nothing on this path called — so in the normal flow the table stayed
+    # empty, and the "shift recorded so the offset in force at a point in time
+    # can be explained later" that `PATIENT_TABLE` documents did not exist for
+    # any pseudonymized payload.
+    url = f"sqlite:///{tmp_path / 'map.db'}"
+    with _open(url) as store:
+        out = pseudonymize_payload(BASE, "PAT-0001", store)
+        applied = store.offset_for_patient("PAT-0001")
+    with create_engine(url).connect() as conn:
+        row = conn.execute(
+            select(PATIENT_TABLE.c.surrogate, PATIENT_TABLE.c.shift_offset).where(
+                PATIENT_TABLE.c.patient_ref == "PAT-0001"
+            )
+        ).one()
+    assert row.surrogate.startswith(PATIENT_DOMAIN + "-")
+    assert row.shift_offset == applied
+    # The recorded offset is the one the payload's dates were moved by, which
+    # is the whole point of recording it.
+    assert out.dicom_fields["study_date"] == (
+        date(2026, 1, 14) + timedelta(days=row.shift_offset)
+    ).strftime("%Y%m%d")
+
+
+def test_every_patient_a_payload_is_pseudonymized_for_gets_a_row(tmp_path):
+    # Two patients, two rows, and the table is not empty. Read straight from
+    # the database, as elsewhere: the store exposes no query.
+    url = f"sqlite:///{tmp_path / 'map.db'}"
+    with _open(url) as store:
+        pseudonymize_payload(BASE, "PAT-0001", store)
+        pseudonymize_payload(BASE, "PAT-0002", store)
+    with create_engine(url).connect() as conn:
+        recorded = conn.execute(
+            select(PATIENT_TABLE.c.patient_ref).order_by(PATIENT_TABLE.c.patient_ref)
+        ).scalars().all()
+    assert recorded == ["PAT-0001", "PAT-0002"]
+
+
+@pytest.mark.parametrize("blank", ["", " "])
+def test_a_blank_prior_study_reference_is_a_pseudonym_error(store, blank):
+    # A prior reference is a study reference, and the docstring already promises
+    # `MISSING_SURROGATE` for a blank one. Only `study_ref` was checked, so an
+    # empty prior reference reached `surrogate_for_study`, which raised a bare
+    # `ValueError` — no layer, no action code, so it could not become a receipt
+    # and surfaced as a 500. A whitespace-only one passed the check entirely and
+    # the store minted a surrogate for `" "`.
+    payload = BASE.model_copy(update={"prior_study_refs": (blank,)})
+    with pytest.raises(PseudonymError) as ei:
+        pseudonymize_payload(payload, "PAT-0001", store)
+    assert ei.value.action_codes == ("MISSING_SURROGATE",)
+    assert ei.value.layer == "C"
+    assert "prior_study_refs[0]" in ei.value.message
+
+
+def test_the_blank_prior_reference_refusal_names_the_offending_index(store):
+    payload = BASE.model_copy(
+        update={"prior_study_refs": ("STU-0000", "STU-0001B", "  ")}
+    )
+    with pytest.raises(PseudonymError) as ei:
+        pseudonymize_payload(payload, "PAT-0001", store)
+    assert "prior_study_refs[2]" in ei.value.message
+
+
+def test_a_blank_prior_reference_never_reaches_the_store(tmp_path):
+    # The store is the component that refuses a reference it cannot surrogate —
+    # but by then the caller has a bare `ValueError` rather than a
+    # `PseudonymError`, so the refusal has to happen before the call. Asserted
+    # on the row: a surrogate minted for whitespace would be a live, unbacked
+    # identity in the mapping store.
+    url = f"sqlite:///{tmp_path / 'map.db'}"
+    with _open(url) as store:
+        with pytest.raises(PseudonymError):
+            pseudonymize_payload(
+                BASE.model_copy(update={"prior_study_refs": (" ",)}), "PAT-0001", store
+            )
+    with create_engine(url).connect() as conn:
+        minted = conn.execute(
+            select(STUDY_TABLE.c.study_ref).where(STUDY_TABLE.c.study_ref.in_(["", " "]))
+        ).scalars().all()
+    assert minted == []
+
+
 @pytest.mark.parametrize(
     "reference",
     [

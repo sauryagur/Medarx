@@ -16,6 +16,13 @@ intervals and order between that patient's studies survive — except where
 single offset is why a patient with no reference is refused rather than given
 an invented one.
 
+The patient is recorded too, not only the studies. `store.surrogate_for_patient`
+writes the patient's surrogate and the shift offset in force for it in one row,
+and it is the only thing that writes that row: the offset this module applies
+comes from `offset_for_patient`, which derives the same value and stores
+nothing. So the recording is not bookkeeping added here — without the call, the
+shift applied to a payload would leave no trace of which shift it was.
+
 `payload_hash` is deliberately left exactly as it arrived. It is component A's
 pre-redaction provenance value; redaction transforms the payload in place
 downstream, so a hash computed here could not agree with it, and layer 3
@@ -30,7 +37,7 @@ store), so the same input always gives the same output, but it has no way to
 tell whether a date it is handed has already been shifted — nothing in
 `StructuredPayload` records that, and the model forbids extra fields. Rather
 than resolve that by documentation, it is resolved at runtime: a reference
-already shaped like a surrogate is refused (see `_SURROGATE_SHAPE`), so a
+already shaped like a surrogate is refused (see `SURROGATE_SHAPE`), so a
 second application fails loudly instead of double-shifting the dates and
 returning a payload whose clinical intervals are silently wrong.
 """
@@ -93,13 +100,20 @@ def pseudonymize_payload(
     carried through unchanged; `payload_hash` is left as it arrived (see the
     module docstring).
 
-    Raises `PseudonymError` with `MISSING_SURROGATE` when the patient or a
-    study reference is blank; with `SURROGATE_SHAPED_REFERENCE_REJECTED` when
-    any study reference already has the shape of a surrogate (a distinct
-    condition, not a missing one — see `_REJECTED_CODE`); and with
     `UNSHIFTED_DATE` when a date field holds something that is not a DICOM
     `YYYYMMDD` date. A blank date field is left as it is: there is no date
     there to leak or to shift.
+
+    **The patient is recorded before the offset is applied.** The surrogate for
+    `patient_ref` and the offset in force for it are written together, by
+    `surrogate_for_patient`, and that row is the only place the shift is
+    recorded — `offset_for_patient` is a pure derivation and writes nothing. So
+    a payload pseudonymized through this function and nothing else would leave
+    `pseudonym_patient` empty, and the "offset recorded so the shift in force
+    at a point in time can be explained later" that `PATIENT_TABLE` describes
+    would not exist for any of them. Recording first also means a refusal
+    later — an unshiftable date, a surrogate-shaped reference — cannot leave a
+    payload shifted with nothing to explain it.
     """
     if not patient_ref.strip():
         raise PseudonymError(
@@ -113,8 +127,24 @@ def pseudonymize_payload(
         )
     _refuse_if_surrogate_shaped(payload.study_ref, "study_ref")
     for position, ref in enumerate(payload.prior_study_refs):
-        _refuse_if_surrogate_shaped(ref, f"prior_study_refs[{position}]")
+        where = f"prior_study_refs[{position}]"
+        if not ref.strip():
+            # A prior reference is a study reference, so the same rule applies
+            # to it. Checked here rather than left to `surrogate_for_study`,
+            # which raises a bare `ValueError`: that carries no layer and no
+            # action code, so it cannot become a receipt and reaches the caller
+            # as a 500 instead of a 422 block. Whitespace counts as blank —
+            # `surrogate_for_study(" ")` would otherwise mint a live surrogate
+            # for a reference nobody supplied.
+            raise PseudonymError(
+                action_codes=("MISSING_SURROGATE",),
+                message=f"{where} is {ref!r}, and a prior study reference is required",
+            )
+        _refuse_if_surrogate_shaped(ref, where)
 
+    # Recorded before it is used, so the row and the applied shift are written
+    # by the same call path and cannot disagree.
+    store.surrogate_for_patient(patient_ref)
     offset = store.offset_for_patient(patient_ref)
     fields = {
         key: _shift_field(key, value, offset)
