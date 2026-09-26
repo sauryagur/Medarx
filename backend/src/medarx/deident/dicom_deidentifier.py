@@ -1,0 +1,162 @@
+"""The applier for the PS3.15 Basic Profile held in `profiles.PROFILE`.
+
+`deidentify()` is offline and test-suite-only. It is not on the request path:
+nothing in the privacy kernel's live pipeline imports it, and it exists so the
+de-identification rules can be exercised against a fixture and inspected.
+
+Three properties matter more than speed here:
+
+* **It never mutates its input.** It returns a deep copy, so a caller's
+  dataset is still theirs afterwards and the operation is re-runnable on the
+  original.
+* **It is idempotent.** A UID already under `root` is left alone, so running
+  the de-identifier twice produces the same dataset as running it once.
+* **It does not touch pixel data.** There is no rule for `PixelData` and no
+  branch that reaches it. Burned-in identifiers survive, which is exactly why
+  `CLEAN_PIXEL_DATA_IMPLEMENTED` is `False`.
+"""
+
+from __future__ import annotations
+
+import copy
+import uuid
+from dataclasses import dataclass
+from pydicom.dataset import Dataset
+from pydicom.sequence import Sequence
+
+from medarx.deident.profiles import PROFILE, Rule
+
+__all__ = ["DeidAction", "deidentify", "make_uid"]
+
+#: Fixed namespace for the surrogate UID derivation. A constant, so the same
+#: input UID yields the same surrogate on every machine and every run.
+_UID_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
+
+#: PS3.5 caps a whole UID at 64 characters. A UUIDv5 renders as up to 39 decimal
+#: digits, which does not fit under a 28-character org root, so the derived
+#: value is reduced modulo the number of digits that remain rather than the full
+#: 128 bits being emitted.
+_MAX_UID_LENGTH = 64
+
+
+def _derived_component(seed: str, root: str) -> str:
+    """A zero-padded decimal component that fits under `root` within 64 chars."""
+    budget = _MAX_UID_LENGTH - len(root)
+    if budget < 1:
+        raise ValueError(f"root {root!r} leaves no room for a UID component")
+    return str(uuid.uuid5(_UID_NAMESPACE, seed).int % (10**budget)).zfill(budget)
+
+
+@dataclass(frozen=True, slots=True)
+class DeidAction:
+    """One applied rule.
+
+    `tag` carries the DICOM *keyword* rather than a `(gggg, xxxx)` tag number,
+    because a keyword is what a profile table, a conformance report, and a human
+    reading a diff can all use. `action` is one of the three kinds in
+    `profiles.Rule`.
+    """
+
+    tag: str
+    keyword: str
+    action: str
+
+
+def make_uid(seed: str, root: str) -> str:
+    """Derive a deterministic surrogate UID for `seed` under `root`.
+
+    The result is `root` followed by a decimal component derived from a UUIDv5
+    of `seed`, so it sits under the organisation's own OID arc and is
+    reproducible: the same seed and root always give the same UID, and two
+    different seeds do not collide. It is deliberately *not* the `2.25.` form —
+    that arc is for UUID-derived UIDs, and the org root is what identifies a
+    Medarx-de-identified instance to anyone downstream.
+
+    The component is bounded so the whole UID stays within the 64-character
+    limit PS3.5 places on a UID; emitting an over-long UID would produce a
+    dataset that warns on every read and is invalid on write.
+    """
+    if not root.endswith("."):
+        raise ValueError(f"root {root!r} must end with '.'")
+    return f"{root}{_derived_component(seed, root)}"
+
+
+def _copy(dataset: Dataset) -> Dataset:
+    """A deep copy, file meta and nested sequence items included.
+
+    A shallow copy is not enough: the profile is applied to sequence items one
+    level down, and a shared `Sequence` would let that edit write through into
+    the caller's dataset.
+    """
+    return copy.deepcopy(dataset)
+
+
+def _apply_to_dataset(
+    dataset: Dataset, root: str, actions: list[DeidAction]
+) -> None:
+    """Apply the profile to `dataset` in place. `dataset` is always a copy."""
+    for keyword, rule in PROFILE.items():
+        if keyword not in dataset:
+            continue
+        _apply_rule(dataset, keyword, rule, root, actions)
+        # Sequence items can carry the same attributes one level down, and a
+        # rule that stopped at the top level would leave those in the clear.
+        for item in getattr(dataset, keyword, []) or []:
+            if isinstance(item, Dataset):
+                _apply_to_dataset(item, root, actions)
+
+
+def _apply_rule(
+    container: Dataset, keyword: str, rule: Rule, root: str, actions: list[DeidAction]
+) -> None:
+    if rule.action == "remove":
+        del container[keyword]
+        actions.append(DeidAction(tag=keyword, keyword=keyword, action="remove"))
+        return
+
+    if rule.action == "empty":
+        if rule.vr == "SQ":
+            container[keyword].value = Sequence()
+        else:
+            setattr(container, keyword, "")
+        actions.append(DeidAction(tag=keyword, keyword=keyword, action="empty"))
+        return
+
+    if rule.action == "replace_uid":
+        current = getattr(container, keyword, None)
+        if not current:
+            return
+        # Already under our root: this is a surrogate we produced, and
+        # re-deriving it would be what breaks idempotence.
+        if str(current).startswith(root):
+            return
+        setattr(container, keyword, make_uid(f"{keyword}:{current}", root))
+        actions.append(DeidAction(tag=keyword, keyword=keyword, action="replace_uid"))
+        return
+
+    raise ValueError(f"unknown profile action: {rule.action!r}")  # pragma: no cover
+
+
+def deidentify(ds: Dataset, root: str) -> tuple[Dataset, list[DeidAction]]:
+    """Return a de-identified copy of `ds` and the actions applied to get it.
+
+    `root` is `Settings.dicom_uid_root`, passed in by the caller rather than
+    read from a global, so the dependency on the configuration is explicit and
+    the function is testable against any root. `ds` is not modified. Pixel data
+    is not read, rewritten, or claimed to be free of burned-in identifiers.
+    """
+    out = _copy(ds)
+    actions: list[DeidAction] = []
+    _apply_to_dataset(out, root, actions)
+
+    # MediaStorageSOPInstanceUID lives in the file meta, not the dataset. It is
+    # a UID and it is in the profile, so it has to be remapped there too or a
+    # written file points back at the original instance.
+    file_meta = getattr(out, "file_meta", None)
+    if file_meta is not None and "MediaStorageSOPInstanceUID" in file_meta:
+        _apply_rule(
+            file_meta, "MediaStorageSOPInstanceUID", PROFILE["MediaStorageSOPInstanceUID"],
+            root, actions,
+        )
+
+    return out, actions
