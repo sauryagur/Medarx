@@ -331,13 +331,38 @@ two-observer agreement check would have **passed and certified the leak**. An
 evidence mechanism that cannot fail on the failure it exists to detect is worse
 than no evidence.
 
-`ApprovedSend` is constructible only with this module's private `_ISSUED`
-sentinel, and a test asserts by AST sweep that the name is referenced nowhere
-else under `backend/src/medarx/`. Python has no access control, so that is the
-strongest enforcement the language offers rather than a guarantee; it is the
-same standard this package already accepts for `ALLOWED_MODELS` and the
-module-level action-code constants, and strictly stronger than a comment asking
-a caller to do the right thing.
+`ApprovedSend` is minted only by the module-private `_issue`, which stamps this
+module's private `_ISSUED` sentinel. A test asserts by AST sweep that the name
+is referenced in no other file under `backend/src/medarx/` — that is exactly
+what it proves, and it is not more: the sweep looks at one name, so it rules
+out another *module* quietly acquiring the authority to authorise a send, and
+it says nothing about routes that do not name it. Python has no access control,
+so the sentinel is the strongest enforcement the language offers rather than a
+guarantee; it is the same standard this package already accepts for
+`ALLOWED_MODELS` and the module-level action-code constants, and strictly
+stronger than a comment asking a caller to do the right thing.
+
+**A frozen dataclass was not sufficient, and the gap was found by running the
+bypass.** With the sentinel as an ordinary `init` field, `dataclasses.replace`
+copied it onto a new instance: a substituted request went on the wire,
+`last_request_body()` reported the substituted bytes, and the two observers
+would have agreed — the same failure, reached through a plain library call with
+no private name involved. `copy.copy`, `copy.deepcopy` and `pickle` each did
+the same, since all three bypass `__init__`. So `_issued` is `init=False` and
+set by the private mint path, and all four routes raise. Each is a test.
+
+**What the token guarantees, and what it does not.** It guarantees that `send`
+transmits the bytes built and encoded during verification, that
+`last_request_body()` returns that same object, that a request never passed to
+the verifier cannot be sent at all, and that a token cannot be re-pointed
+afterwards by any ordinary library operation. It does **not** guarantee that
+the request was derived from the approved payload — no component defines that
+derivation, and building the messages is the orchestrator's job — nor that a
+caller holding a genuine token is stopped from rewriting it with
+`object.__setattr__`, which Python cannot prevent. The second limit is measured
+rather than asserted. A caller who reaches that far can equally call
+`gw._client.post` directly; the token defends against the ordinary mistake and
+against plain-library manipulation, not against an adversary inside the process.
 
 **The composition root sequences the pair.** `build_pipeline` (Task 15) calls
 `verify_approved_payload(...)` and passes the result straight to

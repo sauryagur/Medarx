@@ -27,6 +27,16 @@ unverified send is unrepresentable, the request is bound to the verification
 that covered it, and the verification cannot be skipped because `send` has
 nothing else to take.
 
+**A frozen dataclass was not enough, and that was found by running the
+bypass.** With the sentinel as an ordinary `init` field, `dataclasses.replace`
+copied it onto a new instance and a substituted request went on the wire with
+`last_request_body` reporting the substituted bytes — the same failure, through
+a plain library call and no private name. `copy.copy`, `copy.deepcopy` and
+`pickle` each did the same, because all three bypass `__init__`. So the token
+is `init=False` plus a private mint path, and all four clone routes raise.
+`ApprovedSend` states both what that guarantees and what Python cannot make
+guaranteed.
+
 **The bytes are the evidence, and they are fixed at authorisation.** The body
 is built and encoded once, inside the verifier, and the resulting `bytes` are
 what go on the wire *and* what `last_request_body()` returns. Nothing
@@ -134,49 +144,81 @@ def _model_id_of(raw: Any) -> str:
     return model_id if isinstance(model_id, str) else ""
 
 
-#: The only value that lets an `ApprovedSend` be constructed. It is
-#: module-private, and `tests/test_gateway.py` asserts by AST sweep that the
-#: name is referenced nowhere else under `backend/src/medarx/`, so the token
-#: cannot be minted outside this module.
+#: The only value that lets an `ApprovedSend` be constructed, and the only
+#: object `_issue` stamps one with. Module-private.
 #:
 #: **What that is worth, stated honestly.** Python has no access control, so a
-#: determined caller can reach a module-private name — this is the strongest
-#: enforcement the language offers, not a guarantee. It is the same standard
+#: determined caller can reach a module-private name. This is the strongest
+#: enforcement the language offers, not a guarantee: it is the same standard
 #: this package already accepts for `ALLOWED_MODELS` and for the module-level
-#: action-code constants, and it is strictly stronger than a comment or a
-#: docstring asking a caller to do the right thing.
+#: action-code constants, and strictly stronger than a comment. See `_issue`
+#: for exactly what it rules out, and `ApprovedSend` for what it does not.
+
 _ISSUED = object()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ApprovedSend:
     """A request that `verify_approved_payload` has authorised to be sent.
 
-    Frozen, and only constructible with this module's private `_ISSUED`
-    sentinel, so the only way to obtain one is to pass the verifier. That
-    closes the whole failure at once: an unverified send cannot be expressed,
-    the request is bound to the verification that covered it, and the
-    verification cannot be skipped because `send` has nothing else to accept.
+    **What is guaranteed.** `send` transmits exactly the `body_bytes` that the
+    verifier built and encoded, and `last_request_body()` returns that same
+    object. A request that was not passed to the verifier cannot be sent at
+    all, because there is nothing else `send` accepts. A token cannot be
+    constructed outside this module, and it cannot be **re-pointed** at a
+    different request afterwards: the constructor is closed, and every ordinary
+    way of copying a Python object — `dataclasses.replace`, `copy.copy`,
+    `copy.deepcopy` and `pickle` — is refused. Those four were not closed by a
+    frozen dataclass alone, and I verified that rather than assuming it:
+    `dataclasses.replace(token, request=..., body=..., body_bytes=...)`
+    succeeded and transmitted a substituted payload, and `copy.copy`,
+    `copy.deepcopy` and `pickle.loads(pickle.dumps(...))` each produced a
+    working token, because all three bypass `__init__` outright. `_issued` is
+    therefore `init=False`, so `replace` cannot pass the sentinel through, and
+    the clone hooks below raise instead of letting a copy inherit it.
+
+    **What is not guaranteed, and cannot be in this language.** A caller
+    holding a genuine token can rewrite it with
+    `object.__setattr__(token, "request", ...)`, which bypasses a frozen
+    dataclass's `__setattr__`; Python offers no way to stop that. It is
+    measured rather than asserted, in
+    `test_only_object_setattr_can_rewrite_a_token`. But the same caller can
+    also just call `gw._client.post(...)`, so no in-process object property
+    defends against an adversary inside the process; what this class defends
+    against is the ordinary mistake, and every plain-library operation that
+    could be one.
+
+    The second thing it does not check is that `request` was derived *from*
+    the approved payload. No component in this project defines that
+    derivation — building the messages from a payload is the orchestrator's
+    job — so the gateway binds identity, not provenance, and says so rather
+    than implying a check it cannot make.
 
     `body` and `body_bytes` are the body built and the bytes encoded **during
     verification**, so what goes on the wire is what was authorised rather than
-    something re-derived at transmission time, and `last_request_body()`
-    returns the very same `bytes` object.
+    something re-derived at transmission time.
 
     It holds `approved_payload_hash` rather than the payload itself: a token
     carrying `report_text` would be a new place that text lives, inside an
-    object that is easy to log, serialise or attach to an exception. The hash
-    is what the rest of the system needs.
+    object that is easy to log or attach to an exception. The hash is what the
+    rest of the system needs.
 
-    `_issued` is excluded from the repr and from equality, so printing a token
-    does not hand a caller the sentinel to pass back in.
+    `eq=False`: a token is a capability, not a value. Two tokens for the same
+    payload and request are distinct objects that compare unequal and hash by
+    identity, so "is this the one that was authorised" is answered by identity
+    rather than by a field-by-field comparison that a forged token could
+    satisfy.
     """
 
     request: ModelRequest
     approved_payload_hash: str
     body: Mapping[str, object]
     body_bytes: bytes
-    _issued: object = field(default=None, repr=False, compare=False)
+    # `init=False` is load-bearing: with the sentinel as a constructor argument
+    # and a default, `dataclasses.replace` would copy the live `_ISSUED` onto a
+    # new instance and hand out a working token. It is set only by `_issue`,
+    # the one place in this module that bypasses `__init__`.
+    _issued: object = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self._issued is not _ISSUED:
@@ -185,6 +227,61 @@ class ApprovedSend:
                 "ModelGateway.verify_approved_payload(payload, approved_hash, "
                 "request), which is the only thing that can authorise a send"
             )
+
+    def __copy__(self) -> "ApprovedSend":
+        raise TypeError(
+            "an ApprovedSend cannot be copied: a copy would be a second token "
+            "for a request nothing authorised. Re-run verify_approved_payload."
+        )
+
+    def __deepcopy__(self, memo: dict) -> "ApprovedSend":
+        raise TypeError(
+            "an ApprovedSend cannot be deep-copied: the copy would bypass "
+            "__init__ and inherit the authorisation. Re-run "
+            "verify_approved_payload."
+        )
+
+    def __reduce__(self):
+        raise TypeError(
+            "an ApprovedSend cannot be pickled: an unpickled token would "
+            "carry the authorisation of whichever request was verified first. "
+            "Re-run verify_approved_payload."
+        )
+
+    __reduce_ex__ = __reduce__
+
+
+def _issue(
+    request: ModelRequest,
+    approved_payload_hash: str,
+    body: Mapping[str, object],
+    body_bytes: bytes,
+) -> ApprovedSend:
+    """Mint an `ApprovedSend`. The only construction path in the package.
+
+    It builds the instance with `__new__` and assigns through
+    `object.__setattr__`, deliberately bypassing the constructor that refuses
+    — that refusal is the point, and this function is the one exception. It is
+    module-private, and `tests/test_gateway.py` asserts by AST sweep that
+    `_ISSUED` is referenced nowhere else under `backend/src/medarx/`.
+
+    What that sweep does and does not prove: it proves no other module in the
+    package names the sentinel. It does not prove the token is unreachable by
+    other means, and it is not claimed to — a caller in this process can reach
+    module-private names and, as `ApprovedSend` says, can rewrite a genuine
+    token with `object.__setattr__`. What it rules out is a second *component*
+    quietly acquiring the authority to authorise a send.
+    """
+    token = ApprovedSend.__new__(ApprovedSend)
+    for name, value in (
+        ("request", request),
+        ("approved_payload_hash", approved_payload_hash),
+        ("body", body),
+        ("body_bytes", body_bytes),
+    ):
+        object.__setattr__(token, name, value)
+    object.__setattr__(token, "_issued", _ISSUED)
+    return token
 
 
 class ModelGateway:
@@ -313,18 +410,26 @@ class ModelGateway:
 
         What this does **not** do is check that `request` was derived from
         `payload`. No component defines that derivation — it belongs to the
-        orchestrator, which builds the messages — so the gateway can bind
-        identity, not provenance. What it can do is refuse to transmit
-        anything that was not present at authorisation, and that is the whole
-        of §6 row 7.
+        orchestrator, which builds the messages — so the gateway binds
+        identity, not provenance, and §6 row 7 is as far as the kernel can
+        carry it on its own.
+
+        The guarantee, stated exactly: `send` transmits the `body_bytes` built
+        and encoded *here*, and `last_request_body()` returns that same object,
+        so the recorded evidence and the bytes on the wire cannot differ; a
+        request that was not passed here cannot be sent at all; and a token
+        cannot be re-pointed afterwards by any ordinary library operation.
+        What is not guaranteed: that the request was built from the payload at
+        all, which is the orchestrator's to construct, and that a caller
+        holding a genuine token cannot rewrite it with `object.__setattr__`,
+        which Python cannot prevent — see `ApprovedSend`.
 
         Raises `GatewayError` (layer `F`); returns an `ApprovedSend` when both
         the payload is the approved one and the model is registered.
         """
         body = self.build_body(request)
         approved = self._verify_payload_hash(payload, approved_hash)
-        return ApprovedSend(
-            _issued=_ISSUED,
+        return _issue(
             request=request,
             approved_payload_hash=approved,
             body=body,
@@ -395,10 +500,12 @@ class ModelGateway:
         treat the bytes as unconfirmed, a `ProviderStatusError` or a response
         means they arrived.
 
-        A **refusal** — an unknown model, or a payload that is not the approved
-        one — sends nothing, is raised before the assignment, and so leaves the
-        previous value alone rather than overwriting the evidence of a request
-        that did happen with a body that did not.
+        A **refusal** sends nothing and leaves this value alone, so the evidence
+        for a request that did happen is not overwritten with a body that did
+        not. Refusals no longer reach `send`: an unknown model and a payload
+        that is not the approved one are both raised inside
+        `verify_approved_payload`, before any token exists, and `send` refuses
+        anything that is not a token with a `TypeError` before its assignment.
         """
         return self._last_request_body
 

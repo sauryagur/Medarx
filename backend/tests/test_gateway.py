@@ -22,9 +22,12 @@ the only honest way to produce a transport failure.
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import json
+import pickle
 import threading
-from dataclasses import dataclass, field
+from dataclasses import FrozenInstanceError, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
@@ -608,25 +611,106 @@ def test_send_refuses_anything_that_is_not_an_approved_send():
 
 
 def test_an_approved_send_cannot_be_built_by_hand():
-    # The sentinel, not a convention: the constructor refuses any value other
-    # than this module's private `_ISSUED`.
-    for issued in (None, object(), "issued"):
-        with pytest.raises(TypeError):
-            ApprovedSend(
-                request=REQUEST,
-                approved_payload_hash="0" * 64,
-                body={},
-                body_bytes=b"",
-                _issued=issued,
+    # The sentinel, not a convention. `_issued` is `init=False`, so it is not
+    # even an argument the constructor accepts, and the constructor refuses
+    # anything the private mint path did not stamp.
+    with pytest.raises(TypeError) as unexpected:
+        ApprovedSend(
+            request=REQUEST,
+            approved_payload_hash="0" * 64,
+            body={},
+            body_bytes=b"",
+            _issued=object(),
+        )
+    assert "unexpected keyword argument" in str(unexpected.value), (
+        "passing _issued must fail because the field is not an init field, not "
+        "because some other argument check happened to fire"
+    )
+    with pytest.raises(TypeError, match="cannot be constructed directly"):
+        ApprovedSend(
+            request=REQUEST,
+            approved_payload_hash="0" * 64,
+            body={},
+            body_bytes=b"",
+        )
+
+
+def test_a_token_cannot_be_re_pointed_with_dataclasses_replace():
+    # The attack that survived round 1, and the reason `_issued` is
+    # `init=False`. With the sentinel as an ordinary `init` field carrying a
+    # default, `dataclasses.replace` copies the live `_ISSUED` onto a new
+    # instance, so a substituted request went on the wire and
+    # `last_request_body()` reported the substituted bytes — the two observers
+    # would have agreed, and the failure C1 is about happened again with no
+    # private name involved.
+    with _stub_ok() as stub:
+        gw = _client_for(stub)
+        token = _approve(gw)
+        with pytest.raises((TypeError, ValueError)):
+            dataclasses.replace(
+                token,
+                request=ModelRequest(
+                    model="medarx-demo-model",
+                    messages=[{"role": "user", "content": "UNAPPROVED PHI: Jane Doe"}],
+                    temperature=0.0,
+                    max_tokens=1,
+                ),
             )
+        assert stub.requests == []
+        assert gw.last_request_body() is None
+
+
+@pytest.mark.parametrize("route", ["copy", "deepcopy", "pickle"])
+def test_a_token_cannot_be_cloned_by_any_copying_route(route):
+    # `copy.copy`, `copy.deepcopy` and `pickle` all rebuild an object without
+    # calling `__init__`, so a frozen dataclass with a checked constructor
+    # still let each of them mint a working token. Verified, not assumed: all
+    # three produced one before the clone hooks were added.
+    gw = ModelGateway(Settings(audit_key=KEY))
+    token = _approve(gw)
+    with pytest.raises(TypeError):
+        if route == "copy":
+            copy.copy(token)
+        elif route == "deepcopy":
+            copy.deepcopy(token)
+        else:
+            pickle.loads(pickle.dumps(token))
+
+
+def test_two_tokens_are_distinct_capabilities_not_equal_values():
+    # `eq=False`, so "is this the one that was authorised" is answered by
+    # identity. A field-by-field comparison could be satisfied by a forged
+    # token carrying the same values.
+    gw = ModelGateway(Settings(audit_key=KEY))
+    one = _approve(gw)
+    two = _approve(gw)
+    assert one != two
+    assert len({one, two}) == 2
+    assert "_issued" not in repr(one)
+
+
+def test_only_object_setattr_can_rewrite_a_token_and_that_is_the_documented_limit():
+    # The limit of what Python can enforce, measured rather than asserted, so
+    # the docstring's claim is a measurement. `object.__setattr__` bypasses a
+    # frozen dataclass's `__setattr__`, and no pure-Python object can refuse it.
+    # The same caller could equally reach `gw._client` and post directly, which
+    # is why the token defends against the ordinary mistake and plain-library
+    # manipulation rather than against an adversary inside the process.
+    gw = ModelGateway(Settings(audit_key=KEY))
+    token = _approve(gw)
+    leak = ModelRequest(model="medarx-demo-model", messages=[], temperature=0.0, max_tokens=1)
+    with pytest.raises(FrozenInstanceError):
+        token.request = leak
+    object.__setattr__(token, "request", leak)
+    assert token.request is leak, "the documented limit is that this succeeds"
 
 
 def test_the_sentinel_is_private_to_the_gateway_module():
-    # Python has no access control, so this is the strongest available
-    # enforcement rather than a guarantee — and the same standard this package
-    # already accepts for `ALLOWED_MODELS` and the module-level action codes.
-    # What it does buy is that the token cannot be minted by any *other* module
-    # in the package, so a second egress path cannot be added by accident.
+    # What this asserts, precisely: the name `_ISSUED` appears in no other
+    # file under `backend/src/medarx/`. That rules out another *module* quietly
+    # acquiring the authority to authorise a send. It does not prove the token
+    # is unreachable by other means, and is not claimed to — see
+    # `test_only_object_setattr_can_rewrite_a_token_and_that_is_the_documented_limit`.
     import ast
     from pathlib import Path
 
