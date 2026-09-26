@@ -171,18 +171,24 @@ def test_different_source_uids_still_differ_after_de_identification():
     One seed per UID rather than one per (keyword, UID) pair is the fix for the
     cross-reference break; the failure mode that fix invites is two distinct
     source objects sharing a surrogate, which would be a worse privacy defect
-    than the one it repairs. So both halves are asserted.
+    than the one it repairs. So both halves are asserted: four distinct source
+    UIDs, four distinct surrogates.
     """
-    ds = make_synthetic_dataset()
-    surrogates = {out for out in (
-        deidentify(make_synthetic_dataset(), ROOT)[0].StudyInstanceUID,
-        deidentify(make_synthetic_dataset(), ROOT)[0].SeriesInstanceUID,
-        deidentify(make_synthetic_dataset(), ROOT)[0].SOPInstanceUID,
-        deidentify(make_synthetic_dataset(), ROOT)[0].FrameOfReferenceUID,
-    )}
     source = make_synthetic_dataset()
-    assert len({source.StudyInstanceUID, source.SeriesInstanceUID,
-                source.SOPInstanceUID, source.FrameOfReferenceUID}) == len(surrogates)
+    out, _ = deidentify(source, ROOT)
+    originals = {
+        source.StudyInstanceUID,
+        source.SeriesInstanceUID,
+        source.SOPInstanceUID,
+        source.FrameOfReferenceUID,
+    }
+    assert len(originals) == 4, "the fixture no longer holds four distinct UIDs"
+    assert len({
+        out.StudyInstanceUID,
+        out.SeriesInstanceUID,
+        out.SOPInstanceUID,
+        out.FrameOfReferenceUID,
+    }) == len(originals)
 
 
 #: How many surrogates `test_every_surrogate_uid_is_legal` derives. The
@@ -207,19 +213,21 @@ def _illegal_components(uid: str) -> list[str]:
     ]
 
 
-def test_every_surrogate_uid_is_legal(_sample_size=_SAMPLE_SIZE):
+def test_every_surrogate_uid_is_legal():
     """A thousand seeds, every one of them checked — a sample of three would
     have missed a one-in-ten failure entirely, which is how it survived.
 
     The width of the component is the whole defence: `uuid5(...).int %
     10**36` is below `10**35` about a tenth of the time, and `zfill` then
     padded the front with a zero to reach the 36 characters the 64-character
-    limit allows. The docstring said the bound existed to keep the UID legal;
-    this is the test that makes that sentence true.
+    limit allows. The derivation's docstring said the bound existed to keep
+    the UID legal; this is the test that makes that sentence true.
     """
-    uids = [make_uid(f"seed-{index}", ROOT) for index in range(_sample_size)]
+    uids = [make_uid(f"seed-{index}", ROOT) for index in range(_SAMPLE_SIZE)]
     illegal = {uid: _illegal_components(uid) for uid in uids if _illegal_components(uid)}
-    assert not illegal, f"{len(illegal)} of {_sample_size} surrogates are illegal: {list(illegal)[:3]}"
+    assert not illegal, (
+        f"{len(illegal)} of {_SAMPLE_SIZE} surrogates are illegal: {list(illegal)[:3]}"
+    )
     assert all(len(uid) <= 64 for uid in uids)
 
 

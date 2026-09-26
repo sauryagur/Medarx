@@ -391,7 +391,14 @@ def test_no_property_in_the_contract_is_declared_as_an_iso_8601_date():
     assert not offenders, f"these are declared as ISO dates: {offenders}"
 
 
-def test_the_contract_admits_a_date_the_pipeline_can_actually_shift():
+def test_the_contract_refuses_an_iso_date_where_a_dicom_date_is_required():
+    """The regression, asserted on the value rather than on the schema text.
+
+    `format: date` accepted `2026-01-14` and `pseudonymize` refused it, so a
+    request that satisfied the contract blocked at layer C. The declaration
+    sweep above says the format is gone; this says the string it accepted is
+    not accepted either.
+    """
     doc = _contract()
     dates = _date_properties(doc)
     assert dates, "the contract declares no DICOM date property; the sweep reads nothing"
