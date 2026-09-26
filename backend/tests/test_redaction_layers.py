@@ -30,7 +30,6 @@ per process rather than per test.
 from __future__ import annotations
 
 import re
-import types
 from datetime import date
 from pathlib import Path
 
@@ -43,6 +42,7 @@ from medarx.extraction.allowlists import ALLOWED_FIELDS
 from medarx.extraction.payload_extractor import pipeline_for
 from medarx.extraction.study_context import StudyContext
 from medarx.models import LAYERS, StructuredPayload, canonical_hash
+from medarx.policy.policy_engine import Decision
 from medarx.pseudonym.pseudonymize import pseudonymize_payload
 from medarx.redaction import ner
 from medarx.redaction.layers import (
@@ -60,7 +60,11 @@ CONTRACT = Path(__file__).resolve().parents[2] / "contracts" / "openapi.yaml"
 #: The policy engine arrives in a later task, so this one answers the only two
 #: questions `run_redaction` asks of an engine — is any disposition unresolved,
 #: and is there a payload at all. Defining it here rather than importing one is
-#: what lets these layers be verified on their own.
+#: what lets these layers be verified on their own. It returns the engine's
+#: real `Decision` rather than a namespace of its own, so the orchestrator is
+#: handed the type it will get in production: when the decision grew a
+#: `wire_code`, this stub failed loudly instead of quietly returning an object
+#: the pipeline could not read.
 class StubPolicyEngine:
     def __init__(self, settings: Settings):
         self.mode = settings.policy_mode
@@ -68,7 +72,7 @@ class StubPolicyEngine:
 
     def decide(self, payload, dispositions, policy_version):
         blocked = [d for d in dispositions if not d.resolved]
-        return types.SimpleNamespace(
+        return Decision(
             approved=payload is not None and not blocked,
             blocked=bool(blocked),
             reason_code=blocked[0].action_code if blocked else "APPROVED",

@@ -32,7 +32,7 @@ import pytest
 from medarx.config import Settings
 from medarx.errors import PolicyError
 from medarx.models import LAYERS, BlockReceipt, StructuredPayload, payload_hash_of
-from medarx.policy.decision_table import RULES, rules_for
+from medarx.policy.decision_table import RULES, RULES_BY_ROW, rules_for
 from medarx.policy.policy_engine import (
     CHECKS,
     IMPLEMENTED_MODES,
@@ -189,10 +189,32 @@ def test_the_engine_checks_are_row_6_and_they_are_evaluated_in_a_stated_order():
         "the policy version is not the one in force",
         "the policy mode is not implemented",
         "there is no payload",
-        "there are no dispositions and nothing validated the payload",
+        "the payload carries a hash this engine did not compute over it",
         "a disposition is unresolved",
     ]
     assert {c.row for c in CHECKS} == {6}, "the engine enforces §6 row 6 only"
+
+
+def test_every_check_is_bound_to_the_row_and_layer_the_design_states():
+    # M2's answer: the checks are *built* from `RULES_BY_ROW`, so the join is
+    # not an integer two tables have to keep in step. This asserts it from the
+    # other side — a check cannot claim a layer the design does not give that
+    # row — and a row the design adds without a check shows up as a row nothing
+    # enforces, which `test_this_component_enforces_row_6_and_observes_rows_3_to_5`
+    # already reads.
+    for check in CHECKS:
+        rule = RULES_BY_ROW[check.row]
+        assert check.layer == rule.layer
+        assert check.row == rule.row
+    assert {r.row for r in RULES if r.layer == "E"} == {c.row for c in CHECKS}
+
+
+def test_a_check_cannot_name_a_row_the_design_does_not_state():
+    from medarx.policy.policy_engine import _check
+
+    with pytest.raises(ValueError):
+        _check(name="invented", row=99, question=lambda q: True,
+               reason=lambda q: "NOPE")
 
 
 def test_this_component_enforces_row_6_and_observes_rows_3_to_5():
@@ -244,14 +266,48 @@ def test_a_validated_payload_with_no_dispositions_is_approved(settings):
     assert d.reason_code == "APPROVED"
 
 
-def test_an_unvalidated_payload_with_no_dispositions_blocks(settings):
-    # The condition that *is* fail-closed. No dispositions **and** no layer-3
-    # hash means no layer ran: the dispositions that should exist were never
-    # produced, and nothing else reaches this engine to tell it so.
+def test_a_payload_nothing_hashed_is_refused_whatever_it_carries(settings):
+    # I1. The disposition list is a claim about what the redaction layers did,
+    # and so is the `payload_hash` field — any caller can populate both. An
+    # unverified payload is refused with an empty list *and* with a list of
+    # resolved dispositions supplied alongside a fabricated hash, because a
+    # hash this engine did not compute proves nothing about either.
     engine = PolicyEngine(settings)
-    d = engine.decide(_UNHASHED, [], PV)
-    assert d.blocked and not d.approved
-    assert d.reason_code == "POLICY_NO_DISPOSITIONS"
+    fabricated = _UNHASHED.model_copy(update={"payload_hash": "f" * 64})
+    for payload, dispositions in [
+        (_UNHASHED, []),
+        (fabricated, []),
+        (fabricated, [resolved_disp()]),
+        (_UNHASHED, [resolved_disp()]),
+    ]:
+        d = engine.decide(payload, dispositions, PV)
+        assert d.blocked and not d.approved, (
+            f"approved an unverified payload carrying {dispositions}"
+        )
+        assert d.reason_code == "POLICY_UNVALIDATED_PAYLOAD"
+
+
+def test_a_hash_that_does_not_match_its_payload_is_not_validation(settings):
+    # The specific hole I1 closed: a made-up 64-character string is
+    # indistinguishable from a real hash by shape, and this is the payload it
+    # used to pass. `b" * 64` is a plausible-looking hash that is not this
+    # payload's hash.
+    engine = PolicyEngine(settings)
+    impostor = PAYLOAD.model_copy(update={"payload_hash": "b" * 64})
+    assert len(impostor.payload_hash or "") == 64
+    d = engine.decide(impostor, [resolved_disp()], PV)
+    assert d.blocked and d.reason_code == "POLICY_UNVALIDATED_PAYLOAD"
+
+
+def test_a_payload_swapped_after_layer_3_is_refused_by_the_engine(settings):
+    # The same check, on the mutation it exists to catch: layer 3 hashed this
+    # payload, then something replaced `report_text` and left the hash behind.
+    # `authorize_payload` refuses it on the way out; `decide` refuses it here.
+    engine = PolicyEngine(settings)
+    swapped = PAYLOAD.model_copy(update={"report_text": "MRN 4452819."})
+    assert swapped.payload_hash == PAYLOAD.payload_hash
+    d = engine.decide(swapped, [resolved_disp()], PV)
+    assert d.blocked and d.reason_code == "POLICY_UNVALIDATED_PAYLOAD"
 
 
 def test_null_payload_fails_closed(settings):
@@ -445,14 +501,17 @@ def test_an_unusable_approved_hash_authorises_nothing(settings, approved_hash):
 def _receipt_from(decision=None, error=None, request_id="req-1") -> BlockReceipt:
     """The receipt the API surface builds for this decision, built the way
     component J will build it: the engine's own verdict becomes a layer-E
-    receipt carrying the wire code the reason maps to, and a `PolicyError` the
-    engine raised is already the receipt's content."""
+    receipt carrying the `wire_code` the decision carries, and a `PolicyError`
+    the engine raised is already the receipt's content. The wire code is read
+    off the decision rather than re-derived from the reason, because that is
+    the field the orchestrator now uses and a receipt built any other way would
+    not be testing the real path."""
     if error is not None:
         return BlockReceipt(request_id=request_id, layer=error.layer,
                             action_codes=list(error.action_codes),
                             policy_version=PV)
     return BlockReceipt(request_id=request_id, layer="E",
-                        action_codes=[wire_code_for(decision.reason_code)],
+                        action_codes=[decision.wire_code],
                         policy_version=decision.policy_version)
 
 
@@ -486,14 +545,15 @@ def test_the_receipt_an_unknown_version_produces_names_layer_e_and_its_code(sett
 
 
 def test_the_receipt_for_a_missing_payload_is_a_configuration_error(settings):
-    # A missing payload, and a payload with no dispositions and no layer-3
-    # validation, are the engine's own verdict about the request, and neither
-    # is a claim about the data: both are `POLICY_CONFIG_ERROR`, the code the
+    # A missing payload, and a payload carrying a hash this engine did not
+    # compute, are the engine's own verdict about the request, and neither is a
+    # claim about the data: both are `POLICY_CONFIG_ERROR`, the code the
     # contract's row-6 example advertises for them.
     engine = PolicyEngine(settings)
     no_payload = engine.decide(None, [resolved_disp()], PV)
-    unvalidated = engine.decide(_UNHASHED, [], PV)
-    for decision in (no_payload, unvalidated):
+    unverified = engine.decide(_UNHASHED.model_copy(update={"payload_hash": "f" * 64}),
+                              [resolved_disp()], PV)
+    for decision in (no_payload, unverified):
         assert _receipt_from(decision).model_dump() == {
             "status": "blocked",
             "request_id": "req-1",
@@ -630,13 +690,13 @@ def test_an_unimplemented_mode_blocks_a_pipeline_run_that_is_otherwise_clean(
     # blocks instead of being approved by a weaker mode standing in for the one
     # that was asked for.
     #
-    # The layer and code this receipt ends up carrying are deliberately not
-    # asserted. They are the orchestrator's own fallback for a block with no
-    # unresolved disposition — layer `D.3` and `UNAPPROVED_PAYLOAD` — and
-    # neither is what happened when the policy engine is what refused. That is
-    # a composition defect in `run_privacy_kernel`, reported to the project
-    # owner rather than pinned here: an assertion here would turn it into an
-    # invariant, and an invariant that preserves a defect is itself a defect.
+    # The receipt is asserted, not hedged. An earlier version of this test
+    # declined to assert the layer and code because they were the
+    # orchestrator's own fallback — `D.3` and `UNAPPROVED_PAYLOAD`, neither of
+    # which is what happened — and stood in a placeholder assertion that
+    # advertised coverage it did not provide. The fallback is gone: design §6
+    # says a receipt's `layer` names the flagging component, and when nothing
+    # in D flagged anything, that component is E.
     from medarx.errors import RedactionError
     from medarx.pseudonym.pseudonymize import pseudonymize_payload
     from medarx.redaction.pipeline import run_privacy_kernel
@@ -646,7 +706,8 @@ def test_an_unimplemented_mode_blocks_a_pipeline_run_that_is_otherwise_clean(
     with pytest.raises(RedactionError) as caught:
         run_privacy_kernel(pseudonymize_payload(clean, "PAT-0001", store), "PAT-0001",
                            store, engine, settings, source=clean)
-    assert caught.value.action_codes, "a block with no codes could not be rendered"
+    assert caught.value.layer == "E"
+    assert caught.value.action_codes == ("UNKNOWN_POLICY_VERSION",)
 
     # The identical run in an implemented mode approves, so the refusal above
     # was the mode and nothing else.
@@ -654,4 +715,34 @@ def test_an_unimplemented_mode_blocks_a_pipeline_run_that_is_otherwise_clean(
     approved = run_privacy_kernel(pseudonymize_payload(clean, "PAT-0001", store),
                                   "PAT-0001", store, engine_in_cloud, settings,
                                   source=clean)
+    assert approved.payload_hash == payload_hash_of(approved)
+
+
+def test_the_pipeline_presents_the_configured_policy_version(store, settings):
+    # M3: the engine's version check is only reachable if something presents a
+    # version, and the orchestrator presents `settings.policy_version` — the
+    # same settings object it runs the layers with. So through this path the
+    # check fires when the *engine* and the orchestrator disagree about which
+    # policy is in force, and this pins that rather than leaving the check to be
+    # exercised only by direct `decide` calls, where a change to where the
+    # pipeline gets its version would not be noticed at all.
+    from medarx.errors import RedactionError
+    from medarx.pseudonym.pseudonymize import pseudonymize_payload
+    from medarx.redaction.pipeline import run_privacy_kernel
+
+    clean = _source(CLEAN_REPORT)
+    # The engine believes a different policy is deployed than the one the
+    # pipeline presents. Everything else about the run is clean.
+    other = PolicyEngine(settings.model_copy(update={"policy_version": "medarx-policy-2.0.0"}))
+    with pytest.raises(RedactionError) as caught:
+        run_privacy_kernel(pseudonymize_payload(clean, "PAT-0001", store), "PAT-0001",
+                           store, other, settings, source=clean)
+    assert caught.value.layer == "E"
+    assert caught.value.action_codes == ("UNKNOWN_POLICY_VERSION",)
+
+    # And with the engine configured from the same settings, the same run
+    # approves — so the block above was the disagreement, not the report.
+    same = PolicyEngine(settings)
+    approved = run_privacy_kernel(pseudonymize_payload(clean, "PAT-0001", store),
+                                  "PAT-0001", store, same, settings, source=clean)
     assert approved.payload_hash == payload_hash_of(approved)

@@ -6,29 +6,39 @@ The one property this module is arranged around:
 
 A block is any refusal to transmit, so every uncertainty here trends to block
 and never to send. A policy version this engine cannot identify, a policy mode
-it does not implement, a missing payload, a payload no redaction layer
-validated, an unresolved disposition — all of them are refusals, and none of
-them has a branch that sends anyway. The case that needs the most care is the
-one not on that list: an unimplemented mode has *no fallback*. Degrading to a
-weaker mode would be the single worst thing this component could do, because a
-deployment that asked for a stronger policy would be given a weaker one and the
-receipt would name neither.
+it does not implement, a missing payload, a payload carrying a hash this engine
+did not compute over it, an unresolved disposition — all of them are refusals,
+and none of them has a branch that sends anyway. The case that needs the most
+care is the one not on that list: an unimplemented mode has *no fallback*.
+Degrading to a weaker mode would be the single worst thing this component could
+do, because a deployment that asked for a stronger policy would be given a
+weaker one and the receipt would name neither.
 
 **The conditions are a table, not a chain of conditionals.** `CHECKS` is the
-ordered list `decide` walks, one `Check` per condition, each carrying the
-design §6 row it enforces and the reason it gives. The engine returns on the
-first check that fires, so the fail-closed ordering is a property of a list a
-reviewer can read rather than of the control flow around it. The design's own
-seven-row table is `medarx.policy.decision_table.RULES`, and every `Check`
-names the row it belongs to.
+ordered list `decide` walks, one `Check` per condition. Each is built through
+`_check`, which reads the §6 row and the layer tag out of
+`decision_table.RULES_BY_ROW` rather than repeating them: a check therefore
+cannot name a row the design does not state, and the layer a check reports is
+the design's own label for that row. The engine returns on the first check that
+fires, so the fail-closed ordering is a property of a list a reviewer can read
+rather than of the control flow around it.
+
+**Nothing this engine approves is approved on a claim.** Layer 3 writes
+`payload_hash` over the payload it checked, and the payload carries it to this
+layer as a field any caller can populate. A field is a claim, so the check
+re-derives the hash from the payload's own content and refuses unless the two
+agree. Without that, the "did the layers run" question below would be answered
+by whoever called, and a fabricated hash would be enough to approve a payload
+nothing had ever checked.
 
 **Internal reasons versus wire codes.** `Decision.reason_code` is internal and
 is chosen to be the most specific description available: the disposition's own
 code when a disposition blocked, `POLICY_NO_PAYLOAD` when there was no payload
-at all. It never reaches a receipt. `WIRE_CODE_BY_REASON` translates each
-reason this engine *invents* into the one contract `ActionCode` member that
-describes it, and `wire_code_for` is the only way to ask. A block whose reason
-came from a disposition is deliberately absent from that table: that refusal
+at all. It never reaches a receipt. `WIRE_CODE_BY_REASON` translates each reason
+this engine *invents* into the one contract `ActionCode` member that describes
+it, `Decision.wire_code` carries that member, and `wire_code_for` is the only
+way for a caller to ask. A block whose reason came from a disposition is
+deliberately absent from the table and carries `wire_code=None`: that refusal
 belongs to the layer that raised the disposition, under that layer's tag, and a
 second engine-level code for the same condition would give one refusal two
 different receipts depending on which component the caller asked.
@@ -38,6 +48,16 @@ names a code the kernel did not emit is a false record. All three ways this
 project has produced one were a fallback somewhere: a code with the wrong
 polarity, two different refusals sharing a code, and a published example
 advertising something the kernel can no longer do.
+
+**Where the coarseness of that mapping stands, unmitigated.** Two reasons share
+`UNKNOWN_POLICY_VERSION`, so a receipt cannot distinguish a version this engine
+does not recognise from a mode it does not implement. `Decision.reason_code`
+holds the specific reason and nothing in this package reads it: the
+orchestrator keeps `Decision.wire_code` and discards the `Decision` itself, so
+the distinction between those two refusals reaches no receipt and no record
+anywhere. The coarse code is the whole of what survives. Whether the audit log
+should carry the reason is an open question in the phase plan, and until it is
+answered, nothing here claims otherwise.
 
 **Modes are a deployment configuration.** The mode is read from `Settings` and
 from nowhere else, and `decide` takes no mode parameter, so a request cannot
@@ -59,6 +79,7 @@ from typing import TYPE_CHECKING, Callable
 from medarx.config import Settings
 from medarx.errors import PolicyError
 from medarx.models import StructuredPayload, payload_hash_of
+from medarx.policy.decision_table import RULES_BY_ROW
 
 if TYPE_CHECKING:  # pragma: no cover - a type reference, not a runtime dependency
     from medarx.redaction.layers import Disposition
@@ -93,7 +114,7 @@ _ACTION_CODE_UNAPPROVED_PAYLOAD = "UNAPPROVED_PAYLOAD"
 _REASON_UNKNOWN_VERSION = "POLICY_UNKNOWN_VERSION"
 _REASON_UNIMPLEMENTED_MODE = "POLICY_UNIMPLEMENTED_MODE"
 _REASON_NO_PAYLOAD = "POLICY_NO_PAYLOAD"
-_REASON_NO_DISPOSITIONS = "POLICY_NO_DISPOSITIONS"
+_REASON_UNVALIDATED_PAYLOAD = "POLICY_UNVALIDATED_PAYLOAD"
 _REASON_UNAPPROVED_PAYLOAD = "POLICY_UNAPPROVED_PAYLOAD"
 
 #: The reason an approved decision carries. It is not a block, so it is not in
@@ -109,7 +130,7 @@ REASON_CODES: frozenset[str] = frozenset({
     _REASON_UNKNOWN_VERSION,
     _REASON_UNIMPLEMENTED_MODE,
     _REASON_NO_PAYLOAD,
-    _REASON_NO_DISPOSITIONS,
+    _REASON_UNVALIDATED_PAYLOAD,
     _REASON_UNAPPROVED_PAYLOAD,
 })
 
@@ -119,15 +140,19 @@ REASON_CODES: frozenset[str] = frozenset({
 #: for "the policy in force could not be applied" and both are that: a version
 #: this engine does not recognise, and a mode it does not implement. The
 #: receipt then says what a reader can act on — the policy was not applied —
-#: while the specific reason stays in the engine's own reason code, which
-#: reaches the audit log rather than the caller. All three codes below are
+#: and nothing finer than that survives: the specific reason is read by nobody
+#: once the orchestrator has taken `Decision.wire_code` and dropped the
+#: decision. See the module docstring.
+#: `POLICY_UNVALIDATED_PAYLOAD` is a configuration error because it says the
+#: pipeline did not do its job rather than anything about the data: the layers
+#: that should have hashed this payload never ran. All three codes below are
 #: members of the contract's `ActionCode` enum, checked member by member in
 #: `tests/test_policy.py`.
 WIRE_CODE_BY_REASON: Mapping[str, str] = MappingProxyType({
     _REASON_UNKNOWN_VERSION: _ACTION_CODE_UNKNOWN_POLICY_VERSION,
     _REASON_UNIMPLEMENTED_MODE: _ACTION_CODE_UNKNOWN_POLICY_VERSION,
     _REASON_NO_PAYLOAD: _ACTION_CODE_POLICY_CONFIG_ERROR,
-    _REASON_NO_DISPOSITIONS: _ACTION_CODE_POLICY_CONFIG_ERROR,
+    _REASON_UNVALIDATED_PAYLOAD: _ACTION_CODE_POLICY_CONFIG_ERROR,
     _REASON_UNAPPROVED_PAYLOAD: _ACTION_CODE_UNAPPROVED_PAYLOAD,
 })
 
@@ -158,16 +183,26 @@ class Decision:
     `approved` and `blocked` are opposites, and that is enforced on
     construction: a decision that is neither would leave the caller to decide
     whether an undecided payload may be sent, and "the caller decides" is how a
-    fail-closed engine stops being one. `reason_code` is internal — see the
-    module docstring — and `policy_version` is the version that was *presented*,
-    so a block for an unrecognised version names the version that was not
-    applied instead of claiming the configured one was.
+    fail-closed engine stops being one.
+
+    `reason_code` is internal — see the module docstring — and
+    `policy_version` is the version that was *presented*, so a block for an
+    unrecognised version names the version that was not applied instead of
+    claiming the configured one was.
+
+    `wire_code` is the contract member that reason serialises to, carried so
+    the caller building a receipt does not have to re-derive it, and `None`
+    for the two cases that have no engine code: an approved payload, and a block
+    whose reason came from a disposition and therefore belongs to another
+    layer's receipt. `Decision` is additive here rather than replacing
+    `reason_code`, which stays the more specific description.
     """
 
     approved: bool
     blocked: bool
     reason_code: str
     policy_version: str
+    wire_code: str | None = None
 
     def __post_init__(self) -> None:
         if self.approved == self.blocked:
@@ -191,12 +226,42 @@ class _Question:
 @dataclass(frozen=True)
 class Check:
     """One block condition: what the engine asks, and the reason if the answer
-    is no. `row` is the design §6 row this condition enforces."""
+    is no.
+
+    `row` and `layer` are read from the design's enforcement table when the
+    check is built, never written here, so a check cannot name a §6 row the
+    design does not carry.
+    """
 
     name: str
     row: int
+    layer: str
     question: Callable[[_Question], bool]
     reason: Callable[[_Question], str]
+
+
+def _check(
+    name: str,
+    row: int,
+    question: Callable[[_Question], bool],
+    reason: Callable[[_Question], str],
+) -> Check:
+    """One condition, bound to the §6 row it enforces.
+
+    The row and the layer tag come out of `RULES_BY_ROW` rather than being
+    repeated as literals, which is what joins the two tables: a check with a row
+    number the design does not state fails at import rather than being enforced
+    against nothing.
+    """
+    rule = RULES_BY_ROW.get(row)
+    if rule is None:
+        raise ValueError(
+            f"section 6 row {row} is not in the enforcement table "
+            f"{sorted(RULES_BY_ROW)}; a check may only enforce a row the design "
+            "states"
+        )
+    return Check(name=name, row=rule.row, layer=rule.layer, question=question,
+                 reason=reason)
 
 
 def _is_identifiable(version: str) -> bool:
@@ -210,6 +275,29 @@ def _is_identifiable(version: str) -> bool:
     nothing.
     """
     return bool(version.strip())
+
+
+def _is_validated(payload: StructuredPayload | None) -> bool:
+    """Whether this payload carries a hash that is the hash of this payload.
+
+    Layer 3 writes `payload_hash` over the payload it checked, and the payload
+    carries that field to this layer, where any caller can populate it. So the
+    field is a *claim*, and a claim is checked by re-deriving the hash from the
+    payload's own content and requiring the two to agree. Trusting a non-blank
+    string would make the whole question "did the redaction layers run?"
+    answerable by the caller, and a caller that never ran them can invent a
+    64-character string.
+
+    The cost is one canonical hash per decision, paid on the approved path and
+    on the blocked path alike — the same computation `authorize_payload` does
+    later, on the object about to be transmitted, which is a different question
+    and is asked at a different time.
+    """
+    if payload is None or not isinstance(payload.payload_hash, str):
+        return False
+    if not payload.payload_hash.strip():
+        return False
+    return secrets.compare_digest(payload_hash_of(payload), payload.payload_hash)
 
 
 def _first_unresolved_code(question: _Question) -> str:
@@ -226,28 +314,16 @@ def _first_unresolved_code(question: _Question) -> str:
     raise AssertionError("the unresolved-disposition check fired with none unresolved")
 
 
-def _is_validated(payload: StructuredPayload | None) -> bool:
-    """Whether redaction layer 3 hashed this payload.
-
-    Layer 3 writes `payload_hash` over the payload it checked, so the field
-    being present is the evidence that the layers ran and the contract check
-    passed. Its absence is the only trace of a skipped redaction that survives
-    to this layer, which is what the empty-disposition check is for.
-    """
-    return (
-        payload is not None
-        and isinstance(payload.payload_hash, str)
-        and bool(payload.payload_hash.strip())
-    )
-
-
 #: The conditions `decide` walks, in order, returning on the first that fires.
 #: The order is a property: a policy version this engine cannot identify is
 #: reported before anything else, because a deployment running the wrong policy
 #: is a different problem from a request it refused, and a receipt has one code
-#: to give. Every check here enforces §6 row 6.
+#: to give. The validation check precedes the disposition check because a
+#: disposition list attached to a payload this engine cannot vouch for is not
+#: evidence of anything, so the unverified verdict is the honest one to report.
+#: Every check here enforces §6 row 6.
 CHECKS: tuple[Check, ...] = (
-    Check(
+    _check(
         name="the policy version is not the one in force",
         row=6,
         question=lambda q: (
@@ -257,35 +333,36 @@ CHECKS: tuple[Check, ...] = (
         ),
         reason=lambda q: _REASON_UNKNOWN_VERSION,
     ),
-    Check(
+    _check(
         name="the policy mode is not implemented",
         row=6,
         question=lambda q: q.mode not in IMPLEMENTED_MODES,
         reason=lambda q: _REASON_UNIMPLEMENTED_MODE,
     ),
-    Check(
+    _check(
         name="there is no payload",
         row=6,
         question=lambda q: q.payload is None,
         reason=lambda q: _REASON_NO_PAYLOAD,
     ),
-    Check(
+    _check(
         # Measured, not assumed: a report with no identifiers in it produces no
         # dispositions at all. Redaction layers 1-3 record what they *did*, and
         # a clean report gives them nothing to record, so an empty list from a
-        # run that completed is the expected shape of a clean result — blocking
-        # on it would refuse every ordinary report and report a healthy
-        # deployment as misconfigured. What an empty list *does* mean, when the
-        # payload carries no layer-3 hash, is that no layer ran: dispositions
-        # are required exactly then, because they are the evidence they would
-        # have produced. So the block is on the pair, and the pair is the only
-        # version of this condition that is both fail-closed and satisfiable.
-        name="there are no dispositions and nothing validated the payload",
+        # run that completed is the expected shape of a clean result — refusing
+        # on the empty list alone would refuse every ordinary report. The
+        # question an empty list *does* answer, once the payload is known to
+        # carry a hash this engine computed over it, is "nothing needed
+        # redoing" rather than "nothing ran". A payload that fails the hash
+        # check has no dispositions whatever the caller passed, because nothing
+        # computed any, so this one check covers both the bypass and the empty
+        # list without a second rule that could contradict it.
+        name="the payload carries a hash this engine did not compute over it",
         row=6,
-        question=lambda q: not q.dispositions and not _is_validated(q.payload),
-        reason=lambda q: _REASON_NO_DISPOSITIONS,
+        question=lambda q: not _is_validated(q.payload),
+        reason=lambda q: _REASON_UNVALIDATED_PAYLOAD,
     ),
-    Check(
+    _check(
         name="a disposition is unresolved",
         row=6,
         question=lambda q: any(not d.resolved for d in q.dispositions),
@@ -332,6 +409,14 @@ class PolicyEngine:
         Returns on the first `Check` that fires; a payload that fires none is
         approved. No path through this function returns neither approve nor
         block, and `Decision` refuses to be constructed if one arrives.
+
+        `policy_version` is the version presented for this decision, and it is
+        checked against the one this engine was configured with. Nothing in this
+        package supplies a second source for it today — the orchestrator passes
+        `settings.policy_version`, so through that path the check fires only
+        when the engine and the orchestrator disagree about which policy is in
+        force. `tests/test_policy.py` pins that, because a check nothing can
+        reach is a check that can rot into unreachable without anyone noticing.
         """
         question = _Question(
             payload=payload,
@@ -342,11 +427,19 @@ class PolicyEngine:
         )
         for check in CHECKS:
             if check.question(question):
+                reason = check.reason(question)
                 return Decision(
                     approved=False,
                     blocked=True,
-                    reason_code=check.reason(question),
+                    reason_code=reason,
                     policy_version=question.policy_version,
+                    # A reason this engine invented has a wire code; a
+                    # disposition's own code does not, and that block belongs
+                    # to the layer that raised the disposition. The lenient
+                    # lookup is the right one here: `decide` is evaluating a
+                    # disposition, not building a receipt, and a caller that
+                    # is building one uses `wire_code_for`, which refuses.
+                    wire_code=WIRE_CODE_BY_REASON.get(reason),
                 )
         return Decision(
             approved=True,
@@ -370,9 +463,7 @@ class PolicyEngine:
         `report_text` was swapped after the decision keeps the approved
         `payload_hash` and passes a comparison of the field against it. That is
         the substitution design §6 row 7 exists to stop, and re-hashing the
-        content here is what stops it. It also makes this check independent of
-        layer 3 having run: a payload nothing ever hashed is refused, not
-        approved.
+        content here is what stops it.
 
         `compare_digest` rather than `==`, so a caller probing this with
         candidate payloads cannot learn the approved hash a byte at a time —

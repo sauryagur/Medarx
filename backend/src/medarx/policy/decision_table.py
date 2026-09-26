@@ -2,24 +2,34 @@
 
 §6 of the design is a table of conditions, each with a consequence, and this
 module is that table transcribed — one `Rule` per row, in row order, with the
-layer tag the design names. Nothing here enforces anything; `policy_engine`
-evaluates its own conditions against the table's row numbers and uses
-`rules_for` to attribute a layer to the row that governs it. Keeping the two
-apart is deliberate. If the enforcement and the transcription lived in one
-place, a change to the behaviour and a change to the description could not be
-diffed against each other, and the table would stop being evidence of what the
-kernel does.
+layer tag the design names. It is the single source both of what the design
+says and of what the engine enforces: `policy_engine.CHECKS` is *built* from
+`RULES_BY_ROW`, so a check cannot name a §6 row the table does not carry, and a
+row the design adds without a check is visible as a row nothing enforces.
 
-**What `action_code` means on a `Rule`, precisely.** §6 rows name several
-conditions, and a condition that fires is what a receipt names — so a row has
-several codes, not one. A `Rule` carries a single `action_code`: the *leading*
-code of the block example the contract publishes for that row, which is a real
-`ActionCode` member that a block at that row can carry. It is the row's entry
-point, not its vocabulary, and
-`tests/test_policy.py::test_each_rule_names_the_leading_code_the_contract_publishes_for_its_row`
-holds the table to the contract so the two cannot drift. Rows 3, 4 and 5 emit
-the disposition's own code, and row 6 the code its reason maps to; see
-`medarx.policy.policy_engine`.
+Keeping the transcription and the enforcement in separate objects, joined by
+row, is deliberate. If they were one object, a change to the behaviour and a
+change to the description could not be diffed against each other, and the table
+would stop being evidence of what the kernel does.
+
+**What `action_code` means on a `Rule`, precisely, and what it does not.**
+§6 rows name several conditions, and a condition that fires is what a receipt
+names — so a row has several codes, not one. `Rule.action_code` is the *leading*
+code of the block example the contract publishes for that row. Two claims must
+not be confused, and only the first is made:
+
+- **what is true:** the value is a member of the contract's `ActionCode` enum,
+  and it is the first code of the example the contract publishes for that row.
+  `tests/test_policy.py::test_each_rule_names_the_leading_code_the_contract_publishes_for_its_row`
+  reads the contract rather than restating it, so an example that moves and a
+  table that does not fails.
+- **what is *not* claimed:** that the kernel emits it. It does not. For rows 1,
+  2 and 7 the leading code belongs to a component this phase has not written,
+  and for row 6 the leading code is `UNRESOLVED_DISPOSITION`, which component E
+  deliberately does not emit — a block caused by an unresolved disposition is
+  reported under that disposition's own code and the layer that raised it. What
+  the kernel emits for a row is the subject of `policy_engine`, not of this
+  field.
 
 **What `outcome` distinguishes.** §6 opens with "a block is any refusal to
 transmit", and both of this table's outcomes are refusals. Rows 1 and 2 are
@@ -30,12 +40,14 @@ is not transmitted.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal
 
 from medarx.models import LAYERS
 
-__all__ = ["RULES", "Rule", "rules_for"]
+__all__ = ["RULES", "RULES_BY_ROW", "Rule", "rules_for"]
 
 
 @dataclass(frozen=True)
@@ -135,6 +147,11 @@ RULES: tuple[Rule, ...] = (
         outcome="block",
     ),
 )
+
+#: The same rows, keyed by row number. This is the join the policy engine
+#: builds its checks from, so a check and the design row it enforces are the
+#: same object rather than two values an integer has to keep in step.
+RULES_BY_ROW: Mapping[int, Rule] = MappingProxyType({r.row: r for r in RULES})
 
 
 def rules_for(layer_prefix: str) -> tuple[Rule, ...]:

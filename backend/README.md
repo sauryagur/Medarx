@@ -204,22 +204,30 @@ else; `decide` takes no mode parameter, so a request cannot select or escalate
 its own policy.
 
 **A block is a refusal, and the reasons trend to block.** An unidentifiable
-policy version, an unimplemented mode, a missing payload, a payload no
-redaction layer validated, and any unresolved disposition all refuse. A blank
-`policy_version` is treated as *missing* even when the presented version equals
-it, because two blank strings compare equal and a payload approved under a
-policy nobody can name is the case a bare `!=` misses.
+policy version, an unimplemented mode, a missing payload, a payload carrying a
+hash this engine did not compute over it, and any unresolved disposition all
+refuse. A blank `policy_version` is treated as *missing* even when the presented
+version equals it, because two blank strings compare equal and a payload
+approved under a policy nobody can name is the case a bare `!=` misses.
 
-**"No dispositions" blocks only when nothing validated the payload.** Layers 1–3
+**Nothing is approved on a claim.** Two fields a caller controls reach this
+layer: the disposition list, and the `payload_hash` the payload carries. Both
+are claims about what the redaction layers did, and a claim is checked rather
+than believed — `decide` re-derives the hash from the payload's own content and
+refuses unless the two agree. Trusting the field instead made the whole
+question "did the layers run?" answerable by whoever called: a made-up
+64-character string approved a payload nothing had ever checked. The
+disposition list needs no separate guard, because a payload this engine cannot
+vouch for is refused whatever the list claims.
+
+This is also why an empty disposition list does not block on its own. Layers 1–3
 record what they *did*, so a report with no identifiers in it produces no
-dispositions at all — measured, not assumed:
-`"FINDINGS: 7mm nodule."` through the real pipeline yields `dispositions == []`
-and a layer-3 hash. An empty list from a completed run is the shape of a clean
-result, and blocking on it would refuse every ordinary report while reporting a
-healthy deployment as a configuration error. The block is therefore on the
-pair — no dispositions **and** no layer-3 hash — which is the only version of
-the condition that is both fail-closed (no layer ran, so the dispositions that
-should exist were never produced) and satisfiable.
+dispositions at all — measured, not assumed: `"FINDINGS: 7mm nodule."` through
+the real pipeline yields `dispositions == []` and a layer-3 hash. An empty list
+from a completed run is the shape of a clean result, and refusing on it alone
+would refuse every ordinary report while reporting a healthy deployment as a
+configuration error. One check covers both cases: an unverified payload has no
+dispositions whatever the caller passed, because nothing computed any.
 
 **Only the approved payload may leave, and the check is on the object.**
 `authorize_payload(payload, approved_hash)` requires two things to equal the
@@ -232,6 +240,15 @@ rather than approved. `models.payload_hash_of` is the one definition of that
 hash, shared with redaction layer 3; two copies of it could drift, and a drift
 there is a boundary that refuses everything or authorises everything.
 
+**A block is attributed to the component that made it.** `Decision.wire_code`
+carries the contract `ActionCode` member the engine's own verdict serialises to,
+`RedactionOutcome.decision_code` carries it out of the orchestrator, and
+`run_privacy_kernel` raises with `layer="E"` and that code when the engine
+refused and no redaction layer flagged anything. It used to name `D.3` with
+`UNAPPROVED_PAYLOAD`, which named a layer that flagged nothing and a code that
+described neither condition. Design §6 states that `layer` names the flagging
+component.
+
 **Internal reasons are not wire codes.** `Decision.reason_code` is descriptive
 and never serialised; `WIRE_CODE_BY_REASON` maps each reason the engine *invents*
 to the one `ActionCode` member that describes it, and `wire_code_for` raises on
@@ -240,3 +257,12 @@ came from a disposition is deliberately not in that table: the receipt belongs
 to the layer that raised the disposition, under that layer's tag, and a second
 engine-level code for the same refusal would give one refusal two different
 receipts depending on which component the caller asked.
+
+**Two reasons share one wire code, and nothing finer survives.** An unknown
+policy version and an unimplemented mode both serialise to
+`UNKNOWN_POLICY_VERSION`, because the contract has one code for "the policy in
+force could not be applied". The specific reason is in `Decision.reason_code`
+and **nothing reads it**: the orchestrator takes `Decision.wire_code` and drops
+the decision, so today the coarse code is the whole of what reaches a receipt
+or a record. Whether the audit log should carry the reason is an open question
+in the phase plan; nothing in this package claims the distinction is preserved.
