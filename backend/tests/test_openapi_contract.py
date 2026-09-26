@@ -43,6 +43,11 @@ EXPECTED_EMISSION_SITES: frozenset[str] = frozenset(
     {
         "backend/src/medarx/extraction/payload_extractor.py",
         "backend/src/medarx/pseudonym/pseudonymize.py",
+        # Component D. The redaction layers name every wire code they can emit
+        # as a module constant so this sweep covers them; the orchestrator adds
+        # the one code it can raise on its own.
+        "backend/src/medarx/redaction/layers.py",
+        "backend/src/medarx/redaction/pipeline.py",
     }
 )
 
@@ -130,7 +135,13 @@ def _emitted_codes_in_tree(tree: ast.Module, where: str) -> list[str]:
                 isinstance(t, ast.Name) and "ACTION_CODE" in t.id.upper()
                 for t in targets
             ):
-                codes.extend(_string_literals(node.value))
+                # An annotated *declaration* with no value emits nothing — a
+                # dataclass field such as `action_code: str` matches the name
+                # filter and carries no code. Skipping it is not a silent skip
+                # of an emission, which is what the unresolvable-name assertion
+                # below exists to prevent; there is nothing here to resolve.
+                if node.value is not None:
+                    codes.extend(_string_literals(node.value))
     return codes
 
 
@@ -214,6 +225,40 @@ def test_the_sweep_sees_every_code_component_c_emits():
         "SURROGATE_SHAPED_REFERENCE_REJECTED",
         "UNSHIFTED_DATE",
     }
+
+
+def test_the_sweep_sees_every_code_component_d_emits():
+    # The exact set, not a count. A code that stops being emitted is as much a
+    # defect as one that starts: the block condition it named would be
+    # unreachable, and the design's enforcement table would be describing
+    # something the kernel no longer does.
+    emitted = _emitted_action_codes()
+    assert set(emitted["backend/src/medarx/redaction/layers.py"]) == {
+        "NER_UNRESOLVED",
+        "UNSHIFTED_DATE",
+        "UNRESOLVED_EMPTY_BODY",
+        "DETERMINISTIC_REPLACEMENT_FAILED",
+        "MISSING_SURROGATE",
+        "FIELD_NOT_ALLOWLISTED",
+        "UNKNOWN_FUNCTION",
+        "CONTRACT_VIOLATION",
+        "LEFTOVER_PATTERN_MATCH",
+    }
+    assert set(emitted["backend/src/medarx/redaction/pipeline.py"]) == {
+        "UNAPPROVED_PAYLOAD",
+    }
+
+
+def test_no_internal_code_is_named_as_if_it_reached_the_wire():
+    # The layers record a successful replacement under an internal code that is
+    # never serialised. Those names deliberately avoid the `ACTION_CODE`
+    # substring, which is what keeps them out of the sweep above; this asserts
+    # that from the other side, so a rename that made one look like a wire code
+    # would fail here rather than shipping an internal code in a receipt.
+    emitted = _emitted_action_codes()
+    for source in ("backend/src/medarx/redaction/layers.py",
+                   "backend/src/medarx/redaction/pipeline.py"):
+        assert "REDACT_LAYER" not in "".join(emitted[source])
 
 
 def test_the_sweep_actually_finds_emission_sites():
