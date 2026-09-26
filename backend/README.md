@@ -68,6 +68,9 @@ Two obligations follow, and they belong to the tasks that own those code paths:
 
 - **The audit store must fail closed on an empty `audit_key`.** Silently
   writing an unauthenticated audit event is worse than refusing to write one.
+  Component C's pseudonymization store and date-shift derivation fail closed on
+  an empty `audit_key` for the same reason — see [Component C](#component-c--pseudonymization);
+  that half is implemented.
 - **The gateway client must omit the `Authorization` header entirely when
   `gateway_api_key` is empty**, rather than send an empty one. The Phase 1
   observer needs no authentication, so nothing in this phase sends one by
@@ -94,3 +97,30 @@ free of burned-in PHI. `CLEAN_PIXEL_DATA_IMPLEMENTED` is `False`,
 `IMPLEMENTED_OPTIONS` is empty, no rule targets `PixelData`, and no code path
 touches it. A dataset passed through this module is de-identified in the header
 sense only. See `backend/src/medarx/deident/profiles.py`.
+
+## Component C — pseudonymization
+
+**Pseudonymization is not anonymization.** A surrogate stays re-identifiable to
+anyone holding the mapping store. That is why the mapping store is a separate,
+access-controlled database and why no component on the model path reads it;
+`medarx.pseudonym.mapping_store` is component C's alone.
+
+`MappingStore` assigns stable surrogates (`medarx-study-<8 hex>`,
+`medarx-patient-<8 hex>`) and serves the per-patient date shift. A surrogate is
+a keyed derivation — `HMAC-SHA256(audit_key, "<domain>:<reference>")`, truncated
+to 8 hex characters — so assignment is reproducible by anyone holding the key.
+The `pseudonym_study` and `pseudonym_patient` rows make it *sticky* and
+auditable; the primary key on the original reference, not the truncation, is
+what stops two originals sharing a surrogate.
+
+The shift moves every date of one patient by the same number of days in
+`[-365, 365]`, which is what preserves sequence and duration — the invariant
+clinical meaning depends on. It does not preserve the month, the day of the
+month, or the weekday.
+
+**An empty audit key is refused**, by both the derivation and the store, with
+`AuditKeyRequired`. Unkeyed surrogates would be a reversible encoding, which
+would hand the model path the re-identification key the store exists to
+withhold. `AuditKeyRequired` is deliberately not a `MedarxError`: it is a
+deployment misconfiguration, not a privacy block, so it carries no layer and no
+action code and cannot be rendered into a receipt.
