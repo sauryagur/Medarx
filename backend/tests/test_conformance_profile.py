@@ -1,3 +1,4 @@
+import pytest
 from pydicom.dataset import Dataset, FileDataset
 from pydicom.sequence import Sequence
 
@@ -69,7 +70,7 @@ def test_the_input_dataset_is_never_mutated():
     assert ds.PatientID == "SYN-000042"
 
 
-def test_defined_and_implemented_only_reflect_the_basic_profile():
+def test_the_defined_subset_covers_the_uids_and_never_pixel_data():
     defined = set(PROFILE)
     assert "PixelData" not in defined
     assert {"StudyInstanceUID", "SeriesInstanceUID", "SOPInstanceUID"} <= defined
@@ -135,3 +136,31 @@ def test_surrogate_uids_are_deterministic_and_within_the_ps35_length_limit():
     assert first.startswith(ROOT)
     assert not first.startswith("2.25.")
     assert len(first) <= 64
+
+
+def _nested_dataset(levels_below_top: int) -> Dataset:
+    """A dataset nesting `levels_below_top` sequence levels, innermost empty.
+
+    Built by wrapping upward from the innermost item, so it terminates: every
+    level is a distinct `Dataset` and no level points back at another, so there
+    is no cycle for the walk to chase.
+    """
+    node = Dataset()
+    for _ in range(levels_below_top):
+        wrapper = Dataset()
+        wrapper.ReferencedImageSequence = Sequence([node])
+        node = wrapper
+    return node
+
+
+def test_nesting_at_the_depth_limit_is_walked():
+    # The cap counts levels *below* the top-level dataset: 32 nested levels are
+    # walked, and the item reached at depth 33 is the first one refused. This
+    # test is what pins that reading of the constant.
+    out, _ = deidentify(_nested_dataset(32), ROOT)
+    assert out is not None
+
+
+def test_nesting_past_the_depth_limit_is_refused_rather_than_recursed():
+    with pytest.raises(ValueError, match="refusing rather than"):
+        deidentify(_nested_dataset(33), ROOT)

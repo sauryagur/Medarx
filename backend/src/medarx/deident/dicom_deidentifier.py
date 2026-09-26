@@ -45,9 +45,11 @@ _UID_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
 #: real studies.
 _MAX_UID_LENGTH = 64
 
-#: How deep `_apply_to_dataset` will recurse into nested sequence items before
-#: refusing. Real instances nest a handful of levels; the cap exists so a
-#: pathological or hand-built structure is rejected rather than walked forever.
+#: The greatest number of nested levels *below* the top-level dataset that will
+#: be walked. Depth counts levels below the top: the top-level dataset is depth
+#: 0, a sequence item in it is depth 1, and an item found at depth 33 is refused.
+#: Real instances nest a handful of levels; the cap exists so a pathological or
+#: hand-built structure is rejected rather than walked forever.
 _MAX_NESTING_DEPTH = 32
 
 
@@ -96,9 +98,9 @@ def make_uid(seed: str, root: str) -> str:
 def _copy(dataset: Dataset) -> Dataset:
     """A deep copy, file meta and nested sequence items included.
 
-    A shallow copy is not enough: the profile is applied to sequence items one
-    level down, and a shared `Sequence` would let that edit write through into
-    the caller's dataset.
+    A shallow copy is not enough: the profile is applied to sequence items at
+    every nested level, and a shared `Sequence` would let those edits write
+    through into the caller's dataset.
     """
     return copy.deepcopy(dataset)
 
@@ -112,8 +114,9 @@ def _apply_to_dataset(
         # on data we cannot fully inspect would be exactly the silent pass-through
         # this module must not do. Refuse rather than guess.
         raise ValueError(
-            f"dataset nests more than {_MAX_NESTING_DEPTH} levels deep; "
-            "refusing rather than de-identifying a structure we cannot fully walk"
+            f"dataset nests {depth} levels below the top level, more than the "
+            f"{_MAX_NESTING_DEPTH} this module will walk; refusing rather than "
+            "de-identifying a structure we cannot fully inspect"
         )
 
     for keyword, rule in PROFILE.items():
