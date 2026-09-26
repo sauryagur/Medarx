@@ -72,3 +72,25 @@ Two obligations follow, and they belong to the tasks that own those code paths:
   `gateway_api_key` is empty**, rather than send an empty one. The Phase 1
   observer needs no authentication, so nothing in this phase sends one by
   default.
+
+## Component B — DICOM de-identifier (offline, not on the request path)
+
+**No request-path code imports `medarx.deident`.** It is not wired into the
+pipeline, it is not called during intake, and the only consumer is
+`backend/tests/test_conformance_profile.py`. It exists so the PS3.15
+de-identification rules can be exercised against synthetic fixtures and
+inspected.
+
+`medarx.deident` applies the **implemented subset** of the PS3.15 Basic
+Application Level Confidentiality Profile: a `dict` of DICOM keyword → rule in
+`profiles.py`, and a thin applier in `dicom_deidentifier.py`. Completeness
+against PS3.15 Table E.1-1 is **not** asserted; the profile names the attributes
+the Phase 1 fixtures exercise, and an attribute outside that set is passed
+through unchanged.
+
+**The Clean Pixel Data option is not implemented.** Burned-in identifiers in
+pixel data are not removed, and no output of this module may be described as
+free of burned-in PHI. `CLEAN_PIXEL_DATA_IMPLEMENTED` is `False`,
+`IMPLEMENTED_OPTIONS` is empty, no rule targets `PixelData`, and no code path
+touches it. A dataset passed through this module is de-identified in the header
+sense only. See `backend/src/medarx/deident/profiles.py`.

@@ -1,6 +1,13 @@
+from pydicom.dataset import Dataset, FileDataset
+from pydicom.sequence import Sequence
+
 from medarx.config import load_settings
 from medarx.deident.dicom_deidentifier import deidentify, make_uid
-from medarx.deident.profiles import CLEAN_PIXEL_DATA_IMPLEMENTED, PROFILE
+from medarx.deident.profiles import (
+    CLEAN_PIXEL_DATA_IMPLEMENTED,
+    IMPLEMENTED_OPTIONS,
+    PROFILE,
+)
 from evals.synthetic_phi.gen_dcm import make_synthetic_dataset
 
 ROOT = load_settings().dicom_uid_root
@@ -36,6 +43,13 @@ def test_clean_pixel_data_option_is_not_claimed():
     assert CLEAN_PIXEL_DATA_IMPLEMENTED is False
     assert "CleanPixelData" not in PROFILE
 
+    # An exact-set assertion, not a membership check: the Basic Profile is the
+    # base profile rather than an option, and nothing is layered on top of it.
+    # If this ever fails, an option was implemented — update the set and the
+    # conformance claims deliberately rather than by accident.
+    assert IMPLEMENTED_OPTIONS == frozenset()
+    assert "CleanPixelData" not in IMPLEMENTED_OPTIONS
+
 
 def test_deidentification_is_idempotent():
     once, _ = deidentify(make_synthetic_dataset(), ROOT)
@@ -65,6 +79,53 @@ def test_defined_and_implemented_only_reflect_the_basic_profile():
 def test_pixel_data_bytes_are_carried_through_unchanged():
     out, _ = deidentify(make_synthetic_dataset(), ROOT)
     assert out.PixelData == make_synthetic_dataset().PixelData
+
+
+def _dataset_with_nested_phi() -> FileDataset:
+    """A synthetic instance with PHI buried inside a sequence the profile
+    does not name: the case that passes straight through if the de-identifier
+    only ever looks at the top level."""
+    ds = make_synthetic_dataset()
+    item = Dataset()
+    item.PatientName = "NESTED^PHI"
+    item.PatientID = "NESTED-0001"
+    item.StudyInstanceUID = "1.2.826.0.1.3680043.8.498.1138.100.9.1"
+    # A second level, so a walk that only descends one level is caught too.
+    inner = Dataset()
+    inner.ReferringPhysicianName = "DEEP^PHI"
+    item.ReferencedImageSequence = Sequence([inner])
+    ds.RequestAttributesSequence = Sequence([item])
+    return ds
+
+
+def test_phi_nested_in_a_sequence_is_de_identified_not_passed_through():
+    ds = _dataset_with_nested_phi()
+    out, _ = deidentify(ds, ROOT)
+
+    item = out.RequestAttributesSequence[0]
+    assert "PatientName" not in item
+    assert item.PatientID == ""
+    assert item.ReferencedImageSequence[0].ReferringPhysicianName == ""
+    assert item.StudyInstanceUID.startswith(ROOT)
+
+    # Nothing that looked like the nested values may survive anywhere in the
+    # output; this is the assertion that fails if the walk ever stops working.
+    dumped = out.to_json()
+    for leaked in ("NESTED^PHI", "NESTED-0001", "DEEP^PHI"):
+        assert leaked not in dumped
+
+    # And the input is still the caller's: the nested item keeps its values.
+    assert str(ds.RequestAttributesSequence[0].PatientName) == "NESTED^PHI"
+    assert str(ds.RequestAttributesSequence[0].ReferencedImageSequence[0].ReferringPhysicianName) == "DEEP^PHI"
+
+
+def test_a_profile_named_sequence_is_emptied_and_its_items_do_not_survive():
+    ds = make_synthetic_dataset()
+    item = Dataset()
+    item.PatientName = "NESTED^PHI"
+    ds.PatientInsurancePlanCodeSequence = Sequence([item])
+    out, _ = deidentify(ds, ROOT)
+    assert len(out.PatientInsurancePlanCodeSequence) == 0
 
 
 def test_surrogate_uids_are_deterministic_and_within_the_ps35_length_limit():

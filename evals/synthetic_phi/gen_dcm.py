@@ -37,9 +37,17 @@ def make_synthetic_dataset() -> FileDataset:
     file_meta.MediaStorageSOPInstanceUID = f"{_SYNTHETIC_UID_ROOT}3.1"
     file_meta.ImplementationClassUID = f"{_SYNTHETIC_UID_ROOT}1.1"
 
-    ds = FileDataset("synthetic.dcm", Dataset(), file_meta=file_meta, preamble=b"\0" * 128)
-    ds.is_little_endian = True
-    ds.is_implicit_VR = False
+    # The VR flags go in the constructor rather than being assigned afterwards:
+    # setting them as attributes is deprecated in pydicom 3.x, and a fixture
+    # that warns on every call drowns the suite's output.
+    ds = FileDataset(
+        "synthetic.dcm",
+        Dataset(),
+        preamble=b"\0" * 128,
+        file_meta=file_meta,
+        is_implicit_VR=False,
+        is_little_endian=True,
+    )
 
     # -- Identity block: every one of these is in the Basic Profile's scope.
     ds.PatientName = "SYNTHETIC^TESTONLY"

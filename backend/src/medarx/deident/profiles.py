@@ -1,4 +1,13 @@
-"""The PS3.15 Basic Application Level Confidentiality Profile, as data.
+"""The implemented subset of the PS3.15 Basic Application Level Confidentiality
+Profile, as data.
+
+**This is a subset, not the whole profile.** PS3.15 Table E.1-1 names more
+attributes than the 35 listed below — `PatientComments`, `Allergies`,
+`AdditionalPatientHistory`, `ProtocolName`, the `ClinicalTrial*` and
+`DeviceSerialNumber` attributes among them. Completeness against Table E.1-1
+is **not asserted** by this package and no test claims it. What is here is the
+set the Phase 1 fixtures exercise, and a dataset containing an attribute from
+outside this set has that attribute passed through unchanged.
 
 The profile is a `dict` of DICOM keyword -> `Rule`, and the de-identifier is a
 thin applier over it. Splitting them that way is the point: the profile is
@@ -20,6 +29,7 @@ from typing import Literal
 
 __all__ = [
     "CLEAN_PIXEL_DATA_IMPLEMENTED",
+    "DeidActionKind",
     "IMPLEMENTED_OPTIONS",
     "PROFILE",
     "Rule",
@@ -44,10 +54,11 @@ DeidActionKind = Literal["replace_uid", "empty", "remove"]
 class Rule:
     """One profile entry: what to do, to which keyword, and its DICOM VR.
 
-    `vr` is the value representation the attribute is expected to carry. It is
-    used to type an emptied value correctly rather than to validate the input;
-    an attribute whose VR does not match is a malformed dataset and is left for
-    the caller to reject, not silently coerced here.
+    `vr` records the value representation the attribute is expected to carry.
+    Today the applier consults it only to tell sequences apart, which are
+    emptied to an empty `Sequence` rather than a zero-length string. It is
+    recorded, not validated: an attribute whose VR does not match is a malformed
+    dataset, left for the caller to reject rather than silently coerced here.
     """
 
     action: DeidActionKind
@@ -117,8 +128,11 @@ _REPLACE_UID = {
     "SynchronizationFrameOfReferenceUID": "UI",
 }
 
-#: The Basic Application Level Confidentiality Profile. Keys are DICOM keywords
-#: so the profile reads the way the standard's tables do.
+#: The implemented subset of the Basic Application Level Confidentiality
+#: Profile. Keys are DICOM keywords so the profile reads the way the standard's
+#: tables do. Not exhaustive against PS3.15 Table E.1-1: these are the
+#: attributes the Phase 1 fixtures exercise, and nothing here asserts that the
+#: list is complete.
 PROFILE: dict[str, Rule] = {
     **_rules("remove", _REMOVE),
     **_rules("empty", _EMPTY),

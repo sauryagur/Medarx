@@ -4,13 +4,16 @@
 nothing in the privacy kernel's live pipeline imports it, and it exists so the
 de-identification rules can be exercised against a fixture and inspected.
 
-Three properties matter more than speed here:
+Four properties matter more than speed here:
 
 * **It never mutates its input.** It returns a deep copy, so a caller's
   dataset is still theirs afterwards and the operation is re-runnable on the
   original.
 * **It is idempotent.** A UID already under `root` is left alone, so running
   the de-identifier twice produces the same dataset as running it once.
+* **It reaches nested items.** Sequence items are walked recursively, so a
+  `PatientName` inside e.g. `RequestAttributesSequence` is removed like any
+  other. A structure nested past the depth cap is refused, not passed through.
 * **It does not touch pixel data.** There is no rule for `PixelData` and no
   branch that reaches it. Burned-in identifiers survive, which is exactly why
   `CLEAN_PIXEL_DATA_IMPLEMENTED` is `False`.
@@ -21,6 +24,7 @@ from __future__ import annotations
 import copy
 import uuid
 from dataclasses import dataclass
+
 from pydicom.dataset import Dataset
 from pydicom.sequence import Sequence
 
@@ -35,8 +39,16 @@ _UID_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
 #: PS3.5 caps a whole UID at 64 characters. A UUIDv5 renders as up to 39 decimal
 #: digits, which does not fit under a 28-character org root, so the derived
 #: value is reduced modulo the number of digits that remain rather than the full
-#: 128 bits being emitted.
+#: 128 bits being emitted. The cost of that reduction is ~10^35 distinct
+#: surrogates rather than 2^128: ample for a synthetic conformance fixture, not
+#: for production. Revisit the derivation before this is used to de-identify
+#: real studies.
 _MAX_UID_LENGTH = 64
+
+#: How deep `_apply_to_dataset` will recurse into nested sequence items before
+#: refusing. Real instances nest a handful of levels; the cap exists so a
+#: pathological or hand-built structure is rejected rather than walked forever.
+_MAX_NESTING_DEPTH = 32
 
 
 def _derived_component(seed: str, root: str) -> str:
@@ -92,18 +104,34 @@ def _copy(dataset: Dataset) -> Dataset:
 
 
 def _apply_to_dataset(
-    dataset: Dataset, root: str, actions: list[DeidAction]
+    dataset: Dataset, root: str, actions: list[DeidAction], depth: int = 0
 ) -> None:
     """Apply the profile to `dataset` in place. `dataset` is always a copy."""
+    if depth > _MAX_NESTING_DEPTH:
+        # A dataset this deeply nested is not a real one, and recursing further
+        # on data we cannot fully inspect would be exactly the silent pass-through
+        # this module must not do. Refuse rather than guess.
+        raise ValueError(
+            f"dataset nests more than {_MAX_NESTING_DEPTH} levels deep; "
+            "refusing rather than de-identifying a structure we cannot fully walk"
+        )
+
     for keyword, rule in PROFILE.items():
-        if keyword not in dataset:
-            continue
-        _apply_rule(dataset, keyword, rule, root, actions)
-        # Sequence items can carry the same attributes one level down, and a
-        # rule that stopped at the top level would leave those in the clear.
-        for item in getattr(dataset, keyword, []) or []:
-            if isinstance(item, Dataset):
-                _apply_to_dataset(item, root, actions)
+        if keyword in dataset:
+            _apply_rule(dataset, keyword, rule, root, actions)
+
+    # Nested items. This walks *every* sequence in the dataset, not only the ones
+    # the profile names by keyword: a rule that stopped at the top level would
+    # leave a `PatientName` inside e.g. `RequestAttributesSequence` in the clear,
+    # which is the failure this component is not allowed to have. Recursion, not
+    # a single level, so a PHI-bearing item inside a sequence inside a sequence
+    # is reached too.
+    for element in dataset:
+        value = element.value
+        if isinstance(value, Sequence):
+            for item in value:
+                if isinstance(item, Dataset):
+                    _apply_to_dataset(item, root, actions, depth + 1)
 
 
 def _apply_rule(
