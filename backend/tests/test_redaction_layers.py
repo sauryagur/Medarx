@@ -10,10 +10,11 @@ entity, not of a number a future setting could cross.
 One block here *is* threshold-dependent, and it is a different condition: a
 detection that has a replacer but scores below the threshold is not replaced,
 because applying a replacement on a detection the engine is unsure about is
-redaction by guessing. It carries the same `NER_UNRESOLVED` code as the
-score-independent block — they are told apart by the entity named in the
-disposition, not by the code — so those tests are marked as such where they
-appear.
+redaction by guessing. It carries `LOW_CONFIDENCE_NER_UNRESOLVED`, its own wire
+code, rather than the `NER_UNRESOLVED` the score-independent block uses — the
+two used to share a code, which made their receipts byte-identical on the wire
+because `Disposition.entity` reaches no durable record. So those tests are
+marked as threshold-dependent where they appear.
 
 The scores and spans quoted in the comments are what the engine actually
 returns on this machine. They were measured, not intended, and several of them
@@ -802,9 +803,14 @@ def _pass_rate(store, settings, engine):
 
 def test_the_pass_rate_over_ordinary_radiology_prose(store, settings, engine):
     # Before relative intervals were recognised, 14 of these 28 blocked — a
-    # system that could not process half of ordinary radiology prose. The two
-    # that still block are named in `test_the_two_sentences_that_still_block`
-    # so this cannot quietly improve by blocking something new.
+    # system that could not process half of ordinary radiology prose.
+    #
+    # Four still block with the order undeclared, not two. Two are the
+    # `date_order` gate, which declaring the order fixes (see
+    # `test_declaring_a_date_order_is_what_the_two_remaining_date_blocks_need`);
+    # the other two are named in `test_the_two_sentences_that_still_block`. All
+    # four are listed here so this cannot quietly improve by blocking something
+    # new.
     passed, total, blocked = _pass_rate(store, settings, engine)
     assert (passed, total) == (24, 28), f"still blocked: {blocked}"
 
@@ -924,15 +930,82 @@ def test_a_clinical_word_masked_as_a_named_entity_is_pinned_not_hidden(store, se
     # an identifier — but the clinical text is corrupted, which is the failure
     # mode this suite exists to keep visible.
     #
-    # Not fixed here. The fix belongs with the detectors or with a closed
-    # clinical vocabulary, and either risks the detection of genuine
-    # organisation names, which is the recall the eval harness measures.
+    # **This is a characterisation test, and it is meant to go red.** It asserts
+    # that the mask *is* present, so the day someone fixes the defect this
+    # suite fails. That is progress, not a regression, and the fix should
+    # replace the assertion rather than work around it.
+    #
+    # NOT FIXED HERE, and the reasoning is worth stating precisely because an
+    # earlier version of this comment got it wrong:
+    #
+    # * The recall argument applies to `Pulmonary`, `Pleural`, `Nodule`, `Scan`
+    #   and `HU` — open-ended English head nouns, where any vocabulary list is a
+    #   list that rots.
+    # * It does NOT apply to `CT`. `CT`/`MR`/`XR`/`US`/`PET` are C.7.3 DICOM
+    #   coded terms, not proper nouns: no organisation is named "CT", so a closed
+    #   all-caps modality allowlist cannot lose a genuine organisation name. The
+    #   earlier comment lumped the modality case in with the head nouns, and
+    #   that was wrong.
+    # * The reason for declining anyway is therefore not recall. It is that a
+    #   fix at this seam would establish a *second vocabulary table nobody
+    #   owns* — exactly the problem `extraction/allowlists.py`'s own docstring
+    #   records for field names — and would imply the class was handled while
+    #   leaving five of the six cases untouched.
+    # * And the corruption is *visible and legible*: `[REDACTED:PERSON]
+    #   embolism, right lower lobe` is obviously wrong to anyone reading the
+    #   approved payload, and recoverable from the source. C2's block was the
+    #   opposite — invisible, total, and unrecoverable. That asymmetry is the
+    #   actual justification for deferring this one and fixing that one.
+    #
+    # OWNER: the detector and eval track. Rate over the 28-sentence corpus is
+    # pinned by `test_the_rate_of_clinical_words_masked_in_approved_payloads`.
+    # **Phase 2 entry condition:** that rate is a blocker for shipping layer 2
+    # against real report text, and the eval harness in a later task is where
+    # it gets a denominator worth acting on.
     out = _run(store, settings, engine, text)
     assert not out.blocked, f"{text!r} unexpectedly blocked"
     assert f"[REDACTED:{entity}]" in out.approved.report_text
     # Word-boundaried: "CT" is a substring of "REDACTED", so a plain
     # containment check calls a correctly masked sentence a failure.
     assert re.search(rf"\b{re.escape(word)}\b", out.approved.report_text) is None
+
+
+#: A named-entity mask standing where an ordinary clinical word was. A date
+#: shift is a *correct* transformation of the text and is not counted here:
+#: what is measured is the false positive, not every byte that moved.
+_NAMED_ENTITY_MASK = re.compile(r"\[REDACTED:(\w+)\]")
+
+
+def _altered_by_a_named_entity_mask(store, settings, engine):
+    """The corpus sentences whose approved text carries such a mask."""
+    altered = []
+    for text in ORDINARY_SENTENCES:
+        out = _run(store, settings, engine, text)
+        if out.blocked:
+            continue
+        if (out.approved.report_text != text
+                and _NAMED_ENTITY_MASK.search(out.approved.report_text)):
+            altered.append(text)
+    return altered
+
+
+def test_the_rate_of_clinical_words_masked_in_approved_payloads(store, settings, engine):
+    # The figure a reader would quote, computed here rather than written into a
+    # report — an earlier version of the record quoted 7/28 by counting this
+    # corpus together with the separate six-sentence list above, two distinct
+    # lists counted as one, producing a number nobody could reproduce.
+    # Measured over `ORDINARY_SENTENCES` alone: 5/28 unset, 6/28 declared.
+    unset = _altered_by_a_named_entity_mask(store, settings, engine)
+    assert len(unset) == 5, unset
+    declared = _altered_by_a_named_entity_mask(
+        store, settings.model_copy(update={"date_order": "MDY"}), engine
+    )
+    assert len(declared) == 6, declared
+    # Declaring the order adds exactly one: the sentence that blocked on an
+    # undeclared numeric date is also the one carrying the modality code.
+    assert set(declared) - set(unset) == {
+        "Previous CT chest on 01/14/2026 for comparison."
+    }
 
 
 def test_a_resolved_dispositions_code_is_never_one_that_could_be_sent(store, settings, engine):
