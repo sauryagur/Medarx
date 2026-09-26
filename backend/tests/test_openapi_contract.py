@@ -169,3 +169,127 @@ def test_every_emitted_action_code_is_in_the_contract():
 @pytest.mark.parametrize("code", sorted(_contract_action_codes()))
 def test_contract_member_is_non_empty_upper_snake_case(code):
     assert code and code.replace("_", "").isupper(), f"malformed ActionCode member: {code!r}"
+
+
+def _contract_layer_tags() -> set[str]:
+    schema = _load_contract()["components"]["schemas"]["Layer"]
+    return set(schema["enum"])
+
+
+#: Module-level or class-level names whose assignment declares the layer tags
+#: the code can emit. Named without `ACTION_CODE` so `_emitted_action_codes` —
+#: which keys off that substring — cannot mistake this declaration for an
+#: action-code emission site.
+_LAYER_CONSTANTS = frozenset({"LAYER", "LAYERS"})
+
+#: Modules expected to declare layer tags, asserted as an exact set by
+#: `test_the_layer_sweep_finds_every_declaration_site`, so an empty sweep
+#: cannot make the equality assertion pass vacuously.
+EXPECTED_LAYER_SITES: frozenset[str] = frozenset(
+    {
+        "backend/src/medarx/errors.py",
+        "backend/src/medarx/extraction/payload_extractor.py",
+        "backend/src/medarx/models.py",
+    }
+)
+
+def _emitted_layer_tags() -> dict[str, list[str]]:
+    """Every layer tag this package can emit, keyed by source file.
+
+    Three declaration shapes carry a layer tag, all collected by parsing so a
+    new one cannot be added without appearing here: the `LAYER = "..."` class
+    attribute each error class fixes, the `LAYERS` tuple that mirrors the enum,
+    and the `layer: Literal[...]` annotation on the receipt. Sweeping every
+    `Literal` in the package instead would sweep in unrelated closed sets —
+    `status`, `final_disposition`, a sign-off decision — and compare those
+    against the layer enum, which is not what this test is about.
+
+    Note on naming: no constant in the swept source carries `ACTION_CODE` in
+    its name, so this walk cannot be mistaken for an action-code emission site
+    by `_emitted_action_codes`.
+    """
+    found: dict[str, list[str]] = {}
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+        tags: list[str] = []
+        for node in ast.walk(tree):
+            # LAYER = "A" on an error class: the tag a refusal carries.
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id in _LAYER_CONSTANTS for t in node.targets
+            ):
+                tags.extend(_string_literals(node.value))
+            # layer: Literal["J", "A", ...] on the receipt: the tag on the wire.
+            elif (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "layer"
+                and isinstance(node.annotation, ast.Subscript)
+                and _is_literal_subscript(node.annotation.value)
+            ):
+                tags.extend(_string_literals(node.annotation.slice))
+
+        if tags:
+            found[str(path.relative_to(REPO_ROOT))] = tags
+    return found
+
+
+def _is_literal_subscript(value: ast.AST) -> bool:
+    """True for `Literal[...]`, the only subscript carrying layer tags here."""
+    if isinstance(value, ast.Name):
+        return value.id == "Literal"
+    if isinstance(value, ast.Attribute):
+        return value.attr == "Literal"
+    return False
+
+
+def test_the_layer_sweep_finds_every_declaration_site():
+    """Guard against a layer sweep that has quietly stopped seeing anything.
+
+    An empty result would make the equality assertion below pass vacuously —
+    an empty code-side set is trivially "equal" to nothing, and the test would
+    then guard nothing. So the sites are named: each file that declares a layer
+    tag must be found.
+    """
+    emitted = _emitted_layer_tags()
+    assert set(emitted) == EXPECTED_LAYER_SITES, (
+        "the set of modules declaring layer tags does not match "
+        "EXPECTED_LAYER_SITES. An empty result means the sweep stopped finding "
+        "declaration sites and is broken — it would then pass silently while an "
+        "off-contract layer shipped. A changed set means a site was removed, "
+        "renamed, or added and EXPECTED_LAYER_SITES must be updated "
+        f"deliberately. swept {SOURCE_ROOT.relative_to(REPO_ROOT)}; "
+        f"expected={sorted(EXPECTED_LAYER_SITES)}; found={sorted(emitted)}"
+    )
+
+
+def test_the_code_layer_set_equals_the_contract_enum():
+    """Equality, not containment: a missing tag on either side is a defect.
+
+    Containment alone would not have caught the drift that motivated this test —
+    the contract gaining a tag the code has never heard of. The receipt's
+    `layer` is a `Literal`, so an off-contract tag cannot be produced at all,
+    and a tag the contract names but the code lacks would be silently
+    unproducible. Both directions are therefore defects.
+    """
+    contract_tags = _contract_layer_tags()
+    emitted = _emitted_layer_tags()
+    assert emitted, (
+        f"no layer declaration sites were found under "
+        f"{SOURCE_ROOT.relative_to(REPO_ROOT)}; the sweep is broken"
+    )
+    code_tags = {tag for tags in emitted.values() for tag in tags}
+    assert code_tags == contract_tags, (
+        "the layer tags the code can emit differ from the Layer enum in "
+        f"{CONTRACT.name}: "
+        f"in_code_not_in_contract={sorted(code_tags - contract_tags)}, "
+        f"in_contract_not_in_code={sorted(contract_tags - code_tags)}; "
+        f"declared in {sorted(emitted)}"
+    )
+
+
+@pytest.mark.parametrize("tag", sorted(_contract_layer_tags()))
+def test_contract_layer_tag_is_non_empty_string(tag):
+    assert isinstance(tag, str) and tag.strip() == tag and tag, (
+        f"malformed Layer member: {tag!r}"
+    )

@@ -1,7 +1,7 @@
 """The error taxonomy of the privacy kernel.
 
 Every fail-closed refusal is a `MedarxError`: it carries a `layer` drawn from
-the closed set {"J", "A", "D.1", "D.2", "D.3", "E", "F"} (the `Layer` enum in
+the closed set {"J", "A", "C", "D.1", "D.2", "D.3", "E", "F"} (the `Layer` enum in
 `contracts/openapi.yaml`) and a non-empty tuple of `action_codes` that are
 members of the contract's `ActionCode` enum. Codes classify a refusal; they
 never carry a raw value, so an error built this way is safe to render into a
@@ -65,16 +65,15 @@ class ExtractionError(MedarxError):
 class PseudonymError(MedarxError):
     """Refusal by the pseudonymization service (component C).
 
-    The contract's `Layer` enum is {"J", "A", "D.1", "D.2", "D.3", "E", "F"}:
-    there is no "C", because pseudonymization is not itself a row of the design's
-    §6 enforcement table — it performs no block decision. A refusal to replace a
-    structured identifier is nevertheless a real refusal, and the tag it must
-    carry on a receipt is the one for the deterministic structured-identifier
-    replacement it could not complete: `D.1`, redaction layer 1. Emitting "C"
-    would put a value off the contract enum onto the wire.
+    A refusal here is attributed to component C, not to redaction: a receipt's
+    job is to name the component that refused, and filing C's refusals under
+    `D.1` would misattribute them on the wire. `C` is a member of the contract's
+    `Layer` enum, which is the closed set every `LAYER` here and the receipt's
+    `layer` field draw from, and which
+    `tests/test_openapi_contract.py` keeps equal to that enum.
     """
 
-    LAYER = "D.1"
+    LAYER = "C"
 
 
 class RedactionError(MedarxError):

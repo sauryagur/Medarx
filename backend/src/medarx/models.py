@@ -39,7 +39,7 @@ CODE_SHAPE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 #: The complete closed set of layer tags, mirroring the `Layer` enum in
 #: contracts/openapi.yaml. There is no bare "D": the three redaction layers are
 #: tagged D.1, D.2, and D.3 individually.
-LAYERS = ("J", "A", "D.1", "D.2", "D.3", "E", "F")
+LAYERS = ("J", "A", "C", "D.1", "D.2", "D.3", "E", "F")
 
 FinalDisposition = Literal[
     "approved",
@@ -146,7 +146,7 @@ class BlockReceipt(BaseModel):
 
     status: Literal["blocked"] = "blocked"
     request_id: str
-    layer: Literal["J", "A", "D.1", "D.2", "D.3", "E", "F"]
+    layer: Literal["J", "A", "C", "D.1", "D.2", "D.3", "E", "F"]
     action_codes: list[str] = Field(min_length=1)
     policy_version: str
 
