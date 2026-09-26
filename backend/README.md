@@ -110,13 +110,21 @@ access-controlled database and why no component on the model path reads it;
 a keyed derivation — `HMAC-SHA256(audit_key, "<domain>:<reference>")`, truncated
 to 8 hex characters — so assignment is reproducible by anyone holding the key.
 The `pseudonym_study` and `pseudonym_patient` rows make it *sticky* and
-auditable; the primary key on the original reference, not the truncation, is
-what stops two originals sharing a surrogate.
+auditable, and carry two constraints that guard two different properties. The
+**UNIQUE constraint on `surrogate`** is what stops two *different* originals
+from ever sharing a surrogate: a collision in the 8-hex truncation (likely past
+~65k references in one scope) makes assignment fail loudly rather than
+re-bind a live surrogate to a second original. The **primary key on the
+original reference** is the separate, weaker guarantee that one original is
+never assigned twice. Neither is optional;
+`test_pseudonym.py::test_a_surrogate_collision_is_refused` pins the first.
 
 The shift moves every date of one patient by the same number of days in
 `[-365, 365]`, which is what preserves sequence and duration — the invariant
 clinical meaning depends on. It does not preserve the month, the day of the
-month, or the weekday.
+month, or the weekday. The one exception is a date already at the edge of the
+representable calendar, which saturates at `date.max` / `date.min` rather than
+raising, and so loses the duration guarantee for that single date.
 
 **An empty audit key is refused**, by both the derivation and the store, with
 `AuditKeyRequired`. Unkeyed surrogates would be a reversible encoding, which

@@ -12,12 +12,17 @@ from datetime import date
 
 import pytest
 from conftest import KEY  # noqa: F401  (the shared `store` fixture comes from conftest)
-from sqlalchemy import select
+from sqlalchemy import create_engine, insert, select
+from sqlalchemy.exc import IntegrityError
 
 from medarx.errors import MedarxError
 from medarx.pseudonym.date_shift import patient_offset, shift_date
+from medarx.pseudonym.derivation import audit_digest, surrogate
 from medarx.pseudonym.errors import AuditKeyRequired
-from medarx.pseudonym.mapping_store import PATIENT_TABLE, MappingStore
+from medarx.pseudonym.mapping_store import PATIENT_TABLE, STUDY_TABLE, MappingStore
+
+STUDY_DOMAIN = "medarx-study"
+PATIENT_DOMAIN = "medarx-patient"
 
 
 def test_same_original_maps_to_the_same_surrogate(store):
@@ -49,11 +54,17 @@ def test_surrogate_shape_is_eight_hex_characters(store):
         int(digest, 16)  # raises unless it is hex
 
 
-def test_study_and_patient_namespaces_are_separate(store):
-    # The same literal reference in the two tables must not produce the same
-    # surrogate: the domains are separated, so neither maps into the other.
-    assert store.surrogate_for_patient("REF-1").startswith("medarx-patient-")
-    assert store.surrogate_for_study("REF-1") != store.surrogate_for_patient("REF-1")
+def test_domains_are_separated_in_the_signed_message():
+    # Compared as digests, not as prefixed surrogates: the prefixes alone would
+    # make any two surrogates differ, so comparing the strings could not tell
+    # whether the domain is actually signed in.
+    assert audit_digest(KEY, STUDY_DOMAIN, "REF-1") != audit_digest(KEY, PATIENT_DOMAIN, "REF-1")
+
+
+def test_study_and_patient_surrogates_do_not_share_a_digest(store):
+    study = store.surrogate_for_study("REF-1").removeprefix(STUDY_DOMAIN + "-")
+    patient = store.surrogate_for_patient("REF-1").removeprefix(PATIENT_DOMAIN + "-")
+    assert study != patient
 
 
 def test_shift_preserves_order_and_duration_across_ten_years():
@@ -116,14 +127,40 @@ def test_patient_offset_is_stable_and_persisted_across_store_reopen(tmp_path):
         first = first_store.offset_for_patient("PAT-0007")
     with _open(url) as second_store:
         assert second_store.offset_for_patient("PAT-0007") == first
-        with second_store.connect() as conn:
+        # Read straight from the database rather than through the store: the
+        # mapping store deliberately exposes no connection or query, and the
+        # offset persisted beside the surrogate is the one served back.
+        with create_engine(url).connect() as conn:
             persisted = conn.execute(
                 select(PATIENT_TABLE.c.shift_offset).where(
                     PATIENT_TABLE.c.patient_ref == "PAT-0007"
                 )
             ).scalar_one()
-        # The offset stored beside the surrogate is the one served back.
         assert persisted == first
+
+
+def test_a_surrogate_collision_is_refused(tmp_path):
+    # A surrogate already bound to one original must never be handed to a
+    # second. The UNIQUE constraint on `surrogate` is what refuses it: the
+    # primary key on `study_ref` would not, because the colliding original is a
+    # different row entirely. The collision is seeded directly rather than
+    # brute-forced, by binding `STU-0001`'s would-be surrogate to another
+    # reference first.
+    url = f"sqlite:///{tmp_path / 'map.db'}"
+    contested = surrogate(KEY, STUDY_DOMAIN, "STU-0001")
+    engine = create_engine(url)
+    MappingStore(url, KEY).close()  # create the schema
+    with engine.begin() as conn:
+        conn.execute(insert(STUDY_TABLE).values(study_ref="STU-COLLIDE", surrogate=contested))
+    with _open(url) as colliding:
+        with pytest.raises(IntegrityError):
+            colliding.surrogate_for_study("STU-0001")
+
+    # The contested surrogate is still bound to the reference it was issued to,
+    # and the refused assignment left no row behind.
+    with engine.connect() as conn:
+        rows = conn.execute(select(STUDY_TABLE.c.study_ref, STUDY_TABLE.c.surrogate)).all()
+    assert rows == [("STU-COLLIDE", contested)]
 
 
 def test_concurrent_assignment_yields_one_surrogate(tmp_path):
@@ -163,6 +200,15 @@ def test_audit_key_required_is_not_a_privacy_layer_error():
     # It must not be catchable as a MedarxError: there is no layer and no
     # action code that could reach a block receipt.
     assert not issubclass(AuditKeyRequired, MedarxError)
+
+
+def test_in_memory_sqlite_is_usable():
+    # Every in-memory connection is a separate empty database, so the store
+    # pins such a URL to a single connection; otherwise the schema created at
+    # construction would be gone by the first assignment.
+    with _open("sqlite:///:memory:") as memory_store:
+        a = memory_store.surrogate_for_study("STU-0001")
+        assert memory_store.surrogate_for_study("STU-0001") == a
 
 
 @contextmanager

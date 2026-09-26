@@ -20,9 +20,17 @@ __all__ = ["SURROGATE_HEX_CHARS", "audit_digest", "require_audit_key", "surrogat
 
 
 #: Characters of hex kept from a surrogate digest. Eight hex characters is
-#: 32 bits: a birthday collision is likely past ~65k references in one scope,
-#: so the store's primary key on the original reference — not this truncation —
-#: is what guarantees that two originals never share a surrogate.
+#: 32 bits, so a birthday collision becomes likely past roughly 65k references
+#: in one scope (2^16, where the collision probability reaches ~50%).
+#:
+#: The truncation is therefore *not* what prevents two originals from sharing a
+#: surrogate, and nothing here relies on it doing so. What prevents that is the
+#: UNIQUE constraint on `surrogate` in the mapping store's tables: a collision
+#: makes assignment fail loudly rather than re-bind a live surrogate to a
+#: second original. The primary key on the original reference is a different
+#: and weaker property — one row per original, so the same original is never
+#: assigned twice. Both constraints are load-bearing; they guard different
+#: things, and `tests/test_pseudonym.py` pins the collision refusal.
 SURROGATE_HEX_CHARS = 8
 
 
