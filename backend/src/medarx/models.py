@@ -21,8 +21,14 @@ __all__ = ["ExtractionRequest", "StructuredPayload", "canonical_hash"]
 
 
 def canonical_hash(value: Any) -> str:
-    """Deterministic SHA-256 over a canonical JSON encoding of `value`."""
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    """Deterministic SHA-256 over a canonical JSON encoding of `value`.
+
+    No `default=` fallback: a value with no defined JSON encoding raises
+    `TypeError` rather than being hashed as its `str()`. This hash anchors an
+    audit chain, so its encoding must be defined rather than merely stable for
+    a given object. Callers pass a defined encoding, not a live object.
+    """
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 

@@ -74,7 +74,7 @@ def _age_band(value: str) -> str:
     if m is None:
         raise ExtractionError(
             layer=LAYER,
-            action_codes=("FIELD_NOT_ALLOWLISTED",),
+            action_codes=("MALFORMED_METADATA",),
             message="PatientAge is not a DICOM age string such as 045Y",
         )
     years = int(m.group(1))
@@ -128,6 +128,14 @@ def pipeline_for(
             continue
         dicom_fields[field] = _age_band(value) if key == "PatientAge" else value
 
+    # `input_hash` deliberately covers the FULL metadata mapping, including the
+    # identifier attributes that are dropped below. It attests to what
+    # *arrived* at the boundary, not to what survived: if it covered only the
+    # surviving fields, two different inputs that reduced to the same payload
+    # would hash identically and the audit trail could no longer tell them
+    # apart. The hash is one-way and the raw values never cross the boundary,
+    # so including them discloses nothing. Do not narrow this to the carried
+    # fields.
     input_hash = canonical_hash(
         {
             "function": function,
@@ -138,9 +146,7 @@ def pipeline_for(
         }
     )
 
-    prior_study_refs = (
-        tuple(study.prior_study_refs) if allowed & _PRIOR_FIELDS else ()
-    )
+    prior_study_refs = tuple(study.prior_study_refs) if allowed & _PRIOR_FIELDS else ()
 
     return StructuredPayload(
         function=function,

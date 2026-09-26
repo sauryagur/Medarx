@@ -85,7 +85,7 @@ def test_malformed_patient_age_is_refused():
     with pytest.raises(ExtractionError) as ei:
         pipeline_for("draft", STUDY, "text", META | {"PatientAge": "forty"}, PV)
     assert ei.value.layer == "A"
-    assert ei.value.action_codes == ("FIELD_NOT_ALLOWLISTED",)
+    assert ei.value.action_codes == ("MALFORMED_METADATA",)
 
 
 def test_payload_hash_is_none_until_the_contract_check_sets_it():
@@ -94,3 +94,9 @@ def test_payload_hash_is_none_until_the_contract_check_sets_it():
                           study_ref="STU-0001", prior_study_refs=(),
                           policy_version=PV, input_hash="abc", payload_hash=None)
     assert p.payload_hash is None
+
+
+def test_canonical_hash_refuses_non_serialisable_values():
+    from medarx.models import canonical_hash
+    with pytest.raises(TypeError):
+        canonical_hash({"value": object()})
