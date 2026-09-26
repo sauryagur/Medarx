@@ -233,8 +233,17 @@ class ModelResponse(BaseModel):
     docstring is the note meant to prevent a wrong import.
 
     `raw` is unbounded by type: the only unvalidated field in the package.
-    Nothing reads it back into a request, and the gateway task should give it a
-    dedicated model when it lands.
+    Nothing reads it back into a request. An earlier version of this docstring
+    said the gateway task "should give it a dedicated model when it lands" —
+    that task has landed (component F, `medarx.gateway`) and **deliberately**
+    did not, so the note is now a record rather than a pending instruction. A
+    dedicated model is a contract-shaped decision: `raw` is the whole decoded
+    provider body, whose shape differs between providers on exactly the fields
+    a model would have to enumerate, and the OpenAI wire spec is what lets one
+    gateway serve a local engine and a cloud one. The gateway keeps `raw`
+    whole for capture and audit and reads `content` and `model_id` out of it
+    through narrow, checked accessors. Typing `raw` is component G's or a later
+    task's call, and nothing in the package depends on it staying untyped.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

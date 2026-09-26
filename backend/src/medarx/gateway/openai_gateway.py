@@ -2,27 +2,39 @@
 
 The single property this module is arranged around is the one design §6 row 7
 states: **anything other than the exact payload object E approved, or an
-unknown model identifier, is an error and no provider call is made.** Two
-checks, both before the socket is touched, in this order:
+unknown model identifier, is an error and no provider call is made.** Both
+checks live in `verify_approved_payload`, in this order, and neither touches a
+socket:
 
 1. `build_body` resolves the model through the registry and refuses an unknown
-   one. It is called first in `send` and holds no I/O at all, so an unknown
-   model is refused before a request body exists — not after, and not by
-   letting a provider return a 4xx about it.
-2. `verify_approved_payload` re-derives the approved payload's hash from the
-   object itself and refuses unless it equals the hash the policy engine
-   approved. It is a separate call because the composition root is what holds
-   both the payload and the engine's decision; see its docstring for the
-   ordering obligation that implies.
+   one. It holds no I/O at all, so an unknown model is refused before a
+   request body is serialised — not after, and not by letting a provider
+   return a 4xx about it.
+2. The payload's hash is re-derived from the object itself and must equal the
+   hash the policy engine approved.
 
-**The bytes are the evidence.** `build_body` produces the body, it is
-serialised exactly once, and those bytes are what goes on the wire and what
-`last_request_body` returns. Nothing re-encodes, reorders, normalises or
-re-serialises them in between, because the whole egress story in design §3 I
-is a comparison of the observed bytes against what was approved, and that
-comparison is meaningless if the gateway records one encoding and transmits
-another. A test in `tests/test_gateway.py` measures the bytes at a loopback
-socket and asserts they equal `last_request_body()`.
+**What is verified is what is sent, and that is enforced by a type.**
+`verify_approved_payload` returns an `ApprovedSend`; `send` accepts nothing
+else. That is not tidiness. When `send` took a bare `ModelRequest` and the
+verifier returned `None`, the two were unrelated values with nothing binding
+them: a caller could verify the approved payload and then send a request built
+from a different one, nothing would object, and `last_request_body` would
+return the substituted bytes — so component I's two-observer agreement check
+would have **passed and certified the leak**. An evidence mechanism that cannot
+fail on the failure it exists to detect is worse than no evidence, because it
+manufactures confidence. The token closes all three halves at once: an
+unverified send is unrepresentable, the request is bound to the verification
+that covered it, and the verification cannot be skipped because `send` has
+nothing else to take.
+
+**The bytes are the evidence, and they are fixed at authorisation.** The body
+is built and encoded once, inside the verifier, and the resulting `bytes` are
+what go on the wire *and* what `last_request_body()` returns. Nothing
+re-encodes, reorders, normalises or re-derives them in between, because the
+egress story in design §3 I is a comparison of the observed bytes against what
+was approved, and that comparison is meaningless if the gateway records one
+encoding and transmits another. A test in `tests/test_gateway.py` measures the
+bytes at a loopback socket and asserts they equal `last_request_body()`.
 
 **Provider-agnostic by construction, not by configuration.** The wire spec is
 OpenAI's, and the base URL, model, key and timeout all come from `Settings`.
@@ -40,6 +52,8 @@ from __future__ import annotations
 
 import json
 import secrets
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -54,7 +68,7 @@ from medarx.errors import (
 from medarx.gateway.model_registry import ALLOWED_MODELS, is_allowed
 from medarx.models import ModelRequest, ModelResponse, StructuredPayload, payload_hash_of
 
-__all__ = ["CHAT_COMPLETIONS_PATH", "ModelGateway"]
+__all__ = ["CHAT_COMPLETIONS_PATH", "ApprovedSend", "ModelGateway"]
 
 #: The path, relative to the configured base URL, that the OpenAI chat
 #: completions spec puts it at. A constant rather than a literal at the call
@@ -103,6 +117,74 @@ def _content_of(raw: Any) -> str | None:
         return None
     content = message.get("content")
     return content if isinstance(content, str) else None
+
+
+def _model_id_of(raw: Any) -> str:
+    """The provider's own name for the model it answered with, or `""`.
+
+    Narrow and checked for the same reason `_content_of` is: a provider that
+    answers `"model": null` or `"model": 7` should not reach
+    `ModelResponse.model_id`, which is typed `str` and would turn a strange
+    answer into a pydantic `ValidationError` — an error about *our* types
+    standing in for one about the provider's reply.
+    """
+    if not isinstance(raw, dict):
+        return ""
+    model_id = raw.get("model")
+    return model_id if isinstance(model_id, str) else ""
+
+
+#: The only value that lets an `ApprovedSend` be constructed. It is
+#: module-private, and `tests/test_gateway.py` asserts by AST sweep that the
+#: name is referenced nowhere else under `backend/src/medarx/`, so the token
+#: cannot be minted outside this module.
+#:
+#: **What that is worth, stated honestly.** Python has no access control, so a
+#: determined caller can reach a module-private name — this is the strongest
+#: enforcement the language offers, not a guarantee. It is the same standard
+#: this package already accepts for `ALLOWED_MODELS` and for the module-level
+#: action-code constants, and it is strictly stronger than a comment or a
+#: docstring asking a caller to do the right thing.
+_ISSUED = object()
+
+
+@dataclass(frozen=True)
+class ApprovedSend:
+    """A request that `verify_approved_payload` has authorised to be sent.
+
+    Frozen, and only constructible with this module's private `_ISSUED`
+    sentinel, so the only way to obtain one is to pass the verifier. That
+    closes the whole failure at once: an unverified send cannot be expressed,
+    the request is bound to the verification that covered it, and the
+    verification cannot be skipped because `send` has nothing else to accept.
+
+    `body` and `body_bytes` are the body built and the bytes encoded **during
+    verification**, so what goes on the wire is what was authorised rather than
+    something re-derived at transmission time, and `last_request_body()`
+    returns the very same `bytes` object.
+
+    It holds `approved_payload_hash` rather than the payload itself: a token
+    carrying `report_text` would be a new place that text lives, inside an
+    object that is easy to log, serialise or attach to an exception. The hash
+    is what the rest of the system needs.
+
+    `_issued` is excluded from the repr and from equality, so printing a token
+    does not hand a caller the sentinel to pass back in.
+    """
+
+    request: ModelRequest
+    approved_payload_hash: str
+    body: Mapping[str, object]
+    body_bytes: bytes
+    _issued: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._issued is not _ISSUED:
+            raise TypeError(
+                "ApprovedSend cannot be constructed directly: call "
+                "ModelGateway.verify_approved_payload(payload, approved_hash, "
+                "request), which is the only thing that can authorise a send"
+            )
 
 
 class ModelGateway:
@@ -188,8 +270,9 @@ class ModelGateway:
         self,
         payload: StructuredPayload | None,
         approved_hash: str,
-    ) -> None:
-        """Refuse unless `payload` is the object the policy engine approved.
+        request: ModelRequest,
+    ) -> ApprovedSend:
+        """Check the payload *and* the request, and return the only thing `send` accepts.
 
         The same substitution §6 row 7 names, checked at the last point before
         transmission. `payload_hash` is a *claim*: any caller can populate it,
@@ -215,11 +298,51 @@ class ModelGateway:
         `compare_digest` rather than `==`, so a caller probing this with
         candidate payloads cannot learn the approved hash a byte at a time.
 
-        **Ordering is the caller's obligation.** `send` takes only the model
-        request, so nothing here can enforce that this ran first; the
-        composition root holds both the payload and the engine's decision, and
-        must call this immediately before `send`. Raises `GatewayError`
-        (layer `F`); returns `None` when the payload is the approved one.
+        **`request` is part of what is being authorised, and that is the
+        point.** An earlier version returned `None` and left `send` taking a
+        bare `ModelRequest`, which meant the verified payload and the
+        transmitted request were two unrelated values with nothing binding
+        them: a caller could verify the approved payload and then send a
+        request built from a different one, and nothing would object — and
+        `last_request_body` would return the substituted bytes, so the
+        two-observer agreement check in component I would have *passed* and
+        certified the leak. Passing the request here binds it: this is the
+        request this verification covers, and `send` transmits that one and no
+        other. The body is built and encoded here too, so the exact bytes that
+        will go on the wire are fixed at the moment of authorisation.
+
+        What this does **not** do is check that `request` was derived from
+        `payload`. No component defines that derivation — it belongs to the
+        orchestrator, which builds the messages — so the gateway can bind
+        identity, not provenance. What it can do is refuse to transmit
+        anything that was not present at authorisation, and that is the whole
+        of §6 row 7.
+
+        Raises `GatewayError` (layer `F`); returns an `ApprovedSend` when both
+        the payload is the approved one and the model is registered.
+        """
+        body = self.build_body(request)
+        approved = self._verify_payload_hash(payload, approved_hash)
+        return ApprovedSend(
+            _issued=_ISSUED,
+            request=request,
+            approved_payload_hash=approved,
+            body=body,
+            body_bytes=_encode_body(body),
+        )
+
+    def _verify_payload_hash(
+        self,
+        payload: StructuredPayload | None,
+        approved_hash: str,
+    ) -> str:
+        """The approved hash, once the object is proved to be that payload.
+
+        Split out of `verify_approved_payload` so the two refusals — no
+        payload presented, and a payload that is not the approved one — are
+        each one readable block. Both carry the same two codes, because both
+        are the same condition from §6's point of view: the object about to
+        leave is not the object E approved.
         """
         if payload is None or not isinstance(approved_hash, str):
             raise GatewayError(
@@ -249,35 +372,60 @@ class ModelGateway:
                     "may be transmitted"
                 ),
             )
+        return approved_hash
 
     # -- Transmission ------------------------------------------------------
 
     def last_request_body(self) -> bytes | None:
-        """The exact bytes of the last request this gateway transmitted.
+        """The exact bytes of the last request this gateway handed to a transport.
 
         `None` until something has been sent. This is the evidence the egress
-        check compares against what an observer saw on the wire, so it is
-        recorded from the same bytes object that was handed to the transport,
-        and a refusal — which sends nothing — leaves it alone rather than
-        overwriting the evidence of a request that did happen with a body that
-        did not.
+        check compares against what an observer saw on the wire, so it is the
+        same `bytes` object that was passed as `content=`, assigned **before**
+        the response is known.
+
+        That ordering is deliberate in both directions. A read timeout means
+        the request *did* reach the provider and the provider simply did not
+        answer in time, so the bytes were on the wire and this must report
+        them. A connect failure is the opposite — nothing was sent — and here
+        the value is still populated, because the honest statement of what this
+        method reports is "the bytes handed to the transport", not "the bytes a
+        provider is known to have received". A caller that needs the difference
+        pairs this with the outcome of `send`: a `ProviderTransportError` means
+        treat the bytes as unconfirmed, a `ProviderStatusError` or a response
+        means they arrived.
+
+        A **refusal** — an unknown model, or a payload that is not the approved
+        one — sends nothing, is raised before the assignment, and so leaves the
+        previous value alone rather than overwriting the evidence of a request
+        that did happen with a body that did not.
         """
         return self._last_request_body
 
-    def send(self, request: ModelRequest) -> ModelResponse:
-        """Build the body, transmit it, and parse the provider's reply.
+    def send(self, approved: ApprovedSend) -> ModelResponse:
+        """Transmit the bytes `verify_approved_payload` authorised, and parse the reply.
 
-        Order is the guarantee: the body is built (and so the model validated)
-        before any I/O, the bytes are recorded before they are sent, and only
-        then is the socket touched.
+        The parameter is an `ApprovedSend`, and the check is at runtime rather
+        than only in the annotation: a type hint is documentation, and this is
+        a boundary. Passing a bare `ModelRequest` raises `TypeError`, because
+        an unverified send is not a thing this component will do.
+
+        Nothing is built here. The body was built and encoded during
+        verification, so what is transmitted is byte-for-byte what was
+        authorised and what `last_request_body()` will return — one encoding,
+        one body, no second chance to differ.
 
         Three provider failures, three exception types, none of them a privacy
         block — see `medarx.errors.ProviderError`. The success path reads
         `choices[0].message.content` from the OpenAI response shape and keeps
         the whole decoded body in `ModelResponse.raw` for capture and audit.
         """
-        body = self.build_body(request)
-        payload_bytes = _encode_body(body)
+        if not isinstance(approved, ApprovedSend):
+            raise TypeError(
+                "send() takes an ApprovedSend, which only "
+                "verify_approved_payload() can produce; an unverified request "
+                f"was passed ({type(approved).__name__}) and nothing was sent"
+            )
         headers = {"Content-Type": "application/json"}
         api_key = self._settings.gateway_api_key
         if api_key:
@@ -290,6 +438,7 @@ class ModelGateway:
         # `base_url`, so the request line does not depend on the transport's
         # URL-merge rules.
         url = f"{self._settings.gateway_base_url.rstrip('/')}{CHAT_COMPLETIONS_PATH}"
+        payload_bytes = approved.body_bytes
         self._last_request_body = payload_bytes
         try:
             response = self._client.post(url, content=payload_bytes, headers=headers)
@@ -315,4 +464,4 @@ class ModelGateway:
             raise ProviderResponseError(
                 "the provider's body carries no choices[0].message.content string"
             )
-        return ModelResponse(model_id=raw.get("model") or "", content=content, raw=raw)
+        return ModelResponse(model_id=_model_id_of(raw), content=content, raw=raw)

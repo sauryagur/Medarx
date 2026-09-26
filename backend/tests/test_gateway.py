@@ -37,7 +37,7 @@ from medarx.errors import (
     ProviderStatusError,
     ProviderTransportError,
 )
-from medarx.gateway.openai_gateway import ModelGateway
+from medarx.gateway.openai_gateway import ApprovedSend, ModelGateway
 from medarx.models import (
     ModelRequest,
     StructuredPayload,
@@ -164,6 +164,28 @@ def _client_for(stub: _StubProvider, **overrides) -> ModelGateway:
     )
 
 
+def _approved_payload() -> StructuredPayload:
+    """A payload carrying the layer-3 hash of its own content, as redaction writes it."""
+    payload = StructuredPayload(
+        function="draft",
+        report_text="FINDINGS: 7mm nodule in the right lower lobe.",
+        dicom_fields={"modality": "CT"},
+        study_ref="STUDY-SYN-000041",
+        policy_version="medarx-policy-1.0.0",
+    )
+    return payload.model_copy(update={"payload_hash": payload_hash_of(payload)})
+
+
+def _approve(
+    gw: ModelGateway,
+    request: ModelRequest = REQUEST,
+    payload: StructuredPayload | None = None,
+) -> ApprovedSend:
+    """The only way into `send`: run the verifier, as the composition root must."""
+    subject = _approved_payload() if payload is None else payload
+    return gw.verify_approved_payload(subject, subject.payload_hash, request)
+
+
 # -- The body, built before any I/O ----------------------------------------
 
 
@@ -236,8 +258,12 @@ def test_unknown_model_raises_before_a_request_body_is_built(settings, monkeypat
     monkeypatch.setattr(implementation, "_encode_body", spy_encode)
     monkeypatch.setattr(gw._client, "post", lambda *a, **k: posted.append(a))
     with pytest.raises(GatewayError) as ei:
-        gw.send(ModelRequest(model="gpt-9-imaginary", messages=[], temperature=0.0,
-                              max_tokens=1))
+        gw.verify_approved_payload(
+            _approved_payload(),
+            _approved_payload().payload_hash,
+            ModelRequest(model="gpt-9-imaginary", messages=[], temperature=0.0,
+                          max_tokens=1),
+        )
     assert ei.value.layer == "F"
     assert ei.value.action_codes == ("UNKNOWN_MODEL",)
     assert encoded == [], "a request body was built for an unknown model"
@@ -251,8 +277,11 @@ def test_unknown_model_never_reaches_the_wire(settings):
     with _stub_ok() as stub:
         gw = _client_for(stub)
         with pytest.raises(GatewayError):
-            gw.send(ModelRequest(model="gpt-9-imaginary", messages=[], temperature=0.0,
-                                  max_tokens=1))
+            _approve(
+                gw,
+                ModelRequest(model="gpt-9-imaginary", messages=[], temperature=0.0,
+                              max_tokens=1),
+            )
         assert stub.requests == []
 
 
@@ -278,21 +307,14 @@ def test_a_configured_model_outside_the_registry_is_refused(settings):
 # -- Row 7: the payload must be the one E approved -------------------------
 
 
-def _approved_payload() -> StructuredPayload:
-    payload = StructuredPayload(
-        function="draft",
-        report_text="FINDINGS: 7mm nodule in the right lower lobe.",
-        dicom_fields={"modality": "CT"},
-        study_ref="STUDY-SYN-000041",
-        policy_version="medarx-policy-1.0.0",
-    )
-    return payload.model_copy(update={"payload_hash": payload_hash_of(payload)})
-
-
-def test_verify_approved_payload_accepts_the_object_the_engine_approved(settings):
+def test_verify_approved_payload_returns_the_token_for_the_approved_object(settings):
     payload = _approved_payload()
     gw = ModelGateway(settings)
-    assert gw.verify_approved_payload(payload, payload.payload_hash) is None
+    token = gw.verify_approved_payload(payload, payload.payload_hash, REQUEST)
+    assert isinstance(token, ApprovedSend)
+    assert token.request is REQUEST
+    assert token.approved_payload_hash == payload.payload_hash
+    assert token.body == gw.build_body(REQUEST)
 
 
 def test_verify_approved_payload_refuses_a_substituted_payload(settings):
@@ -304,7 +326,7 @@ def test_verify_approved_payload_refuses_a_substituted_payload(settings):
     swapped = payload.model_copy(update={"report_text": "FINDINGS: 12mm mass."})
     gw = ModelGateway(settings)
     with pytest.raises(GatewayError) as ei:
-        gw.verify_approved_payload(swapped, approved)
+        gw.verify_approved_payload(swapped, approved, REQUEST)
     assert ei.value.layer == "F"
     assert ei.value.action_codes == ("PAYLOAD_MISMATCH", "HASH_MISMATCH")
 
@@ -313,14 +335,14 @@ def test_verify_approved_payload_refuses_a_hash_the_engine_never_approved(settin
     payload = _approved_payload()
     gw = ModelGateway(settings)
     with pytest.raises(GatewayError) as ei:
-        gw.verify_approved_payload(payload, "0" * 64)
+        gw.verify_approved_payload(payload, "0" * 64, REQUEST)
     assert ei.value.action_codes == ("PAYLOAD_MISMATCH", "HASH_MISMATCH")
 
 
 def test_verify_approved_payload_refuses_a_missing_payload(settings):
     gw = ModelGateway(settings)
     with pytest.raises(GatewayError) as ei:
-        gw.verify_approved_payload(None, "0" * 64)
+        gw.verify_approved_payload(None, "0" * 64, REQUEST)
     assert ei.value.action_codes == ("PAYLOAD_MISMATCH", "HASH_MISMATCH")
 
 
@@ -334,7 +356,7 @@ def test_the_gateway_uses_the_one_payload_hash_definition(settings):
         payload.model_dump(mode="json", exclude={"payload_hash"})
     )
     gw = ModelGateway(settings)
-    gw.verify_approved_payload(payload, payload.payload_hash)
+    gw.verify_approved_payload(payload, payload.payload_hash, REQUEST)
 
 
 # -- Timeout ----------------------------------------------------------------
@@ -355,10 +377,10 @@ def test_a_shortened_timeout_is_honoured_rather_than_ignored():
     with _StubProvider(body=b"{}", delay_s=2.0) as stub:
         gw = _client_for(stub, gateway_timeout_s=0.25)
         with pytest.raises(ProviderTransportError):
-            gw.send(REQUEST)
+            gw.send(_approve(gw))
     with _stub_ok() as stub:
         gw = _client_for(stub, gateway_timeout_s=10.0)
-        assert gw.send(REQUEST).content == "Findings: 7mm nodule."
+        assert gw.send(_approve(gw)).content == "Findings: 7mm nodule."
 
 
 # -- Success path -----------------------------------------------------------
@@ -369,7 +391,7 @@ def test_successful_send_parses_the_openai_response_shape(settings, monkeypatch)
     monkeypatch.setattr(
         gw._client, "post", lambda url, **kw: httpx.Response(200, json=COMPLETION)
     )
-    r = gw.send(REQUEST)
+    r = gw.send(_approve(gw))
     assert r.model_id == "medarx-demo-model"
     assert r.content == "Findings: 7mm nodule."
     assert r.raw["object"] == "chat.completion"
@@ -378,7 +400,7 @@ def test_successful_send_parses_the_openai_response_shape(settings, monkeypatch)
 def test_a_real_provider_round_trip_needs_no_provider(settings):
     with _stub_ok() as stub:
         gw = _client_for(stub)
-        r = gw.send(REQUEST)
+        r = gw.send(_approve(gw))
         assert r.content == "Findings: 7mm nodule."
         assert r.model_id == "medarx-demo-model"
         assert r.raw["usage"]["total_tokens"] == 2
@@ -393,7 +415,7 @@ def test_a_real_provider_round_trip_needs_no_provider(settings):
 def test_the_bytes_on_the_wire_are_exactly_the_bytes_the_gateway_records():
     with _stub_ok() as stub:
         gw = _client_for(stub)
-        gw.send(REQUEST)
+        gw.send(_approve(gw))
         assert stub.requests[0].body == gw.last_request_body()
         assert json.loads(gw.last_request_body()) == gw.build_body(REQUEST)
 
@@ -408,7 +430,10 @@ def test_non_ascii_report_text_is_escaped_and_still_matches_the_recorded_bytes()
     report = "FINDINGS: 7mm nodulo — øst, 37°C"
     with _stub_ok() as stub:
         gw = _client_for(stub)
-        gw.send(REQUEST.model_copy(update={"messages": [{"role": "user", "content": report}]}))
+        request = REQUEST.model_copy(
+            update={"messages": [{"role": "user", "content": report}]}
+        )
+        gw.send(_approve(gw, request))
     recorded = stub.requests[0].body
     assert recorded == gw.last_request_body()
     assert recorded.isascii(), recorded
@@ -420,7 +445,7 @@ def test_the_recorded_bytes_decode_to_the_request_and_nothing_more():
     # recorded body is exactly `build_body`'s four keys.
     with _stub_ok() as stub:
         gw = _client_for(stub)
-        gw.send(REQUEST)
+        gw.send(_approve(gw))
         decoded = json.loads(stub.requests[0].body)
     assert decoded == {
         "model": "medarx-demo-model",
@@ -433,7 +458,7 @@ def test_the_recorded_bytes_decode_to_the_request_and_nothing_more():
 def test_the_request_is_sent_as_json():
     with _stub_ok() as stub:
         gw = _client_for(stub)
-        gw.send(REQUEST)
+        gw.send(_approve(gw))
     assert stub.requests[0].headers["content-type"].startswith("application/json")
 
 
@@ -443,7 +468,7 @@ def test_the_same_implementation_serves_any_base_url():
     for _ in range(2):
         with _StubProvider(body=json.dumps(COMPLETION).encode("utf-8")) as stub:
             gw = _client_for(stub)
-            assert gw.send(REQUEST).content == "Findings: 7mm nodule."
+            assert gw.send(_approve(gw)).content == "Findings: 7mm nodule."
             assert stub.requests[0].path == "/v1/chat/completions"
 
 
@@ -453,7 +478,7 @@ def test_the_same_implementation_serves_any_base_url():
 def test_an_empty_api_key_omits_the_authorization_header_entirely():
     with _stub_ok() as stub:
         gw = _client_for(stub, gateway_api_key="")
-        gw.send(REQUEST)
+        gw.send(_approve(gw))
     assert "authorization" not in stub.requests[0].headers, (
         "an empty key must send no header at all, not an empty one"
     )
@@ -462,7 +487,7 @@ def test_an_empty_api_key_omits_the_authorization_header_entirely():
 def test_a_configured_api_key_is_sent_as_a_bearer_token():
     with _stub_ok() as stub:
         gw = _client_for(stub, gateway_api_key="synthetic-test-key")
-        gw.send(REQUEST)
+        gw.send(_approve(gw))
     assert stub.requests[0].headers["authorization"] == "Bearer synthetic-test-key"
 
 
@@ -479,7 +504,7 @@ def test_a_non_2xx_response_is_a_status_failure():
     with _StubProvider(status=503, body=b'{"error": "overloaded"}') as stub:
         gw = _client_for(stub)
         with pytest.raises(ProviderStatusError) as ei:
-            gw.send(REQUEST)
+            gw.send(_approve(gw))
     assert ei.value.status_code == 503
 
 
@@ -490,7 +515,7 @@ def test_a_transport_failure_is_a_transport_failure():
         Settings(audit_key=KEY, gateway_base_url="http://127.0.0.1:9/v1")
     )
     with pytest.raises(ProviderTransportError):
-        gw.send(REQUEST)
+        gw.send(_approve(gw))
 
 
 @pytest.mark.parametrize(
@@ -513,7 +538,7 @@ def test_a_malformed_body_is_a_response_failure(label, body):
     with _StubProvider(body=body.encode() if isinstance(body, str) else body) as stub:
         gw = _client_for(stub)
         with pytest.raises(ProviderResponseError):
-            gw.send(REQUEST)
+            gw.send(_approve(gw))
 
 
 def test_the_three_failures_are_three_distinct_types():
@@ -535,7 +560,7 @@ def test_a_provider_failure_is_not_a_privacy_block():
     with _StubProvider(status=500, body=b"{}") as stub:
         gw = _client_for(stub)
         with pytest.raises(ProviderStatusError) as ei:
-            gw.send(REQUEST)
+            gw.send(_approve(gw))
         assert not isinstance(ei.value, GatewayError)
 
 
@@ -547,15 +572,112 @@ def test_last_request_body_is_none_before_anything_is_sent(settings):
 
 
 def test_a_refused_request_leaves_the_previous_body_untouched():
-    # `last_request_body` is the egress evidence for the last request that
-    # actually went out. A refusal must not overwrite it with a body that was
-    # never sent, or a later comparison would read evidence for a request that
-    # did not happen.
+    # `last_request_body` is the egress evidence for the last request handed to
+    # a transport. A refusal must not overwrite it with a body that was never
+    # sent, or a later comparison would read evidence for a request that did
+    # not happen.
     with _stub_ok() as stub:
         gw = _client_for(stub)
-        gw.send(REQUEST)
+        gw.send(_approve(gw))
         sent = gw.last_request_body()
         with pytest.raises(GatewayError):
-            gw.send(ModelRequest(model="nope", messages=[], temperature=0.0,
-                                  max_tokens=1))
+            gw.verify_approved_payload(
+                _approved_payload().model_copy(update={"report_text": "UNAPPROVED"}),
+                _approved_payload().payload_hash,
+                REQUEST,
+            )
         assert gw.last_request_body() == sent
+        assert len(stub.requests) == 1
+
+
+# -- What can and cannot be sent -------------------------------------------
+
+
+def test_send_refuses_anything_that_is_not_an_approved_send():
+    # The load-bearing test for the token. Under the previous signature this
+    # was a legal call: a bare `ModelRequest` went straight to the wire, so a
+    # caller could verify the approved payload and transmit a request built
+    # from a different one, and `last_request_body` would have reported the
+    # substituted bytes for the egress check to certify.
+    with _stub_ok() as stub:
+        gw = _client_for(stub)
+        with pytest.raises(TypeError):
+            gw.send(REQUEST)
+        assert stub.requests == []
+        assert gw.last_request_body() is None
+
+
+def test_an_approved_send_cannot_be_built_by_hand():
+    # The sentinel, not a convention: the constructor refuses any value other
+    # than this module's private `_ISSUED`.
+    for issued in (None, object(), "issued"):
+        with pytest.raises(TypeError):
+            ApprovedSend(
+                request=REQUEST,
+                approved_payload_hash="0" * 64,
+                body={},
+                body_bytes=b"",
+                _issued=issued,
+            )
+
+
+def test_the_sentinel_is_private_to_the_gateway_module():
+    # Python has no access control, so this is the strongest available
+    # enforcement rather than a guarantee — and the same standard this package
+    # already accepts for `ALLOWED_MODELS` and the module-level action codes.
+    # What it does buy is that the token cannot be minted by any *other* module
+    # in the package, so a second egress path cannot be added by accident.
+    import ast
+    from pathlib import Path
+
+    import medarx
+
+    root = Path(medarx.__file__).parent
+    owner = root / "gateway" / "openai_gateway.py"
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        if path == owner:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == "_ISSUED":
+                offenders.append(f"{path}:{node.lineno}")
+            elif isinstance(node, ast.Attribute) and node.attr == "_ISSUED":
+                offenders.append(f"{path}:{node.lineno}")
+    assert not offenders, (
+        "the ApprovedSend sentinel is referenced outside the module that owns "
+        f"it, so the token can be minted from there: {offenders}"
+    )
+
+
+def test_the_bytes_sent_are_the_bytes_fixed_at_authorisation():
+    # One encoding, one body, fixed at the moment of verification. If `send`
+    # re-derived the body it would be a second chance for what goes on the wire
+    # to differ from what was authorised — and from what the egress check
+    # compares against.
+    with _stub_ok() as stub:
+        gw = _client_for(stub)
+        token = _approve(gw)
+        assert token.body_bytes == json.dumps(token.body, separators=(",", ":")).encode()
+        gw.send(token)
+        # `is`, not `==`, for the in-process half: the recorded evidence must
+        # be the same object that was authorised, not an equal copy. The wire
+        # half is `==` because those bytes cross a socket, where identity
+        # cannot survive.
+        assert gw.last_request_body() is token.body_bytes
+        assert stub.requests[0].body == token.body_bytes
+
+
+def test_the_request_verified_is_the_request_sent():
+    # The identity half of the binding. The token names the request that was
+    # authorised; `send` takes one positional argument, so there is nowhere to
+    # hand it a different one, and what appears on the wire is the content of
+    # the verified request rather than of whatever the caller holds later.
+    with _stub_ok() as stub:
+        gw = _client_for(stub)
+        token = _approve(gw, REQUEST)
+        gw.send(token)
+    assert token.request is REQUEST
+    sent = json.loads(stub.requests[0].body)
+    assert sent["messages"] == REQUEST.messages
+    assert sent["messages"][0]["content"] == "FINDINGS: 7mm nodule."

@@ -276,15 +276,17 @@ engine and a cloud one. There is no provider branch: a test asserts that no
 provider is named in `openai_gateway.py` at all, which is the structural form of
 "provider-agnostic by construction" rather than of a promise in a docstring.
 
-**The bytes are the evidence, so they are built once.** `build_body` returns
-the body and is public, because a caller that wants to know what *would* go on
-the wire can ask without sending anything. `send` encodes it exactly once and
-hands those same bytes to the transport and to `last_request_body()`. Nothing
-re-encodes, reorders or normalises them in between: the egress check in
+**The bytes are the evidence, so they are fixed at authorisation.**
+`build_body` returns the body and is public, because a caller that wants to
+know what *would* go on the wire can ask without sending anything.
+`verify_approved_payload` builds and encodes it, and `send` transmits those
+exact bytes and returns the very same object from `last_request_body()`.
+Nothing re-encodes, reorders or normalises them in between: the egress check in
 component I compares observed bytes against what was approved, and that
 comparison is meaningless if the gateway records one encoding and transmits
 another. A test measures the bytes at a loopback socket and asserts they equal
-`last_request_body()`. The encoding is compact and `ensure_ascii`, so the bytes
+the token's `body_bytes`, and that `last_request_body()` is that same object
+rather than a copy. The encoding is compact and `ensure_ascii`, so the bytes
 are ASCII whatever the report contains; `httpx`'s own `json=` parameter writes
 raw UTF-8 instead, which is one of the two behaviours the non-ASCII test
 distinguishes.
@@ -297,33 +299,63 @@ instead of sending. The registry is a set of whole identifiers: a prefix or
 substring rule would admit `medarx-demo-model-and-more`, which is the same
 class of hole as a payload check that matches on a prefix.
 
-**The payload is verified, not passed through.** `verify_approved_payload`
-re-derives the hash from the object's own content with the shared
-`models.payload_hash_of` and refuses unless both the carried claim and the
-re-derived hash equal the hash the policy engine approved. It raises
-`GatewayError` at layer `F` carrying **`PAYLOAD_MISMATCH` and `HASH_MISMATCH`**:
-the first is §6 row 7's own name for the condition and the leading code of
-the contract's layer-F block example, the second names the check that detected
-it. `HASH_MISMATCH` sat in the contract enum with nothing emitting it — layer 3
-overwrites the hash rather than comparing it — and an enum member the kernel
-never emits is a claim the contract cannot keep.
+**What is verified is what is sent, and that is enforced by a type.**
+`verify_approved_payload(payload, approved_hash, request)` re-derives the hash
+from the object's own content with the shared `models.payload_hash_of` and
+refuses unless both the carried claim and the re-derived hash equal the hash the
+policy engine approved. It raises `GatewayError` at layer `F` carrying
+**`PAYLOAD_MISMATCH` and `HASH_MISMATCH`**: the first is §6 row 7's own name for
+the condition and the leading code of the contract's layer-F block example, the
+second names the check that detected it. `HASH_MISMATCH` sat in the contract
+enum with nothing emitting it — layer 3 overwrites the hash rather than
+comparing it — and an enum member the kernel never emits is a claim the
+contract cannot keep. §6 row 5 lists "hash mismatch" among D.3's conditions;
+§6 assigns *conditions* to layers, not codes, and this receipt carries
+`layer: F`, so the code table in component G is where the question of which
+layer owns the code belongs.
 
-**Ordering is the composition root's obligation.** `send` takes only the model
-request, because that is the signature the pipeline and the demo patches
-monkeypatch. So nothing in `send` can enforce that the verification ran first;
-`build_pipeline` must call `verify_approved_payload` immediately before `send`.
-The asymmetry with `PolicyEngine.authorize_payload` is deliberate and mirrors
-it: both are separate methods the root sequences, and both re-derive rather
-than trust the carried hash.
+**`send` takes an `ApprovedSend` and nothing else.** On success the verifier
+returns a frozen `ApprovedSend` holding the request that was authorised, the
+approved hash, and the body and bytes built at that moment; `send(approved)`
+refuses anything else with a `TypeError`, checked at runtime rather than only
+in the annotation. Three failures close at once: an unverified send cannot be
+expressed, the request is bound to the verification that covered it, and the
+verification cannot be skipped because there is nothing else to pass.
 
-**Three provider failures, none of them a block.** A transport failure, a
-non-2xx response and a malformed body are `ProviderTransportError`,
+This is the fix for a real hole, not a precaution. With `send` taking a bare
+`ModelRequest` and the verifier returning `None`, the verified payload and the
+transmitted request were unrelated values: a caller could verify the approved
+payload and send a request built from a different one, and
+`last_request_body()` would have returned the substituted bytes — so the
+two-observer agreement check would have **passed and certified the leak**. An
+evidence mechanism that cannot fail on the failure it exists to detect is worse
+than no evidence.
+
+`ApprovedSend` is constructible only with this module's private `_ISSUED`
+sentinel, and a test asserts by AST sweep that the name is referenced nowhere
+else under `backend/src/medarx/`. Python has no access control, so that is the
+strongest enforcement the language offers rather than a guarantee; it is the
+same standard this package already accepts for `ALLOWED_MODELS` and the
+module-level action-code constants, and strictly stronger than a comment asking
+a caller to do the right thing.
+
+**The composition root sequences the pair.** `build_pipeline` (Task 15) calls
+`verify_approved_payload(...)` and passes the result straight to
+`send(...)`. It is one call in, one call out, and the token makes the wrong
+order unrepresentable rather than merely discouraged.
+
+**Three provider failures, and they are deliberately not blocks.** A transport
+failure, a non-2xx response and a malformed body are `ProviderTransportError`,
 `ProviderStatusError` and `ProviderResponseError` — three types, so a caller
-tells them apart without parsing a message. None is a `MedarxError`: §6 has no
-row for a provider being down, and a layer plus action codes on a provider
+tells them apart without parsing a message. **None is a `MedarxError`, and that
+is a recorded decision rather than an omission:** §6 enumerates what blocks and
+has no row for a provider being down, a layer plus action codes on a provider
 outage would reach the API as a 422 privacy block receipt naming codes for a
-refusal the privacy kernel never made. The contract answers this with a 500
-`ProblemDetail`.
+refusal the privacy kernel never made, and the audit log would then hold a
+false redaction event — the design names that log as an asset. The contract
+answers this with a 500 `ProblemDetail`. The reasoning lives here and in
+`medarx.errors`; it is a decision to revisit when component G writes the
+receipt and audit code table, not a gap to be filled in by default.
 
 **The timeout is configuration.** It is read from `Settings.gateway_timeout_s`
 (default 120 s) onto the client and never lowered in code: a cold first
