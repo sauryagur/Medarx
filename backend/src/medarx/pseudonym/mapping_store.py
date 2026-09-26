@@ -74,18 +74,24 @@ PATIENT_TABLE = Table(
 _STUDY_DOMAIN = "medarx-study"
 _PATIENT_DOMAIN = "medarx-patient"
 
-#: Pool per dialect. SQLite's driver connection is not safe to share between
-#: threads, so file-backed SQLite uses `NullPool`: every operation checks out
-#: its own connection and none is ever shared. PostgreSQL is left on the
-#: driver's default pool — it *is* thread-safe, and surrogate assignment is per
-#: study, so discarding its pool would cost a TCP connect and a full
-#: authentication on every assignment. In-memory SQLite must keep one
-#: connection for its whole life, since each new connection would be a
-#: different, empty database.
-_POOL_ARGS = {
-    "sqlite": {"poolclass": NullPool, "connect_args": {"timeout": 30}},
-    "sqlite+memory": {"poolclass": StaticPool, "connect_args": {"timeout": 30}},
-}
+#: Connection arguments per storage kind — these are *not* dialect names.
+#: SQLite's driver connection is not safe to share between threads, so a
+#: file-backed store uses `NullPool`: every operation checks out its own
+#: connection and none is ever shared. PostgreSQL is left on the driver's
+#: default pool — it *is* thread-safe, and surrogate assignment is per study,
+#: so discarding its pool would cost a TCP connect and a full authentication on
+#: every assignment. An in-memory database must keep one connection for its
+#: whole life, since each new connection is a different, empty database.
+_FILE_POOL_ARGS = {"poolclass": NullPool, "connect_args": {"timeout": 30}}
+_MEMORY_POOL_ARGS = {"poolclass": StaticPool, "connect_args": {"timeout": 30}}
+
+#: `sqlite+memory` is a spelling, not a dialect: SQLAlchemy can load no such
+#: driver, so a URL written that way would either fail to load or, if it slipped
+#: through, be given default pooling over a database that vanishes between
+#: operations. It is accepted and normalised to the real driver so that the
+#: obvious spelling is the working one.
+_MEMORY_DRIVER = "sqlite+memory"
+_IN_MEMORY_DATABASES = (None, "", ":memory:")
 
 #: Attempts when a concurrent writer holds the row. The unique constraint, not
 #: the surrogate derivation, is what makes the loser converge on the winner's
@@ -94,19 +100,26 @@ _ASSIGN_ATTEMPTS = 5
 _RETRY_DELAY_S = 0.02
 
 
+def _normalise_url(db_url: str) -> str:
+    """Rewrite the `sqlite+memory` spelling to the driver that exists."""
+    url = make_url(db_url)
+    if url.drivername == _MEMORY_DRIVER:
+        return url.set(drivername="sqlite").render_as_string(hide_password=False)
+    return db_url
+
+
 def _pool_args(db_url: str) -> dict:
     """Connection arguments for `db_url`.
 
-    A SQLite URL gets the SQLite-appropriate pool: `NullPool` for a file, and
-    a single pinned connection for `:memory:`, where every new connection
-    would otherwise be a different, empty database. Any other backend is left
-    entirely on its driver's defaults.
+    A SQLite URL gets the SQLite-appropriate pool: `_FILE_POOL_ARGS` for a file
+    and `_MEMORY_POOL_ARGS` for an in-memory database. Any other backend —
+    PostgreSQL included — is left entirely on its driver's defaults.
     """
     url = make_url(db_url)
     if url.get_backend_name() == "sqlite":
-        if (url.database or "") in (None, "", ":memory:"):
-            return dict(_POOL_ARGS["sqlite+memory"])
-        return dict(_POOL_ARGS["sqlite"])
+        if url.database in _IN_MEMORY_DATABASES:
+            return dict(_MEMORY_POOL_ARGS)
+        return dict(_FILE_POOL_ARGS)
     return {}
 
 
@@ -145,7 +158,8 @@ class MappingStore:
         # key would issue unkeyed, invertible surrogates.
         require_audit_key(audit_key)
         self._audit_key = audit_key
-        self._engine = create_engine(db_url, **_pool_args(db_url))
+        url = _normalise_url(db_url)
+        self._engine = create_engine(url, **_pool_args(url))
         _create_tables(self._engine)
 
     # -- Surrogates --------------------------------------------------------

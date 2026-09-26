@@ -19,7 +19,13 @@ from medarx.errors import MedarxError
 from medarx.pseudonym.date_shift import patient_offset, shift_date
 from medarx.pseudonym.derivation import audit_digest, surrogate
 from medarx.pseudonym.errors import AuditKeyRequired
-from medarx.pseudonym.mapping_store import PATIENT_TABLE, STUDY_TABLE, MappingStore
+from medarx.pseudonym.mapping_store import (
+    PATIENT_TABLE,
+    STUDY_TABLE,
+    MappingStore,
+    _FILE_POOL_ARGS,
+    _pool_args,
+)
 
 STUDY_DOMAIN = "medarx-study"
 PATIENT_DOMAIN = "medarx-patient"
@@ -202,13 +208,31 @@ def test_audit_key_required_is_not_a_privacy_layer_error():
     assert not issubclass(AuditKeyRequired, MedarxError)
 
 
-def test_in_memory_sqlite_is_usable():
-    # Every in-memory connection is a separate empty database, so the store
-    # pins such a URL to a single connection; otherwise the schema created at
-    # construction would be gone by the first assignment.
-    with _open("sqlite:///:memory:") as memory_store:
+@pytest.mark.parametrize(
+    "url",
+    [
+        "sqlite:///:memory:",
+        # `sqlite+memory` is a spelling, not a dialect SQLAlchemy can load. The
+        # store accepts it and normalises it, so the obvious way to ask for an
+        # in-memory store is the working one rather than a silent pool mismatch.
+        "sqlite+memory://",
+    ],
+)
+def test_in_memory_urls_are_usable(url):
+    # Every in-memory connection is a separate empty database, so such a store
+    # must pin one connection; otherwise the schema created at construction
+    # would be gone by the first assignment.
+    with _open(url) as memory_store:
         a = memory_store.surrogate_for_study("STU-0001")
         assert memory_store.surrogate_for_study("STU-0001") == a
+
+
+def test_file_backed_url_keeps_the_null_pool(tmp_path):
+    # The counterpart: a file-backed store must not pin a single connection, or
+    # the concurrency guarantee would rest on SQLite serializing writes rather
+    # than on the unique constraint.
+    url = f"sqlite:///{tmp_path / 'map.db'}"
+    assert _pool_args(url) == _FILE_POOL_ARGS
 
 
 @contextmanager

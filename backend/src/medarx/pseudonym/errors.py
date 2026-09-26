@@ -1,22 +1,12 @@
 """Errors raised by the pseudonymization component itself.
 
-`AuditKeyRequired` is deliberately **not** a `MedarxError`. It is a deployment
-misconfiguration, not a refusal about a patient's data: there is nothing to
-block, no request to deny, and no layer to attribute. Keeping it outside the
-`MedarxError` hierarchy means an `except MedarxError` handler on the request
-path cannot mistake it for a privacy block and render a layer and an action
-code for it into a receipt or an audit event.
-
-That distinction is not pedantry. The contract's action-code enum does contain a
-member that reads plausibly for this situation, and minting it would satisfy the
-enum check while asserting something false: a receipt or audit event reading
-"component C refused: a surrogate was missing" is a durable, externally-visible
-misstatement about a patient's data, produced by a deployment mistake. The
-refusals *about* a request's content use `PseudonymError` in `medarx.errors`,
-with the rest of the taxonomy, and name an honest code.
+`AuditKeyRequired` is deliberately **not** a `MedarxError`. It reports a
+deployment misconfiguration, not a refusal about a patient's data, so it has no
+layer and no action code to render, and an `except MedarxError` handler on the
+request path cannot catch it and mistake it for a privacy block. Refusals about
+a request's content use `PseudonymError` in `medarx.errors`, with the rest of
+the taxonomy.
 """
-
-__all__ = ["AuditKeyRequired"]
 
 
 class AuditKeyRequired(ValueError):
