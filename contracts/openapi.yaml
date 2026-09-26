@@ -725,11 +725,28 @@ components:
           type: string
           examples: ['STUDY-SYN-000012']
         study_date:
-          type: string
-          format: date
+          $ref: '#/components/schemas/DicomDate'
           description: >-
-            Date of the prior study. Subject to the consistent per-patient date shift, which
-            preserves sequence and duration.
+            Date of the prior study, in the DICOM `DA` form. Subject to the consistent per-patient
+            date shift, which preserves sequence and duration.
+
+    DicomDate:
+      type: string
+      pattern: '^[0-9]{8}$'
+      description: >-
+        A DICOM `DA` (date) value: exactly eight digits, `YYYYMMDD`.
+
+        **Not** ISO 8601. `format: date` in this document means `YYYY-MM-DD`, which is a different
+        string; component C accepts only the `DA` form, so a request carrying an ISO date reaches
+        redaction layer 3 as an unshiftable date and blocks with `UNSHIFTED_DATE` every time. The
+        `DA` form is used rather than the format so that the document says the thing the pipeline
+        actually enforces.
+
+        `pattern` states the shape only. Whether the eight digits name a real calendar day
+        (`20260230` does not) is judged by the pipeline, which refuses rather than forwarding a
+        date it cannot shift.
+      examples:
+        - '20260114'
 
     AllowlistedDicomMetadata:
       type: object
@@ -744,39 +761,55 @@ components:
         `additionalProperties` is `false` so unknown elements are rejected. A field outside the
         function's allowlist is rejected by component A before any downstream processing.
 
+        **The property names are the DICOM keywords**, and that is deliberate rather than cosmetic:
+        component A's known-attribute table *is* the boundary's vocabulary, and it matches DICOM
+        keywords. A snake_case spelling here would be a request the boundary refuses with
+        `UNKNOWN_DICOM_ATTRIBUTE` and a `422`, so the two are held to the same names and a test
+        asserts that every property below is a keyword layer A accepts. There is no translation
+        layer between them, because two vocabularies would be two things to keep in step.
+
         Values are the caller-supplied metadata strings, not DICOM datatypes. Full PS3.15-conformant
         de-identification of DICOM objects is component B's responsibility, and component B is
         explicitly **not** on the model path.
       properties:
-        patient_id:
+        PatientID:
           type: string
           description: >-
             PatientID. Covered by a mandatory custom `PatternRecognizer` — the stock NER stack ships
             no recognizer for it, and a bare digit string misread as a date corrupts the payload
-            rather than merely leaving it unredacted.
+            rather than merely leaving it unredacted. Accepted at the boundary and then dropped: it
+            reaches the input hash and no payload field.
           examples: ['4452819']
-        accession_number:
+        AccessionNumber:
           type: string
           description: >-
             Accession number. Also covered by a mandatory custom recognizer; Presidio ships none.
+            Accepted and dropped, for the same reason as `PatientID`.
           examples: ['ACC0000417']
-        study_date:
-          type: string
-          format: date
-          description: Study date. Shifted per patient; sequence and duration preserved.
-        study_description:
-          type: string
-          description: Study description, if supplied.
-        body_part_examined:
-          type: string
-          description: Body part examined, if supplied.
-        referring_service:
-          type: string
-          description: Referring service, if supplied.
-        institution_name:
+        InstitutionName:
           type: string
           description: >-
-            Institution name, if supplied. Treated as an identifier candidate by layered redaction.
+            Institution name, if supplied. Accepted and dropped, for the same reason as `PatientID`.
+            Named here because it is treated as an identifier candidate wherever it appears in prose.
+          examples: ['Synthetic Imaging Centre']
+        StudyDate:
+          $ref: '#/components/schemas/DicomDate'
+          description: Study date. Shifted per patient; sequence and duration preserved.
+        PatientAge:
+          type: string
+          pattern: '^[0-9]{3}[DWMY]$'
+          description: >-
+            PatientAge, a DICOM `AS` (age string): three digits and a unit of days (`D`), weeks
+            (`W`), months (`M`) or years (`Y`). Component A bands the age before it reaches the
+            payload, so neither the exact age nor a decade-wide band spanning a 30-day-old and a
+            9-year-old is ever transmitted.
+          examples: ['045Y']
+        Modality:
+          type: string
+          description: >-
+            Modality of the source study, as reported. Metadata only — Medarx performs no diagnostic
+            image interpretation and never derives findings from pixels.
+          examples: [CT]
 
     ReportText:
       type: object
@@ -858,10 +891,16 @@ components:
       additionalProperties: false
       required:
         - content
-        - draft
       description: >-
-        The model gateway's response, returned **as a draft**. There is no path by which this becomes
-        clinical content without an explicit human decision recorded via `recordHumanApproval`.
+        The model gateway's response, returned **as a draft** by `ExecutionResponse.draft`. There is
+        no path by which this becomes clinical content without an explicit human decision recorded
+        via `recordHumanApproval`.
+
+        The drafting is expressed by the **nesting**, on `ExecutionResponse.draft`. This schema is
+        the gateway's answer and nothing more, so it requires no `draft` of its own: a `required`
+        entry naming a property this schema does not declare, under `additionalProperties: false`,
+        would make every instance of it unstatable and leave the operation with no valid `200` body
+        at all.
       properties:
         model_id:
           type: string

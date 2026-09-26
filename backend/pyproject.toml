@@ -27,6 +27,7 @@ packages = ["src/medarx"]
 
 [dependency-groups]
 dev = [
+    "jsonschema",
     "pytest",
 ]
 
