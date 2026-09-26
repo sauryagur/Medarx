@@ -157,6 +157,14 @@ class BlockReceipt(BaseModel):
     keeps it that way here. A receipt is returned in full and logged, so it is
     structurally incapable of carrying a raw value: `action_codes` are
     shape-checked, and there is no field that holds text a detector matched.
+
+    `layer` is typed by a `Literal` *and* validated at runtime against
+    `LAYERS`. The annotation is the static approximation a type checker reads;
+    `LAYERS` is the single runtime authority, shared with `MedarxError`. Two
+    copies of one set is a drift waiting to happen, so this one is checked
+    against the other — and `tests/test_openapi_contract.py` asserts that the
+    `Literal`, `LAYERS`, and the contract's `Layer` enum are all equal, each
+    declaration on its own rather than as a union that hides either one.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -166,6 +174,17 @@ class BlockReceipt(BaseModel):
     layer: Literal["J", "A", "C", "D.1", "D.2", "D.3", "E", "F"]
     action_codes: list[str] = Field(min_length=1)
     policy_version: str
+
+    @field_validator("layer")
+    @classmethod
+    def _layer_is_in_the_closed_set(cls, layer: str) -> str:
+        if layer not in LAYERS:
+            raise ValueError(
+                f"layer {layer!r} is not a member of the contract Layer enum "
+                f"{LAYERS}; there is no bare 'D' — the redaction layers are "
+                "D.1, D.2, and D.3"
+            )
+        return layer
 
     @field_validator("action_codes")
     @classmethod

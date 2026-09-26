@@ -188,15 +188,20 @@ def _contract_layer_tags() -> set[str]:
     return set(schema["enum"])
 
 
-#: Module-level or class-level names whose assignment declares the layer tags
-#: the code can emit. Named without `ACTION_CODE` so `_emitted_action_codes` —
-#: which keys off that substring — cannot mistake this declaration for an
-#: action-code emission site.
+#: Module-level or class-level names whose assignment declares a single layer
+#: tag (an error class's `LAYER`). Named without `ACTION_CODE` so
+#: `_emitted_action_codes` — which keys off that substring — cannot mistake this
+#: declaration for an action-code emission site.
 _LAYER_CONSTANTS = frozenset({"LAYER", "LAYERS"})
+
+#: The declaration that enumerates the whole set, as opposed to naming one tag.
+#: Every such declaration is asserted equal to the contract enum on its own, so
+#: two copies of the set cannot drift apart while their union still matches.
+_LAYER_FULL_SET_CONSTANTS = frozenset({"LAYERS"})
 
 #: Modules expected to declare layer tags, asserted as an exact set by
 #: `test_the_layer_sweep_finds_every_declaration_site`, so an empty sweep
-#: cannot make the equality assertion pass vacuously.
+#: cannot make the equality assertions pass vacuously.
 EXPECTED_LAYER_SITES: frozenset[str] = frozenset(
     {
         "backend/src/medarx/errors.py",
@@ -205,32 +210,42 @@ EXPECTED_LAYER_SITES: frozenset[str] = frozenset(
     }
 )
 
-def _emitted_layer_tags() -> dict[str, list[str]]:
-    """Every layer tag this package can emit, keyed by source file.
 
-    Three declaration shapes carry a layer tag, all collected by parsing so a
-    new one cannot be added without appearing here: the `LAYER = "..."` class
-    attribute each error class fixes, the `LAYERS` tuple that mirrors the enum,
-    and the `layer: Literal[...]` annotation on the receipt. Sweeping every
-    `Literal` in the package instead would sweep in unrelated closed sets —
-    `status`, `final_disposition`, a sign-off decision — and compare those
-    against the layer enum, which is not what this test is about.
+def _emitted_layer_declarations() -> dict[str, set[str]]:
+    """Every layer declaration in the package, keyed by `file:line: what`.
+
+    Three shapes carry a layer tag, all collected by parsing so a new one
+    cannot be added without appearing here: the `LAYER = "..."` class attribute
+    each error class fixes, the `LAYERS` tuple, and the `layer: Literal[...]`
+    annotation on the receipt. Sweeping every `Literal` in the package instead
+    would sweep in unrelated closed sets — `status`, `final_disposition`, a
+    sign-off decision — and compare those against the layer enum, which is not
+    what this test is about.
+
+    Declarations are keyed per site, not unioned per file, on purpose. `LAYERS`
+    and the receipt's `Literal` are two copies of the same set, and a union
+    hides a drift in either one: break only the `Literal` and the union still
+    matches the contract through `LAYERS`. Keyed per site, the broken copy is
+    named in the failure.
 
     Note on naming: no constant in the swept source carries `ACTION_CODE` in
     its name, so this walk cannot be mistaken for an action-code emission site
     by `_emitted_action_codes`.
     """
-    found: dict[str, list[str]] = {}
+    found: dict[str, set[str]] = {}
     for path in sorted(SOURCE_ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        relative = str(path.relative_to(REPO_ROOT))
 
-        tags: list[str] = []
         for node in ast.walk(tree):
             # LAYER = "A" on an error class: the tag a refusal carries.
             if isinstance(node, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id in _LAYER_CONSTANTS for t in node.targets
             ):
-                tags.extend(_string_literals(node.value))
+                name = next(t.id for t in node.targets if isinstance(t, ast.Name))
+                found[f"{relative}:{node.lineno}:{name}"] = set(
+                    _string_literals(node.value)
+                )
             # layer: Literal["J", "A", ...] on the receipt: the tag on the wire.
             elif (
                 isinstance(node, ast.AnnAssign)
@@ -239,11 +254,11 @@ def _emitted_layer_tags() -> dict[str, list[str]]:
                 and isinstance(node.annotation, ast.Subscript)
                 and _is_literal_subscript(node.annotation.value)
             ):
-                tags.extend(_string_literals(node.annotation.slice))
-
-        if tags:
-            found[str(path.relative_to(REPO_ROOT))] = tags
+                found[f"{relative}:{node.lineno}:layer Literal"] = set(
+                    _string_literals(node.annotation.slice)
+                )
     return found
+
 
 
 def _is_literal_subscript(value: ast.AST) -> bool:
@@ -258,45 +273,90 @@ def _is_literal_subscript(value: ast.AST) -> bool:
 def test_the_layer_sweep_finds_every_declaration_site():
     """Guard against a layer sweep that has quietly stopped seeing anything.
 
-    An empty result would make the equality assertion below pass vacuously —
-    an empty code-side set is trivially "equal" to nothing, and the test would
-    then guard nothing. So the sites are named: each file that declares a layer
-    tag must be found.
+    An empty result would make the equality assertions below pass vacuously —
+    an empty code-side set is trivially "equal" to nothing, and the tests would
+    then guard nothing. So the sites are named: each module that declares a
+    layer tag must be found.
     """
-    emitted = _emitted_layer_tags()
-    assert set(emitted) == EXPECTED_LAYER_SITES, (
+    declarations = _emitted_layer_declarations()
+    found = {site.split(":")[0] for site in declarations}
+    assert found == EXPECTED_LAYER_SITES, (
         "the set of modules declaring layer tags does not match "
         "EXPECTED_LAYER_SITES. An empty result means the sweep stopped finding "
         "declaration sites and is broken — it would then pass silently while an "
         "off-contract layer shipped. A changed set means a site was removed, "
         "renamed, or added and EXPECTED_LAYER_SITES must be updated "
         f"deliberately. swept {SOURCE_ROOT.relative_to(REPO_ROOT)}; "
-        f"expected={sorted(EXPECTED_LAYER_SITES)}; found={sorted(emitted)}"
+        f"expected={sorted(EXPECTED_LAYER_SITES)}; found={sorted(found)}"
     )
+
+
+def _full_set_declarations(declarations: dict[str, set[str]]) -> dict[str, set[str]]:
+    """The declarations that enumerate the whole layer set, keyed by site.
+
+    A `LAYER = "A"` class attribute names one tag and is checked for membership
+    only. `LAYERS` and the receipt's `layer: Literal[...]` each enumerate the
+    entire set, so each is compared to the contract on its own.
+    """
+    return {
+        site: tags
+        for site, tags in declarations.items()
+        if site.rsplit(":", 1)[-1] in _LAYER_FULL_SET_CONSTANTS
+        or site.endswith("layer Literal")
+    }
 
 
 def test_the_code_layer_set_equals_the_contract_enum():
     """Equality, not containment: a missing tag on either side is a defect.
 
     Containment alone would not have caught the drift that motivated this test —
-    the contract gaining a tag the code has never heard of. The receipt's
-    `layer` is a `Literal`, so an off-contract tag cannot be produced at all,
-    and a tag the contract names but the code lacks would be silently
-    unproducible. Both directions are therefore defects.
+    the contract gaining a tag the code has never heard of. And because the
+    set is declared twice (`LAYERS` and the receipt's `Literal`), equality is
+    asserted **per declaration**: break one copy and its union still matches
+    through the other, so a union-level check would pass over exactly the drift
+    that matters. The failure names the divergent site.
     """
     contract_tags = _contract_layer_tags()
-    emitted = _emitted_layer_tags()
-    assert emitted, (
+    declarations = _emitted_layer_declarations()
+    assert declarations, (
         f"no layer declaration sites were found under "
         f"{SOURCE_ROOT.relative_to(REPO_ROOT)}; the sweep is broken"
     )
-    code_tags = {tag for tags in emitted.values() for tag in tags}
-    assert code_tags == contract_tags, (
-        "the layer tags the code can emit differ from the Layer enum in "
-        f"{CONTRACT.name}: "
-        f"in_code_not_in_contract={sorted(code_tags - contract_tags)}, "
-        f"in_contract_not_in_code={sorted(contract_tags - code_tags)}; "
-        f"declared in {sorted(emitted)}"
+
+    full_sets = _full_set_declarations(declarations)
+    assert full_sets, (
+        "the sweep found layer declarations but none that enumerate the whole "
+        f"set; the per-site equality assertion would be vacuous. found "
+        f"{sorted(declarations)}"
+    )
+    divergent = {
+        site: {
+            "in_code_not_in_contract": sorted(tags - contract_tags),
+            "in_contract_not_in_code": sorted(contract_tags - tags),
+        }
+        for site, tags in full_sets.items()
+        if tags != contract_tags
+    }
+    assert not divergent, (
+        "each declaration of the full layer set must equal the Layer enum in "
+        f"{CONTRACT.name}, and these do not: {divergent}"
+    )
+
+
+def test_every_single_tag_layer_declaration_is_in_the_contract():
+    """An error class fixing a tag the contract does not have is a defect."""
+    contract_tags = _contract_layer_tags()
+    declarations = _emitted_layer_declarations()
+    offenders = {
+        site: sorted(tags - contract_tags)
+        for site, tags in declarations.items()
+        if site.rsplit(":", 1)[-1] not in _LAYER_FULL_SET_CONSTANTS
+        and not site.endswith("layer Literal")
+        and tags - contract_tags
+    }
+    assert not offenders, (
+        "layer tags declared by the code but absent from the Layer enum in "
+        f"{CONTRACT.name}: {offenders}"
     )
 
 
