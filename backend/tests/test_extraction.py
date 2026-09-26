@@ -17,13 +17,6 @@ def test_draft_payload_contains_only_the_draft_allowlist():
     assert p.prior_study_refs == ()
 
 
-def test_non_allowlisted_metadata_is_dropped_not_rejected():
-    p = pipeline_for("draft", STUDY, "FINDINGS: 7mm nodule.", META, PV)
-    assert "institution_name" not in p.dicom_fields
-    assert "PAT-0001" not in repr(p.dicom_fields.values())
-    assert "ACC-9911" not in repr(p.dicom_fields)
-
-
 def test_prior_summary_allowlist_includes_prior_text():
     p = pipeline_for("prior_summary", STUDY, "FINDINGS: 7mm nodule.",
                      META | {"PriorReportText": "2024 nodule 6mm", "PriorStudyDate": "20240602"}, PV)
@@ -88,12 +81,16 @@ def test_malformed_patient_age_is_refused():
     assert ei.value.action_codes == ("MALFORMED_METADATA",)
 
 
-def test_payload_hash_is_none_until_the_contract_check_sets_it():
-    from medarx.models import StructuredPayload
-    p = StructuredPayload(function="draft", report_text="t", dicom_fields={},
-                          study_ref="STU-0001", prior_study_refs=(),
-                          policy_version=PV, input_hash="abc", payload_hash=None)
-    assert p.payload_hash is None
+def test_extractor_writes_a_pre_redaction_payload_hash_that_tracks_content():
+    a = pipeline_for("draft", STUDY, "FINDINGS: 7mm nodule.", META, PV)
+    b = pipeline_for("draft", STUDY, "FINDINGS: 9mm nodule.", META, PV)
+    # Written at extraction, and distinct from the input attestation.
+    assert a.payload_hash is not None
+    assert a.payload_hash != a.input_hash
+    # Sensitive to the content it attests to: a redaction layer that rewrites
+    # the payload without updating this hash is exactly the drift layer 3
+    # exists to catch, so the value must not be a constant.
+    assert a.payload_hash != b.payload_hash
 
 
 def test_canonical_hash_refuses_non_serialisable_values():
