@@ -5,17 +5,25 @@ model-SDK debug output under "the same sensitive-data filtering" as the audit
 log. The audit log has that as a *policy* — a field that could hold a value is
 refused at the write, so there is nothing to filter at read time. The other
 surfaces have no such policy: a value reaches a log line because somebody
-interpolated it into a message, and the only thing between that and a
-persistently readable file is this module. So it is the **last** line of
-defence, and everything it does is written to be a floor rather than a proof.
+interpolated it into a message, and this module is what stands between that and
+a persistently readable file. So it is the **last** line of defence, and
+everything it does is written to be a floor rather than a proof.
+
+**Three of those four surfaces are implemented; the fourth is not.** Application
+logs, exception traces and the HTTP/NER SDKs' debug output are covered below.
+**Tracing spans are not**: no tracer is a dependency, none is installed, and
+there is no span to scrub — a surface with no implementation is unaddressed
+rather than covered, and this module says so rather than letting the sentence
+above imply otherwise. Whether Phase 1 ever emits spans, and where a span's
+attributes would be filtered when it does, is undecided.
 
 **One vocabulary of identifier shapes, not two.** The three clinical patterns
 are the redaction layer's own (`medarx.redaction.recognizers.PATTERNS`), read
 from there rather than copied: an MRN the kernel is told to recognise in a
 report and an MRN it is told to scrub in a log are the same shape of string, and
 a second copy here is a second thing to keep in step. The cost of the reuse is
-that importing this module imports `presidio_analyzer` with it, which is a
-declared dependency the process loads anyway.
+that importing this module imports `presidio_analyzer` with it; the redaction
+layers sit on every request path, so the process loads it regardless.
 
 **What this filter does *not* cover, stated rather than implied.** A
 `logging.Filter` is consulted for records logged *to* the logger it is attached

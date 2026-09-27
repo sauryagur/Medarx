@@ -554,9 +554,11 @@ class AuditLog:
                limit: int | None = None) -> list[AuditEvent]:
         """The readback read: filter, order, and page over the stored records.
 
-        The one place anything reads this table. `get` is this with a single
-        filter, and `medarx.audit.queries` is the contract-shaped surface over
-        it — so a second way to read the same rows is not available to write.
+        The one read path: `get` is this with a single filter, and
+        `medarx.audit.queries` is the contract-shaped surface over it, so a
+        second way to *read back* this table is not available to write.
+        `verify_chain` also walks the same rows, but to verify rather than to
+        answer a question, and it reads them in ordinal order.
 
         **Order is presentation order, not chain order.** The contract asks the
         collection endpoint for records "in ascending timestamp order", and a
