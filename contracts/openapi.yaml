@@ -996,7 +996,7 @@ components:
           description: >-
             Hash of the exact approved payload object transmitted. Computed at redaction layer 3 and
             verified against observed egress bytes by component I.
-          examples: ['sha256:2f1a0c9d4b7e6a3f5c8d1e0b2a4f6c8d0e2b4a6c8e0f2d4b6a8c0e2f4d6b8a0']
+          examples: ['sha256:02f1a0c9d4b7e6a3f5c8d1e0b2a4f6c8d0e2b4a6c8e0f2d4b6a8c0e2f4d6b8a0']
         input_hash:
           type: string
           description: Hash of the caller's input as received, for audit correlation.

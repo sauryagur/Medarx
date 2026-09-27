@@ -85,8 +85,15 @@ class ChainReport:
       it claims, or no longer links to its predecessor: something was rewritten,
       reordered, or deleted from the middle.
     - `broken_at_index == checked` — every record that is there verifies, and
-      the head anchor says there should be more. The chain has been truncated at
-      the tail, which a plain chain cannot see at all.
+      the anchor disagrees with that: the head hash names a record that is not
+      present, or the count says there are more. That signature covers **three**
+      distinct causes and the report cannot tell them apart — records deleted
+      from the tail, records deleted from the tail *and* the anchor repointed at
+      a survivor, and `row_count` alone altered with nothing deleted. All three
+      are measured (`tests/test_audit.py` exercises each); distinguishing them
+      is what the fourth field the design did not add would have bought. A
+      caller acting on the report knows the anchor was tampered with; it does
+      not know which.
     """
 
     ok: bool

@@ -1,4 +1,4 @@
-"""Component G's action-code table, and the stage boundaries of the log.
+"""Component G's action-code table, and the privacy pipeline's stage vocabulary.
 
 The design names G as the source of the codes a block receipt carries, and the
 contract's `ActionCode` enum describes this module's table as "the
@@ -10,11 +10,13 @@ A code classifies a refusal; it never carries what was refused. That is enforced
 upstream by `medarx.models.CODE_SHAPE`, which admits no digits at all, so a
 medical record number cannot ride in on a code.
 
-`PIPELINE_STAGES` is the ordered set of stage boundaries the log is
-partitioned into. The UI's privacy-details drawer renders exactly this
-timeline, and the names are in the contract so that a later change to what the
-log records is a change to a published vocabulary rather than a rename of audit
-records that already exist.
+`PIPELINE_STAGES` is the ordered set of stage boundaries the privacy pipeline
+passes through. No stage is stored: a record carries the `layer` that refused
+it, and `stages` is derived from that at read time by `stages_reached`, so the
+list cannot disagree with the record it was computed from. The UI's
+privacy-details drawer renders exactly this timeline, and the names are in the
+contract so that a later change to the timeline is a change to a published
+vocabulary rather than a rename of audit records that already exist.
 """
 
 from __future__ import annotations
@@ -74,12 +76,18 @@ STAGE_COMPONENTS: dict[str, tuple[str, ...]] = {
 
 
 def _layer_stage() -> dict[str, str]:
-    """The layer → stage map, *derived* from `STAGE_COMPONENTS` on every call.
+    """The layer → stage map, *derived* from `STAGE_COMPONENTS` once, at import.
 
     Derived rather than written out because a hand-maintained copy is a second
     table that can drift: a new D.4 would be added to `LAYERS` and to
     `STAGE_COMPONENTS`, and an inverse written out separately would keep
     answering for the old set. One table, one direction of maintenance.
+
+    Computed once, so `LAYER_STAGE` is a module-level dict and a runtime edit to
+    `STAGE_COMPONENTS` is not reflected in it. That is the point of computing it
+    at all rather than per call: the stage set does not change under a running
+    process, and a half-updated table read concurrently would be worse than a
+    stale one.
 
     A layer with no stage is `J`: the request surface refuses before anything
     enters the pipeline, so no stage was ever behind the request.

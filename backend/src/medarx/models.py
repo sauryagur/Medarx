@@ -23,6 +23,7 @@ __all__ = [
     "AuditEvent",
     "BlockReceipt",
     "ExtractionRequest",
+    "FunctionName",
     "HumanApproval",
     "ModelRequest",
     "ModelResponse",
@@ -46,6 +47,17 @@ CODE_SHAPE = re.compile(r"\A[A-Z]+(?:_[A-Z]+)*\Z")
 #: contracts/openapi.yaml. There is no bare "D": the three redaction layers are
 #: tagged D.1, D.2, and D.3 individually.
 LAYERS = ("J", "A", "C", "D.1", "D.2", "D.3", "E", "F")
+
+#: The contract's `FunctionName` enum, spelled as the contract spells it —
+#: including the space in `Prior Summary`. The audit log stores what it is
+#: given, and a log read by an auditor speaks the contract's vocabulary, so the
+#: contract's spelling is the stored one. Internal snake_case (`draft`,
+#: `prior_summary`) is the translation the *application* component does when it
+#: turns a request into an audit record; inventing a second spelling here would
+#: put two vocabularies in a permanent record, and a caller writing the
+#: contract's spelling would still be refused. Pinned against the contract enum
+#: by `test_the_functions_the_audit_log_stores_are_the_contract_enum`.
+FunctionName = Literal["Draft", "Prior Summary", "Ask"]
 
 #: The contract's `PolicyMode` enum. Fixed per deployment, never per request.
 PolicyMode = Literal["strict_local", "cloud", "authorized_local"]
@@ -278,8 +290,11 @@ class AuditEvent(BaseModel):
       schema for it, because the storage schema is a Phase 1 decision.
     - `chain_verified` and `stages` are absent. The contract defines both as
       results computed on read, not stored fields: `stages` is the pipeline
-      prefix derived from `layer`, so nothing about it is persisted and no
-      already-chained record's digest changes.
+      prefix derived from `layer`, so nothing about it is persisted. Scoped
+      precisely, deriving `stages` leaves the chain body untouched, so a record
+      chained before the projection existed still verifies — unlike `layer`,
+      which *is* a stored field and did change every already-chained record's
+      digest when it was added. Nothing persisted here is a derived value.
 
     No field here can hold payload text: the event carries hashes, field
     *names*, classifiers and codes only, and `medarx.audit.audit_log` holds the
@@ -290,7 +305,7 @@ class AuditEvent(BaseModel):
 
     request_id: str
     timestamp: datetime
-    function: str
+    function: FunctionName
     selected_model: str | None = None
     policy_version: str
     policy_mode: PolicyMode | None = None

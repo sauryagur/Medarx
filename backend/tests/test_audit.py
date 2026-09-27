@@ -28,7 +28,12 @@ import pytest
 import yaml
 from sqlalchemy import create_engine, inspect, text
 
-from medarx.audit.audit_log import ALLOWED_AUDIT_FIELDS, AUDIT_METADATA, AuditLog
+from medarx.audit.audit_log import (
+    ALLOWED_AUDIT_FIELDS,
+    AUDIT_METADATA,
+    DIGEST,
+    AuditLog,
+)
 from medarx.audit.code_table import (
     CODE_TABLE,
     LAYER_STAGE,
@@ -74,7 +79,7 @@ PAYLOAD_HASH = canonical_hash({"seed": "approved-payload"})
 
 
 def ev(**kw):
-    base = dict(request_id="req-1", timestamp=NOW, function="draft",
+    base = dict(request_id="req-1", timestamp=NOW, function="Draft",
                 selected_model="medarx-demo-model", policy_version="medarx-policy-1.0.0",
                 policy_mode="cloud", input_hash=INPUT_HASH,
                 approved_payload_hash=PAYLOAD_HASH,
@@ -670,6 +675,22 @@ def test_deleting_the_tail_and_repointing_the_anchor_is_detected(log):
     assert not r.ok and r.broken_at_index == r.checked == 1
 
 
+
+def test_altering_the_anchor_count_alone_is_detected(log):
+    # The third cause behind `broken_at_index == checked`, and the one that
+    # looks least like tampering with the records: nothing is deleted and every
+    # surviving row still hashes and still links. Only the anchor's own
+    # `row_count` was changed, which is why it is inside the MAC. Pinned here
+    # because the signature it produces is identical to a tail deletion's, and
+    # `ChainReport`'s docstring names all three.
+    log.append(ev(request_id="r1"))
+    log.append(ev(request_id="r2"))
+    with log.connection() as c:
+        c.execute(text("UPDATE audit_chain_head SET row_count = 9"))
+    r = log.verify_chain()
+    assert not r.ok and r.broken_at_index == r.checked == 2
+
+
 def test_deleting_the_log_and_resetting_the_anchor_is_detected(log):
     log.append(ev(request_id="r1"))
     log.append(ev(request_id="r2"))
@@ -722,7 +743,8 @@ def test_a_whole_database_deletion_is_the_one_thing_the_anchor_cannot_see(tmp_pa
 @pytest.mark.parametrize("field,value", [
     ("redacted_field_names", ["MRN 4452819 belongs to John Smith, DOB 1961-04-02"]),
     ("redacted_field_names", ["report_text for John Smith"]),
-    ("function", "draft for John Smith"),
+    ("function", "Prior Summary for John Smith"),
+    ("function", "Draft for John Smith"),
     ("policy_version", "medarx policy 1.0.0 for John Smith"),
     ("request_id", "7f3c1a90 2b6e John Smith"),
     ("input_hash", "the report said the patient was John Smith"),
@@ -741,6 +763,194 @@ def test_a_reviewer_naming_a_person_is_refused(log):
     with pytest.raises(ValueError):
         log.append(ev(human_approval=approval))
     assert log.get("req-1") == []
+
+
+# -- The record speaks the contract's vocabulary --------------------------------
+
+#: The contract's `FunctionName` enum, written out rather than imported so this
+#: compares two vocabularies rather than one against itself.
+CONTRACT_FUNCTIONS = ("Draft", "Prior Summary", "Ask")
+
+#: The contract's own published example for a hash, verbatim from
+#: `ExecutionResponse.approved_payload_hash`. It is the string a reader copying
+#: the contract would write, and it is the string the storage policy used to
+#: refuse.
+CONTRACT_HASH_EXAMPLE = ("sha256:02f1a0c9d4b7e6a3f5c8d1e0b2a4f6c8d"
+                         "0e2b4a6c8e0f2d4b6a8c0e2f4d6b8a0")
+
+
+@pytest.mark.parametrize("function", CONTRACT_FUNCTIONS)
+def test_every_contract_function_name_is_auditable(log, function):
+    # `Prior Summary` contains a space, which the old bare-identifier gate
+    # refused — so a third of the contract's function surface could not be
+    # audited, with an error about "an identifier" that named the contract's
+    # own vocabulary as the thing rejected.
+    stored = log.append(ev(function=function))
+    assert stored.function == function
+    assert log.get("req-1")[0].function == function
+    assert log.verify_chain().ok
+
+
+def test_a_function_outside_the_contract_enum_is_refused(log):
+    # The gate is the closed enum, so the internal snake_case spelling is not a
+    # second way in. Translating it is the application component's job, done
+    # before the record is written; a persistent record holding both spellings
+    # would be drift, and the enum's whole property is that there is one.
+    with pytest.raises(ValueError) as ei:
+        log.append(ev(function="prior_summary"))
+    assert "function" in str(ei.value)
+    assert log.get("req-1") == []
+
+
+def test_a_hash_written_in_the_contracts_spelling_reads_back_as_bare_hex(log):
+    # Both forms denote one digest, so the log accepts the contract's printed
+    # spelling and stores the canonical one. An auditor comparing a stored
+    # `2f1a…` with the contract's `sha256:2f1a…` is looking at the same value,
+    # and that is stated at the gate rather than left to be rediscovered.
+    stored = log.append(ev(input_hash="sha256:" + INPUT_HASH,
+                           approved_payload_hash=CONTRACT_HASH_EXAMPLE))
+    bare = CONTRACT_HASH_EXAMPLE.split(":", 1)[1]
+    assert stored.input_hash == INPUT_HASH
+    assert stored.approved_payload_hash == bare
+    # ... and it is the *stored* form, not just the returned one: an auditor
+    # reads the column, not the return value.
+    with log.connection() as conn:
+        row = conn.execute(text(
+            "SELECT input_hash, approved_payload_hash FROM audit_event"
+        )).mappings().one()
+    assert dict(row) == {"input_hash": INPUT_HASH, "approved_payload_hash": bare}
+    read_back = log.get("req-1")[0]
+    assert read_back.approved_payload_hash == bare
+    # The chain body is the canonical form, so verification agrees with the
+    # column rather than with the string the caller happened to write.
+    assert log.verify_chain().ok
+
+
+def test_a_hash_that_is_neither_spelling_is_still_refused(log):
+    # Accepting the contract's prefix is a normalisation of one defined
+    # spelling, not a loosening: a sentence in a hash field still loses the
+    # audit write.
+    for bad in ("sha256:" + "z" * 64, "md5:" + "a" * 64, "sha256:" + "A" * 64):
+        with pytest.raises(ValueError) as ei:
+            log.append(ev(approved_payload_hash=bad))
+        assert "approved_payload_hash" in str(ei.value)
+    assert log.get("req-1") == []
+
+
+def _contract_published_values() -> list[tuple[str, object]]:
+    """Every value the contract publishes for a property the log stores.
+
+    Swept across *all* schemas, not `AuditRecord` alone: the example that broke
+    this class of bug is published on `ExecutionResponse`, three schemas from
+    the audit record that stores the same field, so a sweep of the audit schema
+    alone would have found nothing. `example`, `examples` and `enum` are all
+    read, because a closed enum is a published vocabulary too — and `Prior
+    Summary` is exactly the member a shape heuristic used to refuse.
+
+    An array property publishes its *element* values, which for a `$ref`ed
+    element means resolving `items` and reading the vocabulary there — that is
+    how `action_codes` publishes the `ActionCode` enum. Each element is written
+    as a single-element list, which is how a caller would write it. Non-string
+    values are skipped: the only ones published are `chain_verified`'s
+    `examples: [true]`, and that field is computed on read and never stored, so
+    its property name is not in `ALLOWED_AUDIT_FIELDS` to begin with.
+    """
+    doc = yaml.safe_load(CONTRACT.read_text(encoding="utf-8"))
+    schemas = doc["components"]["schemas"]
+
+    def deref(node):
+        seen = 0
+        while isinstance(node, dict) and "$ref" in node and seen < 10:
+            node = schemas[node["$ref"].rsplit("/", 1)[-1]]
+            seen += 1
+        return node
+
+    published: list[tuple[str, object]] = []
+    for body in schemas.values():
+        for name, prop in (body.get("properties") or {}).items():
+            if name not in ALLOWED_AUDIT_FIELDS:
+                continue
+            resolved = deref(prop) or {}
+            is_list = resolved.get("type") == "array"
+            # An array property publishes element values in two places: on the
+            # property itself (`redacted_field_names`) and on a `$ref`ed
+            # `items` schema (`action_codes`, which inherits `ActionCode`'s
+            # enum). Read both, or one of them goes unswept.
+            sources = [resolved]
+            if is_list:
+                sources.append(deref(resolved.get("items") or {}) or {})
+            values: list[object] = []
+            for source in sources:
+                if "example" in source:
+                    values.append(source["example"])
+                values.extend(source.get("examples") or ())
+                values.extend(source.get("enum") or ())
+            for value in values:
+                if not isinstance(value, str):
+                    continue
+                published.append((name, [value] if is_list else value))
+    return published
+
+
+def test_every_example_value_the_contract_publishes_for_an_audit_field_stores(log):
+    # The general form of the bug this round fixed: a contract-published
+    # spelling that a shape gate refuses makes the contract and the storage
+    # policy unusable together, and neither file is wrong on its own. This
+    # test would have caught both instances — `sha256:…` and `Prior Summary` —
+    # and catches the next one without anyone naming it first.
+    published = _contract_published_values()
+    expected_fields = {
+        "function", "request_id", "policy_version", "policy_mode",
+        "final_disposition", "redacted_field_names", "approved_payload_hash",
+        "action_codes",
+    }
+    # A published hash has to be a hash. The contract's example shipped 63 hex
+    # characters once, which no digest gate can accept without being weakened;
+    # checked here separately so the failure names the contract rather than the
+    # storage policy that correctly refused it.
+    malformed = [
+        (field, value) for field, value in published
+        if field in ("input_hash", "approved_payload_hash")
+        and not DIGEST.match(str(value).rsplit(":", 1)[-1])
+    ]
+    assert not malformed, (
+        f"the contract publishes hash examples that are not digests: {malformed}"
+    )
+    covered = {field for field, _ in published}
+    assert expected_fields <= covered, (
+        "the contract-example sweep is not sweeping: it found no published "
+        f"value for {sorted(expected_fields - covered)}"
+    )
+
+    written: list[tuple[str, AuditEvent, int]] = []
+    for field, value in published:
+        event = ev(**{field: value})
+        # The contract publishes *one* example request id and reuses it across
+        # schemas, so several of these records share a request id and position
+        # 0 is only right for the first. Taken before the append, from the
+        # event's own id, so the read-back below is positional rather than a
+        # search by the very attribute it is checking.
+        position = len(log.get(event.request_id))
+        written.append((field, log.append(event), position))
+        assert log.verify_chain().ok, (
+            f"the contract publishes {value!r} for {field!r} and appending it "
+            f"broke the chain"
+        )
+    # "Storable" means readable, not swallowed: each record is read back under
+    # its own `request_id` and at the position it was appended, so a value that
+    # reached disk but came back as something else fails here.
+    for field, original, position in written:
+        same_request = log.get(original.request_id)
+        assert len(same_request) > position, (
+            f"the record written with the contract's {field} value is not "
+            f"readable back under its own request id"
+        )
+        event = same_request[position]
+        assert event.chain_hash == original.chain_hash, (
+            f"the record written with the contract's {field} did not read back "
+            f"as the record that was stored"
+        )
+        assert getattr(event, field) == getattr(original, field)
 
 
 def test_a_dotted_field_name_is_accepted(log):

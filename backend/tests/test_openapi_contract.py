@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import get_args
 
 import pytest
 import yaml
@@ -401,9 +402,39 @@ _AUDIT_STORAGE_ONLY_FIELDS: frozenset[str] = frozenset(
 #: Fields the contract's `AuditRecord` models that the stored event deliberately
 #: lacks, because the contract defines them as results computed on read.
 #: `stages` joined `chain_verified` here when the `PipelineStage` enum was wired:
-#: both are projections, neither is stored, and neither enters the chain body —
-#: which is what keeps every already-chained record's digest unchanged.
+#: both are projections, neither is stored, and neither enters the chain body.
+#: Scoped to the projection, that leaves every already-chained record's digest
+#: unchanged — a claim about these two names, not about the commit that added
+#: `layer`, which is a stored field and did change every digest.
 _AUDIT_COMPUTED_ON_READ: frozenset[str] = frozenset({"chain_verified", "stages"})
+
+
+def _contract_function_names() -> set[str]:
+    return set(_load_contract()["components"]["schemas"]["FunctionName"]["enum"])
+
+
+def test_the_functions_the_audit_log_stores_are_the_contract_enum():
+    """The audit log's `function` gate is the contract's closed enum, verbatim.
+
+    Asserted member for member rather than shape-checked, because the whole of
+    the fix is that a *closed* set admits a membership test: a shape heuristic
+    cannot say whether `Prior Summary` is a legitimate function, and refused it
+    while accepting `Draft`. If this fails, the code has either grown a second
+    spelling of a contract fact or the contract has moved — and the record an
+    auditor reads is written in whichever one is here.
+    """
+    from medarx.models import FunctionName
+
+    code_side = set(get_args(FunctionName))
+    contract = _contract_function_names()
+    assert code_side == contract, {
+        "in_code_not_in_contract": sorted(code_side - contract),
+        "in_contract_not_in_code": sorted(contract - code_side),
+    }
+    assert "Prior Summary" in code_side, (
+        "the member the identifier gate used to refuse is the one this test "
+        "exists for; if it is gone, so is the reason the gate is an enum"
+    )
 
 
 def _contract_layer_tags() -> set[str]:
@@ -601,10 +632,11 @@ def test_audit_event_names_match_the_contract_audit_record():
     `AuditEvent` is the storage-side event and the contract's `AuditRecord` is
     the API-facing schema, so the sets differ by design: the event adds
     `chain_hash` and `previous_hash` (tamper-evidence inputs the contract
-    describes but does not schema) and omits `chain_verified` (computed on
-    read). What must never drift is the naming of the fields both have — a
-    storage field called `model` behind a readback that expects `selected_model`
-    is a silent read-time miss, not an error.
+    describes but does not schema) and omits `chain_verified` and `stages` —
+    both computed on read, the second derived from the stored `layer`. What
+    must never drift is the naming of the fields both have — a storage field
+    called `model` behind a readback that expects `selected_model` is a silent
+    read-time miss, not an error.
     """
     from medarx.models import AuditEvent
 

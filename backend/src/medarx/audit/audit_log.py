@@ -7,6 +7,16 @@ rather than persisted. The full model prompt and response do not belong here at
 all — they belong in a restricted, encrypted diagnostic store, which this
 component does not implement and does not pretend to.
 
+**The record speaks the contract's vocabulary, and its stored form is stated
+where it differs from the contract's printed one.** `function` is one of the
+contract's three `FunctionName` members, spelled as the contract spells it;
+`input_hash` and `approved_payload_hash` are the same digest the contract
+prints, stored as bare lower-case hex rather than the contract's `sha256:`
+prefix, which `append` accepts and strips. Both facts are load-bearing for
+anyone comparing a stored record with the contract, and neither is a second
+vocabulary: one spelling per value, and a caller writing the contract's own
+spelling is not refused for it.
+
 `append` is the only write path. It computes the chain digest inside the same
 transaction that inserts the row, and the head is read and advanced under a lock
 (see `AuditLog`), so a concurrent append cannot read a stale head and fork the
@@ -247,31 +257,57 @@ class Entry:
 #: does not parse as one.
 FIELD_PATH = re.compile(r"\A[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*\Z")
 
-#: A bare identifier: `draft`, `medarx-policy-1.0.0`, `medarx-demo-model`. A
-#: space is what separates an identifier from prose, so a name with a space in it
-#: is refused.
+#: A bare identifier: `medarx-policy-1.0.0`, `medarx-demo-model`. A space is
+#: what separates an identifier from prose, so a name with a space in it is
+#: refused — *except* where the contract publishes a spelling that contains
+#: one. `function` is that case, and it is not gated by this shape: the contract
+#: makes it a closed three-member enum (`Draft` / `Prior Summary` / `Ask`),
+#: which `AuditEvent` holds as `FunctionName`. A closed enum is exact where a
+#: shape is a guess, and the audit log is a record an auditor reads next to the
+#: contract, so it speaks the contract's vocabulary. Translating the contract's
+#: `Prior Summary` into `prior_summary` here would put a second spelling of a
+#: contract fact into a permanent record *and* still refuse a caller who wrote
+#: the contract's spelling. Internal snake_case is the application component's
+#: translation, done before the record is written.
 IDENTIFIER = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]*\Z")
 
-#: A canonical digest. `canonical_hash` and `chain_hash` both produce 64 lower-case
-#: hex characters, and `GENESIS` is 64 zeros, so nothing else is a hash here.
+#: A canonical digest, and the only two spellings a hash field accepts. Bare
+#: lower-case hex is the **stored** form; the contract publishes its own example
+#: for `approved_payload_hash` in the prefixed form
+#: (`sha256:<64 hex>`, contracts/openapi.yaml `ExecutionResponse`), and the
+#: prefix is a defined algorithm label rather than prose. So the prefixed form
+#: is accepted on the way in and stripped on the way in — the record, the
+#: column and the chain body all carry bare hex, and a reader comparing a
+#: stored `2f1a…` with the contract's `sha256:2f1a…` needs this comment to know
+#: they are the same value. See `_canonical_digest`.
 DIGEST = re.compile(r"\A[0-9a-f]{64}\Z")
 
-#: Which stored field is held to which shape. `function` and `policy_version` are
-#: the two the review exercised, and the rest are closed on the same reasoning:
-#: every remaining free-form field in the record is an identifier, a digest, a
-#: field name, or a code, and `action_codes` is already held to `CODE_SHAPE`.
-#: `chain_hash` and `previous_hash` are deliberately absent: they are computed
-#: by the log and overwritten on every append, so whatever a caller put there is
-#: a claim rather than data, and holding them to a shape would only refuse the
-#: placeholder an honest caller writes.
+#: The contract's hash spelling: the algorithm name, a colon, then the digest.
+PREFIXED_DIGEST = re.compile(r"\Asha256:([0-9a-f]{64})\Z")
+
+#: Which stored field is held to which shape, and why each one.
+#:
+#: `function` is deliberately absent — see the note on `IDENTIFIER`; its gate is
+#: the contract's closed enum, which the model applies. `chain_hash` and
+#: `previous_hash` are absent because the log computes and overwrites them on
+#: every append, so whatever a caller put there is a claim rather than data, and
+#: holding them to a shape would only refuse the placeholder an honest caller
+#: writes. `selected_model` is deployment configuration — an identifier, not a
+#: free string — and `request_id` and `policy_version` are the two the first
+#: round of review exercised.
 _VALUE_SHAPES: dict[str, re.Pattern[str]] = {
     "request_id": IDENTIFIER,
-    "function": IDENTIFIER,
     "selected_model": IDENTIFIER,
     "policy_version": IDENTIFIER,
     "input_hash": DIGEST,
     "approved_payload_hash": DIGEST,
 }
+
+#: The two fields whose value is a hash, and therefore the two the contract is
+#: free to publish in its `sha256:` spelling. Written out rather than inferred
+#: from `_VALUE_SHAPES` so that adding a shape-gated field does not silently
+#: make it a hash field that silently strips a prefix.
+_DIGEST_FIELDS = frozenset({"input_hash", "approved_payload_hash"})
 
 #: Held element-wise rather than whole, because the field is a list of names.
 _LIST_SHAPES: dict[str, re.Pattern[str]] = {"redacted_field_names": FIELD_PATH}
@@ -325,6 +361,22 @@ def _to_column(name: str, value: Any) -> Any:
     if name in _JSON_COLUMNS:
         return canonical(value).decode("utf-8")
     return value
+
+
+def _canonical_digest(name: str, value: str | None) -> str | None:
+    """`value` in the one form a hash column stores: bare lower-case hex.
+
+    The contract publishes a hash as `sha256:<hex>`; the log stores `<hex>`.
+    Both spellings denote the same digest, so the prefixed one is accepted and
+    stripped here — *before* the chain digest is computed, not after, so the
+    hashed body, the column and the value `append` hands back are one string
+    and a read-back re-hashes to the same value. Any other field passes through
+    untouched, so this is a no-op for everything that is not a hash.
+    """
+    if value is None or name not in _DIGEST_FIELDS:
+        return value
+    prefixed = PREFIXED_DIGEST.match(value)
+    return prefixed.group(1) if prefixed else value
 
 
 def _from_column(name: str, value: Any) -> Any:
@@ -390,8 +442,19 @@ class AuditLog:
         holds; any values the caller supplied for those two fields are replaced,
         because they are the log's to compute and a caller's copy of them is a
         claim rather than a fact.
+
+        A hash written in the contract's `sha256:` spelling is *canonicalised*,
+        not refused: the event stored, the column written, the chain body hashed
+        and the event returned all carry the bare-hex form, so there is one
+        string on disk and the returned record says so. See `_canonical_digest`
+        for why that matters to an auditor comparing a row with the contract.
         """
         self._refuse_off_policy(event)
+        event = event.model_copy(update={
+            name: _canonical_digest(name, getattr(event, name))
+            for name in _DIGEST_FIELDS
+            if getattr(event, name) is not None
+        })
         dumped = event.model_dump()
         body = {name: dumped[name] for name in _HASHED_FIELDS}
         with _APPEND_LOCK, self._engine.begin() as conn:
@@ -417,9 +480,12 @@ class AuditLog:
           it can be.
         - **Values.** A field being allowlisted does not make a sentence in it
           acceptable. The free-form fields are held to identifier, digest or
-          field-path shapes, so the mistake this policy exists to catch — a
-          value written into a field that should hold a name — is refused at the
-          write.
+          field-path shapes, and `function` is held to the contract's closed
+          `FunctionName` enum, so the mistake this policy exists to catch — a
+          value written into a field that should hold a name — is refused at
+          the write. Hash fields accept the contract's `sha256:` spelling as
+          well as bare hex and are stored canonically; that is a normalisation,
+          not a widening, because both spellings denote one digest.
         """
         carried = set(event.model_dump()) | set(type(event).model_fields)
         off_policy = sorted(carried - ALLOWED_AUDIT_FIELDS)
@@ -438,12 +504,21 @@ class AuditLog:
     def _refuse_a_value_where_a_name_belongs(event: AuditEvent) -> None:
         """Refuse a value in a field that is only ever meant to hold a name."""
         for name, shape in _VALUE_SHAPES.items():
-            value = getattr(event, name)
+            # A hash field is checked in its canonical form, so the contract's
+            # own `sha256:` spelling passes this gate and is stripped by
+            # `append` rather than refused here.
+            value = _canonical_digest(name, getattr(event, name))
             if value is not None and not shape.match(value):
+                expected = (
+                    "not a digest: 64 lower-case hex characters, optionally "
+                    "written in the contract's 'sha256:' spelling"
+                    if name in _DIGEST_FIELDS
+                    else f"not an identifier ({shape.pattern})"
+                )
                 raise ValueError(
-                    f"audit field {name!r} holds {value!r}, which is not an "
-                    f"identifier or a digest ({shape.pattern}). The audit log "
-                    f"stores names and codes, never the values they stand for."
+                    f"audit field {name!r} holds {getattr(event, name)!r}, which "
+                    f"is {expected}. The audit log stores names and codes, "
+                    f"never the values they stand for."
                 )
         for name, shape in _LIST_SHAPES.items():
             for item in getattr(event, name):
@@ -481,10 +556,14 @@ class AuditLog:
     def stages_for(self, event: AuditEvent) -> tuple[str, ...]:
         """The pipeline stages this record says the request reached.
 
-        Derived at read time from the record's blocking `layer`, not stored:
-        a derived value cannot disagree with the record it is computed from, and
-        it keeps the chain body — and therefore every stored record's digest —
-        exactly as it was.
+        Derived at read time from the record's blocking `layer`, not stored: a
+        derived value cannot disagree with the record it is computed from, and
+        because it is not a field it does not enter the chain body — so a
+        record chained before the projection existed still verifies. That is a
+        claim about `stages` alone. Adding a *stored* field such as `layer`
+        does change the hashed body, and so changed every already-chained
+        record's digest when it was added; do not read this sentence as saying
+        otherwise.
         """
         return stages_reached(event.layer)
 
