@@ -737,16 +737,45 @@ _STUDY = StudyContext(
 
 
 def _carried_fields(keyword: str, subschema: dict) -> set[str]:
-    """The payload fields one metadata property actually fills."""
+    """The payload fields one metadata property actually fills, in *any* function.
+
+    Every function in `ALLOWED_FIELDS`, not just `draft`. A field is either
+    carried or dropped, and which one it is depends on the function: `Modality`
+    is carried by all three, `prior_report_text` only by `Prior Summary` and
+    `Ask`. Resolving against `draft` alone hardcoded an assumption that every
+    contract property is reachable from one function, and that assumption is
+    what kept `PriorReportText` out of the contract in the first place — the one
+    allowlisted attribute whose value redaction layer 2 actually scans, and so
+    the one a caller most needs to be able to send.
+
+    A property that *no* function carries is still accepted, not refused, so
+    `ExtractionError` is not a failure here; it is the "dropped" half of the
+    claim the caller of this function makes about it.
+    """
     examples = subschema.get("examples") or []
     value = str(examples[0]) if examples else "SYNTHETIC"
-    try:
-        payload = pipeline_for("draft", _STUDY, "text", {keyword: value}, "pv-1")
-    except ExtractionError as exc:  # pragma: no cover - the assertion reports it
-        pytest.fail(
-            f"contract property {keyword}={value!r} is refused at layer A: {exc.action_codes}"
+    carried: set[str] = set()
+    refused: dict[str, tuple] = {}
+    for function in ALLOWED_FIELDS:
+        study = StudyContext(
+            study_uid=_STUDY.study_uid, study_ref=_STUDY.study_ref,
+            patient_ref=_STUDY.patient_ref, function=function,
         )
-    return set(payload.dicom_fields)
+        try:
+            payload = pipeline_for(function, study, "text", {keyword: value}, "pv-1")
+        except ExtractionError as exc:
+            refused[function] = exc.action_codes
+            continue
+        carried |= set(payload.dicom_fields)
+    if refused and not carried:
+        # Refused by every function is a different condition from refused by
+        # one: a property no function can carry is a boundary that does not
+        # accept it at all, which is a defect in the contract, not a policy.
+        pytest.fail(
+            f"contract property {keyword}={value!r} is refused at layer A by every "
+            f"function: {refused}"
+        )
+    return carried
 
 
 def test_every_allowlisted_metadata_property_is_carried_or_deliberately_dropped():

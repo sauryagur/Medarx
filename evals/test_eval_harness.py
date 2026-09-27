@@ -181,29 +181,68 @@ def test_the_function_name_on_every_case_is_the_contracts_spelling():
         assert case.function not in ALLOWED_FIELDS, case.name
 
 
-def test_the_prior_prose_case_is_one_the_contract_cannot_express():
-    """The gap, pinned.
+def test_the_prior_prose_attribute_is_expressible_because_the_contract_was_corrected():
+    """The gap that was, and the correction that closed it, both pinned.
 
     `PriorReportText` is the only allowlisted DICOM attribute whose value layer 2
-    scans, and the contract's `AllowlistedDicomMetadata` declares no such
-    property — so the one DICOM-metadata input source with a NER surface cannot
-    be supplied by a caller today. The case is measured anyway, because the code
-    is the truth about what happens to the value and leaving the source
-    unmeasured would be the worse error; this test exists so the gap cannot be
-    forgotten.
+    scans. It was absent from the contract's `AllowlistedDicomMetadata` while
+    being accepted by layer A, allowed by two of the three functions, and
+    carrying a replacer path — so the only DICOM-metadata input source with a
+    detection surface could not be supplied by any caller, and a request
+    following the contract could not reach a line of the layer-2 code that
+    matters for DICOM. The contract was wrong; the property is now declared, and
+    this test is the thing that would have caught it either way.
     """
+    from medarx.extraction.payload_extractor import KNOWN_DICOM_ATTRIBUTES
+
     allowed = set(
         _contract()["components"]["schemas"]["AllowlistedDicomMetadata"]["properties"]
     )
-    assert seed_corpus.DICOM_PROSE_ATTRIBUTE not in allowed
-    assert seed_corpus.DICOM_PROSE_ATTRIBUTE in __import__(
-        "medarx.extraction.payload_extractor", fromlist=["x"]
-    ).KNOWN_DICOM_ATTRIBUTES
-    gap = next(c for c in seed_corpus.ALL_CASES if not c.contract_expressible)
-    assert gap.name == "dicom_header_prose"
-    assert seed_corpus.DICOM_PROSE_ATTRIBUTE in gap.dicom_metadata
-    with pytest.raises(jsonschema.ValidationError):
-        _execution_request_validator().validate(gap.to_execution_request())
+    assert seed_corpus.DICOM_PROSE_ATTRIBUTE in KNOWN_DICOM_ATTRIBUTES
+    assert seed_corpus.DICOM_PROSE_ATTRIBUTE in allowed, (
+        "the one allowlisted DICOM attribute whose value redaction layer 2 "
+        "scans must be expressible in the request schema, or no caller can "
+        "reach the DICOM detection path at all"
+    )
+    case = next(c for c in seed_corpus.ALL_CASES if c.name == "dicom_header_prose")
+    assert case.contract_expressible
+    assert case.contract_note, "the gap is recorded so the correction has a history"
+    _execution_request_validator().validate(case.to_execution_request())
+
+
+def test_the_request_adapter_refuses_a_property_it_has_never_heard_of():
+    """The guard that makes "we measure the published shape" checkable.
+
+    A new property on the contract, or a smuggled one, must fail loudly rather
+    than being dropped between the document and the measurement. Without this
+    the adapter could quietly ignore a field and the harness would go on
+    reporting a number that answers a smaller question than it claims.
+    """
+    case = seed_corpus.CASES[0]
+    smuggled = dict(case.to_execution_request(), dicom_object={"raw": "bytes"})
+    with pytest.raises(ValueError, match="dicom_object"):
+        runner.pipeline_inputs(smuggled)
+    # A body that omits a required field is not an ExecutionRequest either, and
+    # it must say which field rather than raising a bare KeyError three frames
+    # deeper.
+    incomplete = case.to_execution_request()
+    del incomplete["study_context"]["study_reference"]
+    with pytest.raises(ValueError, match="study_reference"):
+        runner.pipeline_inputs(incomplete)
+
+
+def test_the_harness_states_which_request_fields_the_kernel_never_reads():
+    """`accession_reference` is PHI-bearing, declared by the contract, and read
+    by nothing under `backend/src/medarx`. Saying so is not the same as
+    measuring it, and a reader is entitled to know which it is."""
+    assert "study_context.accession_reference" in runner.UNREAD_REQUEST_FIELDS
+    for name in runner.UNREAD_REQUEST_FIELDS:
+        assert runner.REQUEST_FIELD_NOTES[name]
+    # And the field really is unread: the harness's own request bodies carry it
+    # and the adapter consumes it for nothing.
+    case = seed_corpus.CASES[0]
+    assert case.to_execution_request()["study_context"]["accession_reference"]
+
 
 
 # -- The metric ----------------------------------------------------------------
@@ -354,7 +393,7 @@ def test_detection_recall_by_entity_type_and_input_source():
 
 
 def test_the_planted_patient_id_recognizer_is_unreachable_on_the_canonical_spelling():
-    """The mechanism behind the 1/2 above, isolated from the number.
+    """The mechanism behind the 1/3 above, isolated from the number.
 
     Every spelling a radiology report actually writes is an `ANCHOR_LABELS`
     entry and is blanked before analysis, and the pattern requires a label, so

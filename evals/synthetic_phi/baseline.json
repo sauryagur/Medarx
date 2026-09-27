@@ -1,8 +1,9 @@
 {
-  "contract_gaps": [
+  "contract_notes": [
     {
       "case": "dicom_header_prose",
-      "gap": "AllowlistedDicomMetadata declares no PriorReportText property, so the only DICOM metadata value redaction layer 2 scans cannot be supplied by a caller through the published request schema"
+      "expressible": true,
+      "note": "Until this task, AllowlistedDicomMetadata declared no PriorReportText property, so the only DICOM metadata value redaction layer 2 scans could not be supplied by a caller at all. The property is now declared (strictly additive, alongside PriorStudyDate), and this case validates against the contract. The next place to look if it fails is the same one: the AllowlistedDicomMetadata property list."
     }
   ],
   "control": {
@@ -31,6 +32,7 @@
       "fell": true
     }
   },
+  "corpus_fingerprint": "da7de0aa552b5b5adb81359a0bfd0cd6d4662fc35a968354ca1ad9b23afc3ade",
   "notice": "A research instrument for this repository. Fabricated input only. These figures are a measurement of this codebase over invented text; they are not a claim about any real corpus.",
   "profiles": {
     "date_order MDY": {
@@ -768,5 +770,19 @@
       }
     }
   },
-  "synthetic": true
+  "synthetic": true,
+  "unread_request_fields": [
+    {
+      "field": "study_context.accession_reference",
+      "reason": "UNREAD: no module under backend/src/medarx reads it, so it cannot be measured \u2014 see UNREAD_REQUEST_FIELDS"
+    },
+    {
+      "field": "study_context.modality",
+      "reason": "the modality travels in dicom_metadata, not here"
+    },
+    {
+      "field": "report_text.source",
+      "reason": "provenance for the audit record; no module reads it"
+    }
+  ]
 }

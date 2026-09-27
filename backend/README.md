@@ -469,9 +469,24 @@ true.
 
 ```
 cd backend
-uv run pytest ../evals/test_eval_harness.py -v     # 34 tests
-uv run python ../evals/run_eval.py                 # the table, and a gate
+uv run pytest                                              # the backend suite
+uv run pytest ../evals/test_eval_harness.py -v             # 37 tests
+uv run python ../evals/run_eval.py                         # the table, and a gate
 ```
+
+**CI runs all three, and the gate is not optional.**
+`.github/workflows/ci.yml` runs the backend suite, the harness tests, and then
+`run_eval.py` with the gate on — no `--no-gate`. The gate is the only thing
+keeping the table above honest: without it a change to a recognizer or to
+`replacers._MASKED` that moved `PATIENT_ID` 1/3 or the 5/28 and 6/28 rates
+would land with a green suite and a README that no longer describes the code.
+It costs a few seconds beside a suite that already loads the same spaCy model.
+The gate also refuses to compare at all if the corpus has changed under the
+baseline: `baseline.json` carries a SHA-256 over `identifiers.json`,
+`report_template.txt` and `clean_prose.py`, so an edit to a fixture cannot read
+as an improvement. `baseline.json` is tracked and reviewed; the per-invocation
+`eval_results.json` is gitignored, because a file that is dirty after every
+*read* of the measurement tool trains everyone to ignore `git status`.
 
 **It is a research instrument for this repository, and nothing else.** Every
 value in it is fabricated, `evals/synthetic_phi/identifiers.json` carries the
@@ -491,12 +506,13 @@ the only thing that gives a detection figure a denominator.
 | Non-survival | **0/15** planted identifiers reached an approved payload | the whole kernel |
 | False positives | **5/28** masked with the date order unset, **6/28** with it declared | the scan, over prose with no identifier in it |
 
-`baseline.json` holds the recorded figures; `run_eval.py` exits non-zero when
-one moves the wrong way, and `--write-baseline` records a new one. The
+`baseline.json` holds the recorded figures, the corpus fingerprint they were
+measured against, and the contract notes; `run_eval.py` exits non-zero when a
+figure moves the wrong way, and `--write-baseline` records a new set. The
 per-entity-type figures are the row a reader quotes, so they are the ones
 pinned by `evals/test_eval_harness.py`.
 
-**Two findings, both measured, neither fixed here.**
+**Two findings, both measured.**
 
 *`PATIENT_ID` is unreachable on the spelling a report actually uses.*
 `scan_entities` blanks every `ANCHOR_LABELS` entry before the analyser runs, so
@@ -508,6 +524,17 @@ detected. Nothing leaks: layer 3's deterministic re-read fires
 `LEFTOVER_PATTERN_MATCH` on the leftover, and the run is refused. The gap is in
 the *detector*, not in the boundary, and the harness reports the two separately
 so a privacy figure of 0/15 is never read as a detection result.
+
+**OWNER:** the recognizer owner (`redaction/recognizers.py`), with the detector
+and eval track. **Decision required, and it is not "add a bare value":** a bare
+`\d{4,8}` alternative matches `120 HU`, `2.5 mg`, `3.2 cm`, `15 mm` and
+`20260114` in the identifier-free corpus above, and overlaps the `MRN`
+recognizer's own bare `\b[A-Z]{0,2}\d{7}\b`. Accepting the detection gap, or
+reopening the 5/28 false-positive rate to buy the recall, is the call.
+**Do not read `test_the_planted_patient_id_recognizer_is_unreachable_on_the_canonical_spelling`
+as a failing test:** it is a characterisation test and is *meant* to go red when
+the defect is fixed. Recall is pinned at 1/3 and 0/1 in `test_eval_harness.py`,
+and `run_eval.py` exits non-zero if either moves.
 
 *Clinical words are still masked in approved payloads, and now have a
 denominator.* 5 of 28 with the date order unset, 6 of 28 with it declared, and
@@ -526,13 +553,28 @@ data. A zero denominator renders as `n/a (0 measured)` and can never print as
 checks that recall **falls**; a benchmark that cannot report a worse number is
 not a benchmark.
 
-**A gap between the contract and the code, recorded rather than reconciled.**
-`PriorReportText` is the only allowlisted DICOM attribute whose value layer 2
-scans, and the contract's `AllowlistedDicomMetadata` declares no such property,
-so a caller cannot supply it. The `dicom_header_prose` case is measured through
-the code — which is the truth about what happens to the value — and marked
-`contract_expressible=False`. Adding the property would be a strictly additive
-contract change, but it would also make
+**The contract was wrong, and is corrected here.** `PriorReportText` is the only
+allowlisted DICOM attribute whose value layer 2 scans, and
+`AllowlistedDicomMetadata` declared no such property while layer A accepted it,
+`Prior Summary` and `Ask` allowed it, and a replacer path stood behind it — so
+the only DICOM-metadata input source with a detection surface could not be
+supplied by any caller, and a request following the contract could not reach a
+line of the layer-2 code that applies to DICOM. `PriorReportText` and
+`PriorStudyDate` are now declared, strictly additively.
 `test_every_allowlisted_metadata_property_is_carried_or_deliberately_dropped`
-resolve `PriorReportText` against the `Draft` allowlist and fail, so it belongs
-to whoever owns the contract rather than to this task.
+resolved each property against the `Draft` allowlist alone, which hardcoded the
+assumption that caused the gap; it now resolves against every function, and
+fails if a property is carried by *no* function — a boundary that does not
+accept it at all, which is a contract defect rather than a policy.
+
+**What the kernel does not read, stated rather than assumed.** The harness
+drives the pipeline from each case's `ExecutionRequest` body, not from the case
+object, and `runner.pipeline_inputs` raises on any property it has not been told
+about — so a new contract field cannot arrive and be quietly dropped between the
+document and the measurement. Three declared fields are read by nothing under
+`backend/src/medarx` and are named in `runner.UNREAD_REQUEST_FIELDS`:
+`study_context.accession_reference` (PHI-bearing, declared by the contract, and
+consumed by no code path), `study_context.modality` (the modality travels in
+`dicom_metadata`), and `report_text.source` (audit provenance). The first is a
+real gap in the kernel, not in the harness, and it is unmeasured here by
+construction.

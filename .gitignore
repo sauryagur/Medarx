@@ -15,3 +15,4 @@ dist/
 capture/
 *.pcap
 evals/reports/
+evals/synthetic_phi/eval_results.json

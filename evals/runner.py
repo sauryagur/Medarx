@@ -51,7 +51,6 @@ from medarx.redaction.pipeline import run_redaction
 __all__ = [
     "CLEAN_METADATA",
     "PATIENT_REF",
-    "STUDY_REF",
     "STUDY_UID",
     "DetectionReport",
     "EndToEndReport",
@@ -70,9 +69,6 @@ __all__ = [
 #: the report a different number on every run.
 PATIENT_REF = "PAT-0001"
 
-#: The internal study reference the corpus requests carry. Component C
-#: substitutes it for a surrogate before anything else happens.
-STUDY_REF = "STU-0001"
 #: A syntactically valid DICOM UID. It is *not* a `StudyInstanceUID`: the
 #: payload carries a surrogate, never this.
 STUDY_UID = "1.2.826.0.1.3680043.8.498.1138.100.0.1"
@@ -125,27 +121,27 @@ class EndToEndReport:
 def execute(case: Case, store: MappingStore, settings: Settings) -> metrics.Outcome:
     """One case, end to end, through the real layers and the real policy engine.
 
-    Executed through the **published request shape**, not through a
-    hand-assembled internal payload: the wire function spelling is translated at
-    the boundary, the report text and the keyword-named metadata go into
-    `pipeline_for` exactly as `ExecutionRequest` delivers them, and the prior
-    references come from `prior_studies`. A harness that built the payload
-    itself would be measuring a call no caller can make.
+    **The request body is the input, not the case.** This function calls
+    `case.to_execution_request()` and drives the pipeline from *that*, through
+    `pipeline_inputs`. An earlier version read `case.report_text` and
+    `case.dicom_metadata` directly and hand-built a `StudyContext`, while
+    claiming to execute "the published request shape" — a claim it did not
+    earn, on the one artifact whose whole value is that its numbers mean
+    something. Routing through the body makes the claim true by construction
+    and adds the check that made the overstatement visible: `pipeline_inputs`
+    raises on a request field the kernel never reads, so a new contract field
+    cannot be added and quietly ignored.
+
+    What is still hand-built, and stated rather than implied: the internal
+    `StudyContext`. There is no FastAPI route in this repository, so there is no
+    application adapter to borrow; `pipeline_inputs` is this harness's, and it
+    is the seam an application entry point would replace.
     """
-    function = INTERNAL_FUNCTION[case.function]
-    study = StudyContext(
-        study_uid=STUDY_UID,
-        study_ref=STUDY_REF,
-        patient_ref=PATIENT_REF,
-        function=function,
-        prior_study_refs=case.prior_studies,
+    function, study, report_text, dicom_metadata = pipeline_inputs(
+        case.to_execution_request()
     )
     source = pipeline_for(
-        function,
-        study,
-        case.report_text,
-        dict(case.dicom_metadata),
-        settings.policy_version,
+        function, study, report_text, dicom_metadata, settings.policy_version
     )
     payload = pseudonymize_payload(source, PATIENT_REF, store)
     outcome = run_redaction(
@@ -159,6 +155,97 @@ def execute(case: Case, store: MappingStore, settings: Settings) -> metrics.Outc
         approved_dicom_fields={} if approved is None else dict(approved.dicom_fields),
         dispositions=tuple(outcome.dispositions),
         decision_code=outcome.decision_code,
+    )
+
+
+#: The `ExecutionRequest` properties this harness's adapter knows how to feed
+#: into the pipeline, and what it does with each. A property in this table is
+#: accounted for; one that is not raises in `pipeline_inputs`, so a new contract
+#: field cannot arrive and be dropped between the document and the measurement
+#: without a failure.
+REQUEST_FIELD_NOTES: dict[str, str] = {
+    "function": "translated to the internal allowlist spelling",
+    "study_context.study_reference": "the study reference component C surrogates",
+    "study_context.accession_reference": (
+        "UNREAD: no module under backend/src/medarx reads it, so it cannot be "
+        "measured — see UNREAD_REQUEST_FIELDS"
+    ),
+    "study_context.modality": "the modality travels in dicom_metadata, not here",
+    "report_text.text": "the report text layer 2 scans",
+    "report_text.source": "provenance for the audit record; no module reads it",
+    "dicom_metadata": "the allowlisted DICOM fields, as keywords",
+    "prior_studies[].prior_study_reference": "the study's prior references",
+}
+
+#: The request fields this harness declares and the kernel demonstrably does not
+#: read. Named rather than discovered at runtime, because "the adapter ignored
+#: this" and "nothing reads this" are different findings and only one of them is
+#: a bug in the adapter. `accession_reference` is the important one: the
+#: contract declares it, it is PHI-bearing, and no code path consumes it, so
+#: the harness's own request bodies carry a value the kernel never looks at.
+UNREAD_REQUEST_FIELDS: tuple[str, ...] = (
+    "study_context.accession_reference",
+    "study_context.modality",
+    "report_text.source",
+)
+
+
+def pipeline_inputs(request: dict) -> tuple:
+    """`(function, StudyContext, report_text, dicom_metadata)` from a request body.
+
+    The adapter an application entry point would own. It is total over the
+    request body it is given — every property is either read here or named in
+    `REQUEST_FIELD_NOTES` — and it raises on a property it has never heard of, so a
+    new field on the contract cannot arrive and be dropped without a failure.
+    """
+    unknown = sorted(set(request) - {"function", "study_context", "report_text",
+                                     "dicom_metadata", "prior_studies"})
+    if unknown:
+        raise ValueError(
+            f"the request body carries properties this adapter does not know: "
+            f"{unknown}. Add each to REQUEST_FIELD_NOTES with what it is read for, or "
+            f"they are measured by nothing."
+        )
+    for entry in request.get("prior_studies", ()):
+        unknown = sorted(set(entry) - {"prior_study_reference", "study_date"})
+        if unknown:
+            raise ValueError(
+                f"a prior-study reference carries unknown properties: {unknown}"
+            )
+    study_context = request["study_context"]
+    for field in ("function", "study_context", "report_text"):
+        if field not in request:
+            raise ValueError(
+                f"the request body is missing {field!r}, which the contract "
+                f"requires; a body without it is not an ExecutionRequest"
+            )
+    for field in ("study_reference",):
+        if field not in request["study_context"]:
+            raise ValueError(
+                f"the request body's study_context is missing {field!r}, which "
+                f"the contract requires"
+            )
+    for field in ("text",):
+        if field not in request["report_text"]:
+            raise ValueError(
+                f"the request body's report_text is missing {field!r}, which the "
+                f"contract requires"
+            )
+    function = INTERNAL_FUNCTION[request["function"]]
+    study = StudyContext(
+        study_uid=STUDY_UID,
+        study_ref=study_context["study_reference"],
+        patient_ref=PATIENT_REF,
+        function=function,
+        prior_study_refs=tuple(
+            entry["prior_study_reference"] for entry in request.get("prior_studies", ())
+        ),
+    )
+    return (
+        function,
+        study,
+        request["report_text"]["text"],
+        dict(request.get("dicom_metadata", {})),
     )
 
 

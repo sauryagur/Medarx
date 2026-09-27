@@ -861,6 +861,25 @@ components:
             Modality of the source study, as reported. Metadata only — Medarx performs no diagnostic
             image interpretation and never derives findings from pixels.
           examples: [CT]
+        PriorReportText:
+          type: string
+          description: >-
+            The report text of a prior study, when the caller supplies one. Named here because it is
+            the **only** allowlisted DICOM attribute whose value is prose, and therefore the only
+            DICOM metadata field the entity detectors in redaction layer 2 read: every other
+            attribute below is a keyword, a date, or an age band, and is handled structurally
+            (dropped, shifted, or banded) rather than scanned. Omitting it made the only DICOM
+            input source with a detection surface unreachable by any caller, so a request
+            following this document could not exercise any of the layer-2 code that applies to
+            DICOM. Carried only by the functions whose allowlist names it (`Prior Summary` and
+            `Ask`); supplying it to `Draft` is `FIELD_NOT_ALLOWLISTED`.
+          examples: ['Prior FINDINGS: 6 mm nodule in the right upper lobe. MRN: 4452819.']
+        PriorStudyDate:
+          $ref: '#/components/schemas/DicomDate'
+          description: >-
+            Date of the prior study, when the caller supplies one. Shifted by the same per-patient
+            offset as `StudyDate`, so the interval between two studies is preserved. Carried only
+            by the functions whose allowlist names it (`Prior Summary` and `Ask`).
 
     ReportText:
       type: object

@@ -12,10 +12,11 @@ this file is for.
 renders itself to the `ExecutionRequest` the contract publishes — the wire
 function spelling (`Draft`, not `draft`), the `{text, source}` report-text
 object, keyword-named DICOM metadata — so the harness measures the surface a
-caller can actually reach rather than the kernel's internal call shape. The
-cases the published schema cannot express are marked
-`contract_expressible=False` and the reason is on the case; they exist because
-the alternative is leaving a whole input source unmeasured.
+caller can actually reach rather than the kernel's internal call shape. A case
+the published schema cannot express is marked `contract_expressible=False` and
+carries a `contract_note` saying why; it is still measured, because the
+alternative is leaving a whole input source unmeasured, and the note is kept
+after the gap closes so the correction has something to be checked against.
 
 **The ground truth is a statement about values, never about spans.** A
 `GroundTruth` entry says *this identifier was planted, on this surface*. The
@@ -145,11 +146,16 @@ class Case:
     function: str = "Draft"
     prior_studies: tuple[str, ...] = ()
     #: `False` where the published `ExecutionRequest` schema cannot express this
-    #: case, with the reason. The case is still measured: the code is the truth
-    #: about what the kernel does with it, and leaving the source unmeasured
-    #: would be the worse error. The gap is reported, not hidden.
+    #: case. The case is still measured: the code is the truth about what the
+    #: kernel does with it, and leaving an input source unmeasured would be the
+    #: worse error. The reason travels with it into the printed output.
     contract_expressible: bool = True
-    contract_gap: str | None = None
+    #: A recorded fact about this case's relationship to the contract, kept
+    #: whether or not the case is currently expressible. A note rather than a
+    #: flag: a contract corrected today still has a history worth naming, and a
+    #: note deleted the moment it stops being true is a note nobody can check
+    #: the correction against.
+    contract_note: str | None = None
 
     def surface_for(self, truth: GroundTruth) -> tuple[str, str]:
         """`(text, surface_name)` for the input surface `truth` names.
@@ -321,11 +327,21 @@ DICOM_HEADER_CASES: tuple[Case, ...] = (
             GroundTruth("ACCESSION_NUMBER", str(_IDS["accession"]), "dicom_header"),
             GroundTruth("PATIENT_ID", str(_IDS["patient_id"]), "dicom_header"),
         ),
-        contract_expressible=False,
-        contract_gap=(
-            "AllowlistedDicomMetadata declares no PriorReportText property, so "
-            "the only DICOM metadata value redaction layer 2 scans cannot be "
-            "supplied by a caller through the published request schema"
+        contract_expressible=True,
+        # Kept after the contract was corrected, and kept as prose rather than
+        # deleted, because the gap was real for a release and because the
+        # correction was *additive* in the same place a reader would look first
+        # if the property ever went missing again. `contract_expressible` says
+        # what is true now; this says what was true, and what would silently
+        # come back.
+        contract_note=(
+            "Until this task, AllowlistedDicomMetadata declared no "
+            "PriorReportText property, so the only DICOM metadata value "
+            "redaction layer 2 scans could not be supplied by a caller at all. "
+            "The property is now declared (strictly additive, alongside "
+            "PriorStudyDate), and this case validates against the contract. "
+            "The next place to look if it fails is the same one: the "
+            "AllowlistedDicomMetadata property list."
         ),
     ),
 )
@@ -429,7 +445,7 @@ def write_corpus(out_dir: Path) -> Path:
                     for g in case.ground_truth
                 ],
                 "contract_expressible": case.contract_expressible,
-                "contract_gap": case.contract_gap,
+                "contract_note": case.contract_note,
                 "execution_request": case.to_execution_request(),
             }
             for case in ALL_CASES

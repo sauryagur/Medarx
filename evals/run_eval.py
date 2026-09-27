@@ -40,6 +40,7 @@ later comparisons; it never widens a threshold on its own.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import tempfile
@@ -72,6 +73,13 @@ RESULTS_PATH = seed_corpus.CORPUS_DIR / "eval_results.json"
 #: from the environment would make every figure below a function of the machine
 #: it happened to be measured on.
 AUDIT_KEY = "medarx-eval-instrument-not-a-credential"  # noqa: S105
+
+#: The files the corpus is made of, hashed by `corpus_fingerprint` in this
+#: order. `identifiers.json` and `report_template.txt` decide what is planted
+#: and where it is written; `clean_prose.py` is the precision corpus. Changing
+#: any of them changes every figure below, so the gate refuses to compare until
+#: the baseline is re-recorded.
+_CORPUS_SOURCES = ("identifiers.json", "report_template.txt", "clean_prose.py")
 
 #: The two settings profiles every figure is reported under. The kernel has two
 #: legitimate configurations here, and quoting one of them without saying which
@@ -187,12 +195,43 @@ def collect() -> dict:
              seed_corpus.DICOM_PROSE_ATTRIBUTE),
         )
     }
-    record["contract_gaps"] = [
-        {"case": case.name, "gap": case.contract_gap}
+    record["corpus_fingerprint"] = corpus_fingerprint()
+    record["unread_request_fields"] = [
+        {"field": name, "reason": runner.REQUEST_FIELD_NOTES.get(name, "")}
+        for name in runner.UNREAD_REQUEST_FIELDS
+    ]
+    record["contract_notes"] = [
+        {
+            "case": case.name,
+            "expressible": case.contract_expressible,
+            "note": case.contract_note,
+        }
         for case in seed_corpus.ALL_CASES
-        if not case.contract_expressible
+        if case.contract_note is not None
     ]
     return record
+
+
+def corpus_fingerprint() -> str:
+    """A digest of the three files the corpus is made of.
+
+    The gate compares numerators, which is right — a denominator is fixed by
+    the corpus, so a changed denominator means the corpus changed, not that
+    the kernel improved. But a corpus edit that *raises* a rate is otherwise
+    indistinguishable from a kernel improvement, and nothing would report
+    that the ground under the figure had moved. This digest is that report: it
+    goes into `baseline.json` and is compared before any rate, and a mismatch
+    says "the corpus changed" rather than comparing two numbers taken over
+    different questions.
+
+    Hashed by content, not by mtime, and in a fixed order, so an unrelated
+    edit elsewhere in the tree cannot move it.
+    """
+    digest = hashlib.sha256()
+    for name in _CORPUS_SOURCES:
+        digest.update(name.encode("utf-8"))
+        digest.update((seed_corpus.CORPUS_DIR / name).read_bytes())
+    return digest.hexdigest()
 
 
 def _detection_block(report: runner.DetectionReport) -> dict:
@@ -368,11 +407,18 @@ def render(record: dict) -> str:
             f"   {source}: recall {before} -> {after} after planting one "
             f"identifier no detector returned: {state}"
         )
-    if record["contract_gaps"]:
+    add("")
+    add(f"=== corpus fingerprint: {record['corpus_fingerprint'][:16]}... ===")
+    if record["contract_notes"]:
+        add("=== contract notes ===")
+        for note in record["contract_notes"]:
+            state = "expressible" if note["expressible"] else "NOT expressible"
+            add(f"   {note['case']} ({state}): {note['note']}")
+    if record["unread_request_fields"]:
         add("")
-        add("=== contract gaps ===")
-        for gap in record["contract_gaps"]:
-            add(f"   {gap['case']}: {gap['gap']}")
+        add("=== request fields the kernel does not read ===")
+        for entry in record["unread_request_fields"]:
+            add(f"   {entry['field']}: {entry['reason']}")
     return "\n".join(lines)
 
 
@@ -395,12 +441,33 @@ def _moved(now, then, better: str) -> bool:
 def _regressions(current: dict, baseline: dict) -> list:
     """Every figure that moved in the wrong direction against the baseline.
 
-    Only numerators are compared. A denominator is fixed by the corpus, so a
-    changed denominator means the corpus changed rather than the kernel
-    improved, and reading that as a movement would let an edit to a fixture
-    register as a result.
+    Two stages, and the first one can stop it. A corpus that has changed under
+    a baseline makes every comparison below meaningless — not because the
+    numbers are wrong but because they answer a different question than the
+    ones recorded — so a fingerprint mismatch is reported on its own and the
+    rate comparison is skipped rather than performed and believed.
+
+    Otherwise only numerators are compared. A denominator is fixed by the
+    corpus, and the fingerprint is what establishes that, so a changed
+    denominator here means the kernel changed behaviour rather than the
+    question.
     """
     worse: list = []
+    recorded_fingerprint = baseline.get("corpus_fingerprint")
+    if recorded_fingerprint is None:
+        worse.append(
+            "the baseline records no corpus fingerprint, so nothing here can be "
+            "compared: re-record it with --write-baseline"
+        )
+        return worse
+    if recorded_fingerprint != current["corpus_fingerprint"]:
+        worse.append(
+            f"the corpus changed under the baseline ({', '.join(_CORPUS_SOURCES)}; "
+            f"fingerprint {recorded_fingerprint[:16]}... -> "
+            f"{current['corpus_fingerprint'][:16]}...), so every figure below is "
+            "measured over a different question and none of them is compared"
+        )
+        return worse
     for label, profile in current["profiles"].items():
         recorded = baseline.get("profiles", {}).get(label)
         if recorded is None:

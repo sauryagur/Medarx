@@ -19,12 +19,21 @@ is detected at 0.30, below `Settings.ner_score_threshold` (0.50), and the
 measurement in `recognizers.py` records what happens if a context-aware
 enhancer is ever attached to the engine: the same value scores **0.65** in
 "ZX-99-ALPHA issued at the counter.", because `ref`, `ticket` and `issued` are
-all in that sentence. The engine built here passes no `context_aware_config`,
-so no enhancement happens today — the scores observed through `scan_entities`
-are exactly the recognizers' floors. A block keyed on the score would have
-become a silent pass-through the moment someone added one, with every test
-still green. `replacers.has_replacer` is therefore asked *before* the threshold
-is consulted, and never after.
+all in that sentence. Enhancement is **not** switched off here, and must never
+be assumed to be: `AnalyzerEngine._enhance_using_context` calls the engine's
+`LemmaContextAwareEnhancer` unconditionally — the pinned Presidio's
+`AnalyzerEngine.__init__` has no `context_aware_config` parameter to pass, and
+the shipped engine supplies none. The only thing holding
+`AMBIGUOUS_REFERENCE` at its 0.30 floor is the *empty declared context* its
+recognizer is built with (`UNENHANCEABLE_CONTEXT`); attach `ref`, `ticket` or
+`issued` and the same sentence scores 0.65. The scores observed through
+`scan_entities` are therefore **not** the recognizers' floors: measured,
+`ACC0000417` returns at 1.00 and `MRN: 4452819` at 1.00, because `acc` and
+`mrn` are declared context words occurring inside the value and its field.
+Nothing may be keyed on a score. A block keyed on the threshold would have
+become a silent pass-through the moment a recognizer gained a context word,
+with every test still green. `replacers.has_replacer` is therefore asked
+*before* the threshold is consulted, and never after.
 
 `Settings.ner_score_threshold` still has a job: it decides whether a
 *replaceable* detection is acted on at all. A hit below it is not replaced,
