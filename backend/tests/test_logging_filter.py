@@ -132,20 +132,27 @@ def test_text_with_nothing_sensitive_in_it_is_unchanged():
     assert scrub_text(line) == line
 
 
-def test_the_clinical_patterns_are_the_recognizers_shapes_not_a_second_vocabulary():
-    # A drift check rather than a restatement: the three clinical shapes are
-    # read from the redaction layer, so an edit to one and not the other fails
-    # here. The behavioural proof that they are shared is the composite line
-    # above; this proves it stays true after either side is edited.
+def test_every_pattern_the_recognizers_declare_is_scrubbed():
+    # A drift check rather than a restatement: the clinical shapes are read from
+    # the redaction layer, so an edit to one and not the other fails here. The
+    # behavioural proof that they are shared is the composite line above; this
+    # proves it stays true after either side is edited.
+    #
+    # **All** of each recognizer's patterns, not the first: `patterns[0]` would
+    # silently drop coverage the day a recognizer gains a second pattern, with
+    # the suite still green — the failure mode `_recognizer_regexes` exists to
+    # prevent.
     sources = {pattern.pattern for pattern in SENSITIVE_PATTERNS}
     for entity in REUSED:
-        assert PATTERNS[entity][0].regex in sources, (
-            f"{entity}'s recognizer pattern is not among the filter's"
+        declared = {pattern.regex for pattern in PATTERNS[entity]}
+        assert declared, f"{entity} declares no pattern for the filter to reuse"
+        assert declared <= sources, (
+            f"{entity} declares a pattern the log filter does not use: "
+            f"{sorted(declared - sources)}"
         )
 
 
 # -- install_filter and the loggers it covers -----------------------------------
-
 
 def test_the_filter_applies_to_http_client_debug_loggers():
     f = install_filter()
@@ -195,21 +202,49 @@ def test_install_filter_is_idempotent():
     )
 
 
-@pytest.mark.parametrize("name", SDK_LOGGERS_IN_USE)
+#: What each named SDK logger was *measured* to log, verbatim in shape. None of
+#: them logs a request or response *body* — measured by driving a real
+#: `httpx.Client().post()` with an identifier in the JSON body against a live
+#: stub at DEBUG, which produced a request line, connection lifecycle and raw
+#: response headers and not one byte of the body. So the residual the two HTTP
+#: registrations actually close is a value in a **URL** or a response
+#: **header**, and that is what these lines carry; Presidio's is the analysed
+#: text itself. A body-shaped line here would assert a threat that does not
+#: exist.
+SDK_LOG_SHAPES = {
+    "presidio-analyzer": (
+        "Context list is: ssn 123 6789 4452819 45 mrn", "4452819"),
+    "httpx": (
+        "HTTP Request: GET http://127.0.0.1:8080/v1/studies?mrn=4452819 "
+        '"HTTP/1.1 200 OK"', "4452819"),
+    "httpcore.http11": (
+        "receive_response_headers.complete return_value=(b'HTTP/1.0', 200, "
+        "b'OK', [(b'X-Study-Mrn', b'4452819')])", "4452819"),
+    "httpcore.connection": (
+        "connect_tcp.started host='127.0.0.1' port=8080 timeout=5.0", None),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SDK_LOG_SHAPES))
 def test_a_record_emitted_by_a_named_sdk_logger_is_scrubbed(name):
-    # The SDK loggers are the ones named because their own debug output is
-    # where a request body would otherwise be echoed whole.
+    # Each logger is driven with a line of the shape it really emits, so this
+    # asserts the filter is wired to a real surface rather than a fabricated
+    # one. The case with no identifier is the control: a lifecycle line carries
+    # nothing to redact and must come through unchanged, which is what a
+    # filter that over-matched would break.
+    line, probe = SDK_LOG_SHAPES[name]
     install_filter()
     stream, handler = _capture(name)
     try:
-        logging.getLogger(name).debug(
-            'HTTP Request: POST https://example.invalid/v1/chat/completions '
-            '"body": "admitting MRN 4452819"')
+        logging.getLogger(name).debug(line)
     finally:
         _detach(name, handler)
     out = stream.getvalue()
-    assert "4452819" not in out
-    assert "<redacted:MRN>" in out
+    if probe is None:
+        assert out.strip() == line
+    else:
+        assert probe not in out
+        assert "<redacted:MRN>" in out
 
 
 def test_a_record_emitted_through_the_filter_has_no_raw_value_in_it():
@@ -293,11 +328,9 @@ def test_a_logger_filter_does_not_reach_a_child_loggers_records():
     # A `logging.Filter` is consulted for records logged *to* the logger it is
     # attached to, and `Logger.callHandlers` walks ancestors' **handlers**, not
     # their filters. So a filter on the root logger does not see a record
-    # emitted by `medarx.anything`. This is why the three SDK loggers are named
-    # explicitly, and why filtering the application's own loggers is the
-    # caller's business: a caller that wants one filtered attaches the filter to
-    # it. `install_filter` reaches the root logger and the three named loggers
-    # and nothing else, and this test is what keeps that sentence true.
+    # emitted by `medarx.anything`, and filtering the application's own loggers
+    # is the caller's business: a caller that wants one filtered attaches the
+    # filter to it.
     install_filter()
     stream, handler = _capture("medarx.test.unfiltered")
     try:
@@ -306,9 +339,34 @@ def test_a_logger_filter_does_not_reach_a_child_loggers_records():
     finally:
         _detach("medarx.test.unfiltered", handler)
     assert "4452819" in stream.getvalue(), (
-        "if this ever stops being true, install_filter covers the whole tree and "
-        "the docstring claiming otherwise is the thing to fix"
+        "this assertion only starts failing if the filter starts reaching "
+        "records that propagate up from another logger, which is a "
+        "security improvement: keep the coverage, and narrow the docstring to "
+        "match it. Do not treat the docstring wording as the defect."
     )
+
+
+def test_a_tokenised_identifier_survives_and_that_is_a_recorded_residual():
+    # Presidio's context enhancer splits the text into tokens and logs them, so
+    # a social security number reaches the log in pieces. Measured on a real
+    # scan: `Context list is: ssn 123 6789 4452819 45 mrn`. The filter removes
+    # the medical record number from that line and cannot remove the three SSN
+    # components, because no pattern narrow enough to be usable matches three
+    # shuffled numeric tokens.
+    #
+    # This test pins the *limitation*, not the behaviour: if it ever starts
+    # failing, someone has closed the gap and the module's "four further gaps"
+    # list is stale. Reassembly by a reader is the precondition for it to
+    # matter, and the operative control is the log level — these lines exist
+    # only at DEBUG.
+    line = "Context list is: ssn 123 6789 4452819 45 mrn"
+    scrubbed = scrub_text(line)
+    assert "4452819" not in scrubbed and "<redacted:MRN>" in scrubbed
+    assert all(part in scrubbed for part in ("123", "45", "6789")), (
+        "the tokenised form is the documented residual: if this is now caught, "
+        "the module's gap list needs a new entry saying what closed it"
+    )
+    assert scrub_text("ssn 123-45-6789 on file") == "ssn <redacted:SSN> on file"
 
 
 # -- scrub_exception ------------------------------------------------------------

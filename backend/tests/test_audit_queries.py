@@ -260,11 +260,12 @@ def test_events_for_request_returns_only_that_requests_records(log):
     assert for_a[2].previous_hash == events_for_request(log, "c")[0].chain_hash
 
 
-def test_the_readback_orders_by_timestamp_even_when_the_clock_moved(log):
-    # A record appended later but stamped earlier reads back first, because the
-    # contract asks the collection endpoint for ascending timestamps. The chain
-    # is walked in append order regardless, so a clock that moved is something
-    # verification sees rather than something a sort hides.
+def test_the_collection_orders_by_timestamp_even_when_the_clock_moved(log):
+    # The contract states the ordering for the collection endpoint: "Records are
+    # returned in ascending timestamp order". A record appended later but stamped
+    # earlier reads back first, and the chain is walked in append order
+    # regardless, so a clock that moved is something verification sees rather
+    # than something a sort hides.
     log.append(ev(request_id="r1", timestamp=LATER))
     log.append(ev(request_id="r2", timestamp=EARLIER))
     first, second = search_records(log)
@@ -273,6 +274,32 @@ def test_the_readback_orders_by_timestamp_even_when_the_clock_moved(log):
     # GENESIS, and r2 chains onto r1 however the readback ordered the two.
     assert second.previous_hash == GENESIS
     assert first.previous_hash == second.chain_hash
+    assert chain_status(log)["chain_verified"] is True
+
+
+def test_the_per_request_readback_inherits_that_same_ordering(log):
+    # The contract states the ordering for the collection endpoint only, so the
+    # per-request endpoint *inherits* it rather than being told it — one log,
+    # one order, so the two questions cannot be answered differently. Pinned
+    # separately from the collection, because it is a decision rather than a
+    # copy of the contract, and a change to either should be visible.
+    log.append(ev(request_id="same", timestamp=LATER,
+                  final_disposition="approved"))
+    log.append(ev(request_id="same", timestamp=EARLIER,
+                  final_disposition="approved_by_human"))
+    per_request = events_for_request(log, "same")
+    # A request's lifecycle reads most naturally in append order, and a clock
+    # that moved between the two records is the one case where that differs from
+    # timestamp order. Here it differs, and the timestamp order wins.
+    assert [r.final_disposition for r in per_request] == [
+        "approved_by_human", "approved",
+    ]
+    assert [r.timestamp for r in per_request] == sorted(
+        r.timestamp for r in per_request
+    )
+    # The chain is unaffected either way: it is walked by ordinal.
+    assert per_request[1].previous_hash == GENESIS
+    assert per_request[0].previous_hash == per_request[1].chain_hash
     assert chain_status(log)["chain_verified"] is True
 
 

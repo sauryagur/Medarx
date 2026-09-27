@@ -1,4 +1,4 @@
-"""The sensitive-data filter for the log surfaces the design names.
+r"""The sensitive-data filter for the log surfaces the design names.
 
 The design puts application logs, exception traces, tracing spans and
 model-SDK debug output under "the same sensitive-data filtering" as the audit
@@ -34,13 +34,15 @@ filter on the root logger sees nothing any other logger emitted, and
 filtered. It registers on the root logger, and on the SDK loggers the design
 names together with everything beneath each of them: `httpx`, the `httpcore.*`
 subtree, and both spellings of Presidio's logger (see `FILTERED_LOGGERS` for
-why there are two). Their debug output echoes request bodies verbatim, which is
-what makes them worth naming. Every other logger is the caller's business:
-attach `SensitiveDataFilter` to it.
+why there are two). **What each of them logs was measured, and it is not the
+same risk**: Presidio echoes the analysed text and its context at DEBUG, and
+the two HTTP packages do not log bodies at all — they log request lines,
+connection lifecycle, and raw response *headers*. Every other logger is the
+caller's business: attach `SensitiveDataFilter` to it.
 `tests/test_logging_filter.py` asserts the limitation, so none of this can
 quietly stop being true.
 
-Three further gaps, in the same spirit:
+Four further gaps, in the same spirit:
 
 - **A record's `extra` fields are not scrubbed.** A caller that passes
   `extra={"study": raw_text}` puts a raw value on the record, and a formatter
@@ -57,6 +59,19 @@ Three further gaps, in the same spirit:
   caller's own source lines rather than a value from a report, which is a much
   smaller exposure than the other two — but it is not nothing, and it is the
   caller's own `stack_info=True` that asked for it.
+- **A tokenised identifier is not caught, and this one is on a surface this
+  module names.** Presidio's context enhancer splits the text into tokens and
+  logs them, so `123-45-6789` reaches the log as
+  `Context list is: ssn 123 6789 45 mrn` — measured, with the filter
+  installed. The value is in pieces rather than whole, so `\b\d{3}[- ]\d{2}[- ]
+  \d{4}\b` cannot match, and a pattern wide enough to match three shuffled
+  numeric tokens would match most lines anyone writes. The precondition for it
+  to matter is reassembly: a reader has to know the shape and put the parts
+  back together. It is disclosed here rather than left for someone to find,
+  because it is the one gap on a surface this module claims to cover. The
+  operative control is the log level — those lines exist only at DEBUG — and
+  this filter is what stands behind it if a deployment ever runs an SDK at
+  DEBUG against real data.
 
 **Nothing is ever dropped.** `filter` returns `True` unconditionally and
 scrubs in place. Suppressing a record would remove the fact that something
@@ -82,10 +97,27 @@ __all__ = [
 ]
 
 
-#: The loggers whose debug output carries request bodies. `httpx` logs the
-#: outbound request at DEBUG with the body; `httpcore`'s modules log the wire
-#: exchanges; Presidio logs the spans it finds, which are the values a report
-#: carries.
+#: The loggers worth filtering, named for what each of them was *measured* to
+#: log — which is three different things, and a reader who assumes otherwise
+#: checks the wrong risk:
+#:
+#: - `presidio-analyzer` logs the text it is analysing and the context it built
+#:   around a hit, at DEBUG. This is the one that carries report content:
+#:   `Context list is: ssn 123 6789 4452819 45 mrn` is real output from a real
+#:   scan, and the medical record number in it is redacted with the filter in
+#:   place.
+#: - `httpx` logs a request line — method, URL, HTTP version, status — at INFO.
+#: - `httpcore`'s modules log connection and event lifecycle at DEBUG, and the
+#:   raw *response headers* of each exchange.
+#:
+#: **Neither HTTP package logs a request or response body.** Measured by
+#: driving a real `httpx.Client().post()` with a medical record number in the
+#: JSON body against a live stub with the root logger at DEBUG and no filter
+#: installed: fourteen lines, none of which contained the value, the report text
+#: or any body bytes. So the two HTTP registrations are defence in depth — a
+#: PHI value in a URL or a response *header* is the residual they would catch,
+#: not a body — and the coverage is kept because that residual is real and
+#: cheap to close, not because the threat they were named for exists.
 #:
 #: **Both spellings of the Presidio logger are here, and `httpcore` is a
 #: namespace rather than a logger.** Both facts were measured against the
@@ -137,13 +169,14 @@ def _loggers_under(names: tuple[str, ...]) -> list[logging.Logger]:
     return [t for t in targets if isinstance(t, logging.Logger)]
 
 
-def _recognizer_regex(entity: str) -> str:
-    """The redaction layer's own pattern for `entity`, as source text.
+def _recognizer_regexes(entity: str) -> tuple[str, ...]:
+    """Every pattern the redaction layer declares for `entity`, as source text.
 
-    Read rather than copied, so the two cannot drift. A missing entity is an
-    import-time error rather than a silently absent pattern: coverage that
-    disappears without a failure is the failure mode this module exists to
-    prevent.
+    Read rather than copied, so the two cannot drift, and **all** of them
+    rather than the first: taking `patterns[0]` would silently drop coverage
+    the day a recognizer grows a second pattern, with the suite still green —
+    the "coverage that disappears without a failure" this function exists to
+    prevent. A missing entity is an import-time error for the same reason.
     """
     patterns = PATTERNS.get(entity)
     if not patterns:
@@ -152,16 +185,18 @@ def _recognizer_regex(entity: str) -> str:
             f"{entity!r}; the log filter reuses those patterns and cannot "
             f"scrub a shape the recognizer no longer recognises"
         )
-    return patterns[0].regex
+    return tuple(pattern.regex for pattern in patterns)
 
 
 #: A US SSN in its written form. The unseparated nine-digit run is deliberately
-#: **not** matched: it is indistinguishable from every other nine-digit number
-#: that turns up in a log — a nanosecond timestamp, part of a digest — and a
-#: filter that redacts those is a filter nobody reads past. The cost is a real
-#: miss on an SSN written without separators, and the honest answer to that is
-#: that this module is a floor: the kernel's own closed storage policy is what
-#: keeps a value out of a log in the first place.
+#: **not** matched: it is indistinguishable from the nine-digit identifiers a
+#: system emits for its own reasons — counters, correlation ids, record keys —
+#: and a filter that redacts those is a filter nobody reads past. (It is *not*
+#: nanosecond epochs, which are thirteen digits, nor Unix seconds, which are
+#: ten; an earlier version of this comment said so and was wrong.) The cost is
+#: a real miss on an SSN written without separators, and the honest answer to
+#: that is that this module is a floor: the kernel's own closed storage policy
+#: is what keeps a value out of a log in the first place.
 _SSN = r"\b\d{3}[- ]\d{2}[- ]\d{4}\b"
 
 #: An ISO-8601 date, with its time-of-day when it has one. Dates are the
@@ -181,11 +216,11 @@ _ISO_DATE = r"\b\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\
 #: is left in it. Run the labelled patterns first, each consumes its own label
 #: and value as one span, and the bare-value pattern sees nothing that is left
 #: to take. No ordering leaks a value; this one reports the right type.
-_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(_recognizer_regex("ACCESSION_NUMBER"), REGEX_FLAGS),
-     "ACCESSION_NUMBER"),
-    (re.compile(_recognizer_regex("PATIENT_ID"), REGEX_FLAGS), "PATIENT_ID"),
-    (re.compile(_recognizer_regex("MRN"), REGEX_FLAGS), "MRN"),
+_RULES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(regex, REGEX_FLAGS), label)
+    for label in ("ACCESSION_NUMBER", "PATIENT_ID", "MRN")
+    for regex in _recognizer_regexes(label)
+) + (
     (re.compile(_SSN, REGEX_FLAGS), "SSN"),
     (re.compile(_ISO_DATE, REGEX_FLAGS), "DATE"),
 )
@@ -246,15 +281,27 @@ class SensitiveDataFilter(logging.Filter):
     the filter has run, so anything the filter does not change reaches the
     output untouched.
 
-    The **rendered** message is scrubbed, not the format string. A lazily
-    formatted call — `logger.info("admitting MRN %s now", value)` — keeps the
-    value in `record.args`, not in `record.msg`, so scrubbing the template alone
-    leaves the value in place for the handler to interpolate. Folding the
-    arguments in first and clearing them is what closes that, and it is the
-    only reason clearing them is load-bearing rather than tidy: measured, with
-    the arguments left in place the raw value is printed verbatim, because
-    `getMessage` runs after the filter and interpolates into a template the
-    filter has already scrubbed.
+    The **rendered** message is scrubbed, not the format string, and the
+    arguments are cleared. Both halves are load-bearing and they fail
+    *differently*, which is worth stating because the two failure modes are a
+    leak and a dropped record respectively. Measured, on
+    `logger.info("admitting MRN %s now", "4452819")`:
+
+    | rendered scrub | args cleared | result |
+    | --- | --- | --- |
+    | yes | yes | `admitting <redacted:MRN> now` — this filter |
+    | no | no | `admitting MRN 4452819 now` — **the value leaks** |
+    | no | yes | `admitting MRN %s now` — the value is silently lost |
+    | yes | no | the record is **dropped** |
+
+    So the rendered-message step is the one that closes the leak: a value
+    passed as an argument lives in `record.args`, and the handler interpolates
+    it into a template the filter has already scrubbed. And clearing the
+    arguments is what keeps the record at all — with them still set, the
+    handler's second `getMessage()` applies `%` to an already-rendered line,
+    raises `TypeError`, and `logging.Handler.handleError` discards the record
+    silently. This module does not drop records, so that argument is not
+    housekeeping.
 
     The traceback is rendered here rather than left to the handler, because
     `Formatter.format` builds `exc_text` from `record.exc_info` *after* this

@@ -433,9 +433,25 @@ them would answer "was this refused" and nothing at all about why.
 
 `medarx.logging_filter` covers the surfaces the audit log's storage policy
 cannot: application logs, exception traces, and the HTTP and NER SDKs' own debug
-output, which echoes request bodies verbatim. It reuses the redaction layer's
-own identifier patterns rather than keeping a second copy, scrubs the *rendered*
-message and the traceback, and never drops a record.
+output. It reuses the redaction layer's own identifier patterns rather than
+keeping a second copy, scrubs the *rendered* message and the traceback, and
+never drops a record.
+
+**The named SDK loggers are three different risks, and each was measured.**
+Presidio's logger echoes the text it analyses and the context it built around a
+hit, at DEBUG — a real PHI surface, and the scrub is verified against it. The
+two HTTP packages do not log bodies at all: driven against a live stub with an
+identifier in the JSON body and the root logger at DEBUG, `httpx` and `httpcore`
+emitted a request line, connection lifecycle and raw response headers, and no
+body bytes. They stay registered as defence in depth — an identifier in a URL
+or a response header is the residual they would catch.
+
+**The residual the filter cannot catch, on a surface it does cover:** a
+tokenised identifier. Presidio splits the text into tokens, so a social security
+number reaches the log as `Context list is: ssn 123 6789 45 mrn` — in pieces,
+reassemblable by a reader, and not matched by any pattern narrow enough to be
+usable. The operative control there is the log level: those lines exist only at
+DEBUG.
 
 **Its coverage boundary is stated rather than implied, and it is not the whole
 logging tree.** A `logging.Filter` is consulted only for records logged to the

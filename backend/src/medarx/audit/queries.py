@@ -88,6 +88,20 @@ def events_for_request(log: AuditLog, request_id: str) -> list[AuditEvent]:
     A request whose records have been purged returns `[]` — the retention purge
     deletes the row and leaves a tombstone carrying only the chain position, so
     there is nothing to rebuild and nothing is invented in its place.
+
+    **On the ordering, which the contract does not state for this endpoint.**
+    "Records are returned in ascending timestamp order" appears in the
+    *collection* endpoint's description, not this one's, so this function
+    inherits an ordering rather than being told one. It inherits it because the
+    per-request endpoint is a filter over the same log, and answering the two
+    questions with two different orders would be the sort of thing an auditor
+    has to notice. Where a request's lifecycle reads most naturally in append
+    order — `approved`, then `approved_by_human` — a clock that moved between
+    the two is the one case where those differ, and the chain still verifies
+    either way because `verify_chain` walks by ordinal. If the contract ever
+    states an order for this endpoint and it is not this one, that sentence
+    wins and this note is what has to change.
+
     """
     return log.get(request_id)
 
