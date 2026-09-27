@@ -1,0 +1,772 @@
+{
+  "contract_gaps": [
+    {
+      "case": "dicom_header_prose",
+      "gap": "AllowlistedDicomMetadata declares no PriorReportText property, so the only DICOM metadata value redaction layer 2 scans cannot be supplied by a caller through the published request schema"
+    }
+  ],
+  "control": {
+    "dicom_header": {
+      "after": [
+        2,
+        4
+      ],
+      "before": [
+        2,
+        3
+      ],
+      "checked": 3,
+      "fell": true
+    },
+    "report_text": {
+      "after": [
+        6,
+        9
+      ],
+      "before": [
+        6,
+        8
+      ],
+      "checked": 8,
+      "fell": true
+    }
+  },
+  "notice": "A research instrument for this repository. Fabricated input only. These figures are a measurement of this codebase over invented text; they are not a claim about any real corpus.",
+  "profiles": {
+    "date_order MDY": {
+      "clean_corpus": {
+        "blocked": 4,
+        "denominator": 28,
+        "examples": [
+          [
+            "Nodule unchanged from 2025-12-01.",
+            "[REDACTED:ORGANIZATION] unchanged from 2026-10-05."
+          ],
+          [
+            "Scan performed 2026-01-14 10:30.",
+            "[REDACTED:NRP] performed 2026-11-18 10:30."
+          ],
+          [
+            "Pulmonary embolism, right lower lobe, seen 2025-11-30.",
+            "[REDACTED:PERSON] embolism, right lower lobe, seen 2026-10-04."
+          ],
+          [
+            "Pleural effusion, right side, 15 mm.",
+            "[REDACTED:LOCATION] effusion, right side, 15 mm."
+          ],
+          [
+            "Density of 120 HU on 2026-02-03.",
+            "Density of 120 [REDACTED:PERSON] on 2026-12-08."
+          ]
+        ],
+        "identical": 16,
+        "masked": 5,
+        "profile": "date_order unset",
+        "shifted": 3
+      },
+      "clean_corpus_declared": {
+        "blocked": 2,
+        "denominator": 28,
+        "examples": [
+          [
+            "Nodule unchanged from 2025-12-01.",
+            "[REDACTED:ORGANIZATION] unchanged from 2026-10-05."
+          ],
+          [
+            "Previous CT chest on 01/14/2026 for comparison.",
+            "Previous [REDACTED:ORGANIZATION] chest on 11/18/2026 for comparison."
+          ],
+          [
+            "Scan performed 2026-01-14 10:30.",
+            "[REDACTED:NRP] performed 2026-11-18 10:30."
+          ],
+          [
+            "Pulmonary embolism, right lower lobe, seen 2025-11-30.",
+            "[REDACTED:PERSON] embolism, right lower lobe, seen 2026-10-04."
+          ],
+          [
+            "Pleural effusion, right side, 15 mm.",
+            "[REDACTED:LOCATION] effusion, right side, 15 mm."
+          ],
+          [
+            "Density of 120 HU on 2026-02-03.",
+            "Density of 120 [REDACTED:PERSON] on 2026-12-08."
+          ]
+        ],
+        "identical": 16,
+        "masked": 6,
+        "profile": "date_order MDY",
+        "shifted": 4
+      },
+      "detection_dicom_header": {
+        "by_entity": {
+          "ACCESSION_NUMBER": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "precision": [
+              1,
+              1
+            ],
+            "recall": [
+              1,
+              1
+            ],
+            "tp": 1
+          },
+          "DATE_TIME": {
+            "fn": 0,
+            "fp": 1,
+            "mislabelled": 0,
+            "precision": [
+              0,
+              1
+            ],
+            "recall": [
+              null,
+              0
+            ],
+            "tp": 0
+          },
+          "MRN": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "precision": [
+              1,
+              1
+            ],
+            "recall": [
+              1,
+              1
+            ],
+            "tp": 1
+          },
+          "PATIENT_ID": {
+            "fn": 1,
+            "fp": 0,
+            "mislabelled": 1,
+            "precision": [
+              null,
+              0
+            ],
+            "recall": [
+              0,
+              1
+            ],
+            "tp": 0
+          },
+          "PERSON": {
+            "fn": 0,
+            "fp": 1,
+            "mislabelled": 0,
+            "precision": [
+              0,
+              1
+            ],
+            "recall": [
+              null,
+              0
+            ],
+            "tp": 0
+          }
+        },
+        "by_surface_and_entity": {
+          "dicom_header.PriorReportText:ACCESSION_NUMBER": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "tp": 1
+          },
+          "dicom_header.PriorReportText:DATE_TIME": {
+            "fn": 0,
+            "fp": 1,
+            "mislabelled": 0,
+            "tp": 0
+          },
+          "dicom_header.PriorReportText:MRN": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "tp": 1
+          },
+          "dicom_header.PriorReportText:PATIENT_ID": {
+            "fn": 1,
+            "fp": 0,
+            "mislabelled": 1,
+            "tp": 0
+          },
+          "dicom_header.PriorReportText:PERSON": {
+            "fn": 0,
+            "fp": 1,
+            "mislabelled": 0,
+            "tp": 0
+          }
+        },
+        "cases": [
+          "dicom_header_prose"
+        ],
+        "planted": 3,
+        "unscanned": 4
+      },
+      "detection_report_text": {
+        "by_entity": {
+          "ACCESSION_NUMBER": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "precision": [
+              2,
+              2
+            ],
+            "recall": [
+              2,
+              2
+            ],
+            "tp": 2
+          },
+          "DATE_TIME": {
+            "fn": 0,
+            "fp": 2,
+            "mislabelled": 0,
+            "precision": [
+              1,
+              3
+            ],
+            "recall": [
+              1,
+              1
+            ],
+            "tp": 1
+          },
+          "MRN": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "precision": [
+              2,
+              2
+            ],
+            "recall": [
+              2,
+              2
+            ],
+            "tp": 2
+          },
+          "PATIENT_ID": {
+            "fn": 2,
+            "fp": 0,
+            "mislabelled": 2,
+            "precision": [
+              1,
+              1
+            ],
+            "recall": [
+              1,
+              3
+            ],
+            "tp": 1
+          }
+        },
+        "by_surface_and_entity": {
+          "report_text:ACCESSION_NUMBER": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "tp": 2
+          },
+          "report_text:DATE_TIME": {
+            "fn": 0,
+            "fp": 2,
+            "mislabelled": 0,
+            "tp": 1
+          },
+          "report_text:MRN": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "tp": 2
+          },
+          "report_text:PATIENT_ID": {
+            "fn": 2,
+            "fp": 0,
+            "mislabelled": 2,
+            "tp": 1
+          }
+        },
+        "cases": [
+          "known_positive",
+          "all_phi",
+          "patient_id_label_spelling"
+        ],
+        "planted": 8,
+        "unscanned": 0
+      },
+      "end_to_end": {
+        "approved": [
+          "dicom_header_identifiers",
+          "patient_id_label_spelling"
+        ],
+        "backstopped": [
+          [
+            "known_positive",
+            "PATIENT_ID"
+          ],
+          [
+            "unresolved",
+            "AMBIGUOUS_REFERENCE"
+          ],
+          [
+            "all_phi",
+            "PATIENT_ID"
+          ],
+          [
+            "dicom_header_prose",
+            "PATIENT_ID"
+          ]
+        ],
+        "blocked": [
+          "known_positive",
+          "unresolved",
+          "all_phi",
+          "dicom_header_prose"
+        ],
+        "checked": 15,
+        "survived": 0,
+        "survivors": []
+      },
+      "known_false_positives": {
+        "blocked": 0,
+        "denominator": 6,
+        "examples": [
+          [
+            "Previous CT chest for comparison.",
+            "Previous [REDACTED:ORGANIZATION] chest for comparison."
+          ],
+          [
+            "Nodule unchanged in size.",
+            "[REDACTED:ORGANIZATION] unchanged in size."
+          ],
+          [
+            "Scan performed this morning.",
+            "[REDACTED:NRP] performed this morning."
+          ],
+          [
+            "Pulmonary embolism, right lower lobe.",
+            "[REDACTED:PERSON] embolism, right lower lobe."
+          ],
+          [
+            "Pleural effusion, right side.",
+            "[REDACTED:LOCATION] effusion, right side."
+          ],
+          [
+            "Density of 120 HU measured.",
+            "Density of 120 [REDACTED:PERSON] measured."
+          ]
+        ],
+        "identical": 0,
+        "masked": 6,
+        "profile": "date_order MDY",
+        "shifted": 0
+      },
+      "structural_dicom_header": {
+        "attributes": {
+          "AccessionNumber": {
+            "in_approved_payload": false,
+            "mechanism": "dropped at layer A (no payload field)",
+            "value": "ACC0000417"
+          },
+          "InstitutionName": {
+            "in_approved_payload": false,
+            "mechanism": "dropped at layer A (no payload field)",
+            "value": "Synthetic Imaging Centre"
+          },
+          "PatientAge": {
+            "in_approved_payload": false,
+            "mechanism": "banded at layer A (decade band)",
+            "value": "045Y"
+          },
+          "PatientID": {
+            "in_approved_payload": false,
+            "mechanism": "dropped at layer A (no payload field)",
+            "value": "4452819"
+          },
+          "StudyDate": {
+            "in_approved_payload": false,
+            "mechanism": "shifted at component C (patient offset)",
+            "value": "20260114"
+          }
+        },
+        "note": "Structural, not detection: no recognizer runs on these values, so a recall over them would be a figure for a mechanism that cannot fail"
+      }
+    },
+    "date_order unset": {
+      "clean_corpus": {
+        "blocked": 4,
+        "denominator": 28,
+        "examples": [
+          [
+            "Nodule unchanged from 2025-12-01.",
+            "[REDACTED:ORGANIZATION] unchanged from 2026-10-05."
+          ],
+          [
+            "Scan performed 2026-01-14 10:30.",
+            "[REDACTED:NRP] performed 2026-11-18 10:30."
+          ],
+          [
+            "Pulmonary embolism, right lower lobe, seen 2025-11-30.",
+            "[REDACTED:PERSON] embolism, right lower lobe, seen 2026-10-04."
+          ],
+          [
+            "Pleural effusion, right side, 15 mm.",
+            "[REDACTED:LOCATION] effusion, right side, 15 mm."
+          ],
+          [
+            "Density of 120 HU on 2026-02-03.",
+            "Density of 120 [REDACTED:PERSON] on 2026-12-08."
+          ]
+        ],
+        "identical": 16,
+        "masked": 5,
+        "profile": "date_order unset",
+        "shifted": 3
+      },
+      "clean_corpus_declared": {
+        "blocked": 2,
+        "denominator": 28,
+        "examples": [
+          [
+            "Nodule unchanged from 2025-12-01.",
+            "[REDACTED:ORGANIZATION] unchanged from 2026-10-05."
+          ],
+          [
+            "Previous CT chest on 01/14/2026 for comparison.",
+            "Previous [REDACTED:ORGANIZATION] chest on 11/18/2026 for comparison."
+          ],
+          [
+            "Scan performed 2026-01-14 10:30.",
+            "[REDACTED:NRP] performed 2026-11-18 10:30."
+          ],
+          [
+            "Pulmonary embolism, right lower lobe, seen 2025-11-30.",
+            "[REDACTED:PERSON] embolism, right lower lobe, seen 2026-10-04."
+          ],
+          [
+            "Pleural effusion, right side, 15 mm.",
+            "[REDACTED:LOCATION] effusion, right side, 15 mm."
+          ],
+          [
+            "Density of 120 HU on 2026-02-03.",
+            "Density of 120 [REDACTED:PERSON] on 2026-12-08."
+          ]
+        ],
+        "identical": 16,
+        "masked": 6,
+        "profile": "date_order MDY",
+        "shifted": 4
+      },
+      "detection_dicom_header": {
+        "by_entity": {
+          "ACCESSION_NUMBER": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "precision": [
+              1,
+              1
+            ],
+            "recall": [
+              1,
+              1
+            ],
+            "tp": 1
+          },
+          "DATE_TIME": {
+            "fn": 0,
+            "fp": 1,
+            "mislabelled": 0,
+            "precision": [
+              0,
+              1
+            ],
+            "recall": [
+              null,
+              0
+            ],
+            "tp": 0
+          },
+          "MRN": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "precision": [
+              1,
+              1
+            ],
+            "recall": [
+              1,
+              1
+            ],
+            "tp": 1
+          },
+          "PATIENT_ID": {
+            "fn": 1,
+            "fp": 0,
+            "mislabelled": 1,
+            "precision": [
+              null,
+              0
+            ],
+            "recall": [
+              0,
+              1
+            ],
+            "tp": 0
+          },
+          "PERSON": {
+            "fn": 0,
+            "fp": 1,
+            "mislabelled": 0,
+            "precision": [
+              0,
+              1
+            ],
+            "recall": [
+              null,
+              0
+            ],
+            "tp": 0
+          }
+        },
+        "by_surface_and_entity": {
+          "dicom_header.PriorReportText:ACCESSION_NUMBER": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "tp": 1
+          },
+          "dicom_header.PriorReportText:DATE_TIME": {
+            "fn": 0,
+            "fp": 1,
+            "mislabelled": 0,
+            "tp": 0
+          },
+          "dicom_header.PriorReportText:MRN": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "tp": 1
+          },
+          "dicom_header.PriorReportText:PATIENT_ID": {
+            "fn": 1,
+            "fp": 0,
+            "mislabelled": 1,
+            "tp": 0
+          },
+          "dicom_header.PriorReportText:PERSON": {
+            "fn": 0,
+            "fp": 1,
+            "mislabelled": 0,
+            "tp": 0
+          }
+        },
+        "cases": [
+          "dicom_header_prose"
+        ],
+        "planted": 3,
+        "unscanned": 4
+      },
+      "detection_report_text": {
+        "by_entity": {
+          "ACCESSION_NUMBER": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "precision": [
+              2,
+              2
+            ],
+            "recall": [
+              2,
+              2
+            ],
+            "tp": 2
+          },
+          "DATE_TIME": {
+            "fn": 0,
+            "fp": 2,
+            "mislabelled": 0,
+            "precision": [
+              1,
+              3
+            ],
+            "recall": [
+              1,
+              1
+            ],
+            "tp": 1
+          },
+          "MRN": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "precision": [
+              2,
+              2
+            ],
+            "recall": [
+              2,
+              2
+            ],
+            "tp": 2
+          },
+          "PATIENT_ID": {
+            "fn": 2,
+            "fp": 0,
+            "mislabelled": 2,
+            "precision": [
+              1,
+              1
+            ],
+            "recall": [
+              1,
+              3
+            ],
+            "tp": 1
+          }
+        },
+        "by_surface_and_entity": {
+          "report_text:ACCESSION_NUMBER": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "tp": 2
+          },
+          "report_text:DATE_TIME": {
+            "fn": 0,
+            "fp": 2,
+            "mislabelled": 0,
+            "tp": 1
+          },
+          "report_text:MRN": {
+            "fn": 0,
+            "fp": 0,
+            "mislabelled": 0,
+            "tp": 2
+          },
+          "report_text:PATIENT_ID": {
+            "fn": 2,
+            "fp": 0,
+            "mislabelled": 2,
+            "tp": 1
+          }
+        },
+        "cases": [
+          "known_positive",
+          "all_phi",
+          "patient_id_label_spelling"
+        ],
+        "planted": 8,
+        "unscanned": 0
+      },
+      "end_to_end": {
+        "approved": [
+          "dicom_header_identifiers",
+          "patient_id_label_spelling"
+        ],
+        "backstopped": [
+          [
+            "known_positive",
+            "PATIENT_ID"
+          ],
+          [
+            "unresolved",
+            "AMBIGUOUS_REFERENCE"
+          ],
+          [
+            "all_phi",
+            "PATIENT_ID"
+          ],
+          [
+            "dicom_header_prose",
+            "PATIENT_ID"
+          ]
+        ],
+        "blocked": [
+          "known_positive",
+          "unresolved",
+          "all_phi",
+          "dicom_header_prose"
+        ],
+        "checked": 15,
+        "survived": 0,
+        "survivors": []
+      },
+      "known_false_positives": {
+        "blocked": 0,
+        "denominator": 6,
+        "examples": [
+          [
+            "Previous CT chest for comparison.",
+            "Previous [REDACTED:ORGANIZATION] chest for comparison."
+          ],
+          [
+            "Nodule unchanged in size.",
+            "[REDACTED:ORGANIZATION] unchanged in size."
+          ],
+          [
+            "Scan performed this morning.",
+            "[REDACTED:NRP] performed this morning."
+          ],
+          [
+            "Pulmonary embolism, right lower lobe.",
+            "[REDACTED:PERSON] embolism, right lower lobe."
+          ],
+          [
+            "Pleural effusion, right side.",
+            "[REDACTED:LOCATION] effusion, right side."
+          ],
+          [
+            "Density of 120 HU measured.",
+            "Density of 120 [REDACTED:PERSON] measured."
+          ]
+        ],
+        "identical": 0,
+        "masked": 6,
+        "profile": "date_order MDY",
+        "shifted": 0
+      },
+      "structural_dicom_header": {
+        "attributes": {
+          "AccessionNumber": {
+            "in_approved_payload": false,
+            "mechanism": "dropped at layer A (no payload field)",
+            "value": "ACC0000417"
+          },
+          "InstitutionName": {
+            "in_approved_payload": false,
+            "mechanism": "dropped at layer A (no payload field)",
+            "value": "Synthetic Imaging Centre"
+          },
+          "PatientAge": {
+            "in_approved_payload": false,
+            "mechanism": "banded at layer A (decade band)",
+            "value": "045Y"
+          },
+          "PatientID": {
+            "in_approved_payload": false,
+            "mechanism": "dropped at layer A (no payload field)",
+            "value": "4452819"
+          },
+          "StudyDate": {
+            "in_approved_payload": false,
+            "mechanism": "shifted at component C (patient offset)",
+            "value": "20260114"
+          }
+        },
+        "note": "Structural, not detection: no recognizer runs on these values, so a recall over them would be a figure for a mechanism that cannot fail"
+      }
+    }
+  },
+  "synthetic": true
+}

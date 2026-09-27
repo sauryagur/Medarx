@@ -1,0 +1,21 @@
+{
+  "synthetic": true,
+  "notice": "Every value in this file is synthetic: fabricated for the Medarx evaluation harness, named after no real person, and taken from no real dataset. None of it is real patient data and none of it may be replaced with any. The corpus is a research instrument for this repository, not a claim about any real corpus.",
+  "mrn": "4452819",
+  "accession": "ACC0000417",
+  "patient_id": "774123",
+  "date_of_birth": "1953-04-11",
+  "ambiguous_reference": "ZX-99-ALPHA",
+  "institution_name": "Synthetic Imaging Centre",
+  "study_reference": "STU-0001",
+  "prior_study_reference": "STU-0000",
+  "patient_reference": "PAT-0001",
+  "study_date": "20260114",
+  "prior_study_date": "20251201",
+  "patient_age": "045Y",
+  "modality": "CT",
+  "spelling": {
+    "patient_id_canonical": "Patient ID: 774123",
+    "patient_id_no_space": "PatientID: 774123"
+  }
+}

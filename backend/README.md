@@ -464,3 +464,75 @@ the caller's to attach `SensitiveDataFilter` to. The filter is not installed at
 import time; the application entry point and the test session fixture each
 decide when, and the tests assert the boundary so it cannot quietly stop being
 true.
+
+## Component H — the synthetic PHI corpus and the evaluation harness
+
+```
+cd backend
+uv run pytest ../evals/test_eval_harness.py -v     # 34 tests
+uv run python ../evals/run_eval.py                 # the table, and a gate
+```
+
+**It is a research instrument for this repository, and nothing else.** Every
+value in it is fabricated, `evals/synthetic_phi/identifiers.json` carries the
+marker that says so, and the figures below are a measurement of *this codebase
+over invented text*. No real patient data, no real DICOM sample, no downloaded
+dataset — not TCIA, not MIMIC. TCIA is not a detection-recall oracle in any
+case: a corpus already stripped of its identifiers cannot say how many of them a
+pipeline would have caught in the form they arrived in. Synthetic injection is
+the only thing that gives a detection figure a denominator.
+
+**Four numbers, not one, because they are claims about different things.**
+
+| Claim | Measured | What it is a claim about |
+|---|---|---|
+| Detection recall, `report_text` | `MRN` 2/2, `ACCESSION_NUMBER` 2/2, `DATE_TIME` 1/1, `PATIENT_ID` **1/3** | redaction layer 2's scan |
+| Detection recall, `dicom_header` | `MRN` 1/1, `ACCESSION_NUMBER` 1/1, `PATIENT_ID` **0/1** | the one metadata value that is prose |
+| Non-survival | **0/15** planted identifiers reached an approved payload | the whole kernel |
+| False positives | **5/28** masked with the date order unset, **6/28** with it declared | the scan, over prose with no identifier in it |
+
+`baseline.json` holds the recorded figures; `run_eval.py` exits non-zero when
+one moves the wrong way, and `--write-baseline` records a new one. The
+per-entity-type figures are the row a reader quotes, so they are the ones
+pinned by `evals/test_eval_harness.py`.
+
+**Two findings, both measured, neither fixed here.**
+
+*`PATIENT_ID` is unreachable on the spelling a report actually uses.*
+`scan_entities` blanks every `ANCHOR_LABELS` entry before the analyser runs, so
+`Patient ID: 774123` loses the label the `PATIENT_ID` pattern requires, and the
+pattern has no bare-value alternative. The value comes back as `DATE_TIME` at
+0.85, and is refused as `UNSHIFTED_DATE`. `PatientID: 774123` — no space, so
+not an anchor label — does reach the recognizer. Three planted instances, one
+detected. Nothing leaks: layer 3's deterministic re-read fires
+`LEFTOVER_PATTERN_MATCH` on the leftover, and the run is refused. The gap is in
+the *detector*, not in the boundary, and the harness reports the two separately
+so a privacy figure of 0/15 is never read as a detection result.
+
+*Clinical words are still masked in approved payloads, and now have a
+denominator.* 5 of 28 with the date order unset, 6 of 28 with it declared, and
+6 of the 6 named false-positive sentences. The rate is a property of
+`replacers._MASKED` meeting spaCy's named-entity output, it has an owner, and
+the number above is what a later change is measured against.
+
+**Why the harness can be believed.** `evals/metrics.py` imports no corpus
+module: it is handed spans and hits and knows nothing about radiology, and the
+test suite runs it on inputs built inside the test file. The corpus declares
+*values*, never spans — the scorer searches the rendered text for each one, and
+`locate_planted` raises rather than inventing a truth. Precision is measured on
+a **disjoint** corpus (`clean_prose.py`), so recall and precision share no
+data. A zero denominator renders as `n/a (0 measured)` and can never print as
+`1.00` or `0.00`. And every run plants one identifier no detector can reach and
+checks that recall **falls**; a benchmark that cannot report a worse number is
+not a benchmark.
+
+**A gap between the contract and the code, recorded rather than reconciled.**
+`PriorReportText` is the only allowlisted DICOM attribute whose value layer 2
+scans, and the contract's `AllowlistedDicomMetadata` declares no such property,
+so a caller cannot supply it. The `dicom_header_prose` case is measured through
+the code — which is the truth about what happens to the value — and marked
+`contract_expressible=False`. Adding the property would be a strictly additive
+contract change, but it would also make
+`test_every_allowlisted_metadata_property_is_carried_or_deliberately_dropped`
+resolve `PriorReportText` against the `Draft` allowlist and fail, so it belongs
+to whoever owns the contract rather than to this task.

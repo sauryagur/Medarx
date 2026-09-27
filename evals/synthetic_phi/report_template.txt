@@ -1,0 +1,12 @@
+--- name: full_note
+FINDINGS: {finding}. MRN: {mrn}. Accession: {accession}. Patient ID: {patient_id}. DOB: {date_of_birth}. {comparison}
+--- name: identifier_block
+MRN: {mrn}. Accession: {accession}. Patient ID: {patient_id}.
+--- name: clinical_then_reference
+FINDINGS: {finding}. Ref ticket {ambiguous_reference} issued at the counter.
+--- name: clinical_only
+FINDINGS: {finding}. Comparison with the prior study shows slight interval growth.
+--- name: label_spelling
+FINDINGS: {finding}. PatientID: {patient_id}.
+--- name: prior_note
+Prior FINDINGS: {prior_finding}. MRN: {mrn}. Accession: {accession}. Patient ID: {patient_id}.

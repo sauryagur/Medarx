@@ -36,6 +36,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from evals.synthetic_phi.clean_prose import (
+    KNOWN_FALSE_POSITIVES,
+    ORDINARY_SENTENCES,
+)
 from medarx.config import Settings
 from medarx.errors import RedactionError
 from medarx.extraction.allowlists import ALLOWED_FIELDS
@@ -787,45 +791,16 @@ def test_a_partial_metadata_request_is_approved_rather_than_blocked_for_complete
 STUDY = StudyContext(study_uid="1.2.3.4", study_ref="STU-0001",
                      patient_ref=PATIENT, function="draft")
 
+#: The two prose corpora live with the evaluation harness, in
+#: `evals/synthetic_phi/clean_prose.py`, and are imported at the top of this
+#: file rather than restated here. They were two copies of the same 28
+#: sentences, and this project's own record already carries the cost of that: a
+#: figure quoted as 7/28 came from counting `ORDINARY_SENTENCES` and the six
+#: known false-positive sentences together as one list of 34. One definition,
+#: two denominators, and the harness prints both rows.
 
 
-# -- Ordinary radiology prose -----------------------------------------------
 
-#: Fabricated sentences of the kind a radiology report is actually made of.
-#: They carry no identifiers, and every one of them was written before the
-#: relative-interval work to find out which of them the kernel could process.
-#: The pass rate over this list is the project's real usability number, and it
-#: is measured in `test_the_pass_rate_over_ordinary_radiology_prose`.
-ORDINARY_SENTENCES = (
-    "May be a small effusion.",
-    "Right lower lobe effusion, follow-up 6 weeks.",
-    "Aorta 3.2 cm, no dissection.",
-    "Dose 2.5 mg today.",
-    "Nodule unchanged from 2025-12-01.",
-    "Comparison with the prior study shows slight interval growth.",
-    "Stable for 6 months.",
-    "Follow-up in 3 months.",
-    "The patient returns in 2 days.",
-    "Seen on 14 January 2026 and again on 2026-03-02.",
-    "Previous CT chest on 01/14/2026 for comparison.",
-    "Findings discussed at the 4 March 2026 multidisciplinary meeting.",
-    "The catheter was removed 2 weeks ago.",
-    "DOB 14 January 2026.",
-    "No acute osseous abnormality.",
-    "Liver enzymes normalised within 3 weeks.",
-    "Scan performed 2026-01-14 10:30.",
-    "Study dated 20260114.",
-    "Recommend follow-up imaging in six weeks.",
-    "Apnoea episodes continue, roughly 4 per night.",
-    "Mass unchanged in size over 18 months.",
-    "Pulmonary embolism, right lower lobe, seen 2025-11-30.",
-    "Technical note: breathing artefact present.",
-    "Pleural effusion, right side, 15 mm.",
-    "Findings as above.",
-    "Compared with 02/03/2026 the haematoma has resolved.",
-    "The 3 cm nodule seen 14 January 2026 is unchanged.",
-    "Density of 120 HU on 2026-02-03.",
-)
 
 
 def _run(store, settings, engine, text):
@@ -950,14 +925,7 @@ def test_the_startup_guard_refuses_the_default_configuration():
 # -- The known false positive, recorded -------------------------------------
 
 
-@pytest.mark.parametrize("text,entity,word", [
-    ("Previous CT chest for comparison.", "ORGANIZATION", "CT"),
-    ("Nodule unchanged in size.", "ORGANIZATION", "Nodule"),
-    ("Scan performed this morning.", "NRP", "Scan"),
-    ("Pulmonary embolism, right lower lobe.", "PERSON", "Pulmonary"),
-    ("Pleural effusion, right side.", "LOCATION", "Pleural"),
-    ("Density of 120 HU measured.", "PERSON", "HU"),
-])
+@pytest.mark.parametrize("text,entity,word", KNOWN_FALSE_POSITIVES)
 def test_a_clinical_word_masked_as_a_named_entity_is_pinned_not_hidden(store, settings,
                                                                        engine, text, entity, word):
     # Known and recorded, which is what makes it acceptable for Phase 1: a
