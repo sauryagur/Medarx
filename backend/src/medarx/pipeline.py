@@ -347,6 +347,14 @@ class Pipeline:
             return self._blocked(request, request_id, _receipt_from_error(
                 request_id, refused, self.settings))
 
+        # The record is appended **after** the send, not before. It states what
+        # happened — this payload was approved, this model was used, and the
+        # draft now awaits a human — and a record written first would claim a
+        # transmission that a provider outage then prevented. The cost is that
+        # an append failing after a successful send leaves a `500` on a request
+        # whose bytes are already on the wire; the failure is loud rather than a
+        # silent hole in the audit trail, which is the trade this project makes
+        # everywhere else.
         self._record_approved(request, request_id, outcome.dispositions, approved,
                               model)
         return ExecutionResult(

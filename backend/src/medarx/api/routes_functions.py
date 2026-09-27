@@ -39,7 +39,6 @@ from medarx.api.wiring import (
     PROBLEM_FUNCTION_NOT_FOUND,
     PROBLEM_FUNCTION_NOT_PERMITTED,
     PROBLEM_MALFORMED_REQUEST,
-    PROBLEM_PROVIDER_UNAVAILABLE,
     PROBLEM_REQUEST_VALIDATION,
     PROBLEM_STUDY_SCOPE_UNAUTHORIZED,
     PROBLEM_UNAUTHORIZED_SCOPE,
@@ -48,7 +47,7 @@ from medarx.api.wiring import (
     problem,
     problem_response,
 )
-from medarx.errors import AuthzError, ProviderError
+from medarx.errors import AuthzError
 from medarx.pipeline import FUNCTION_WIRE_TO_INTERNAL
 
 __all__ = ["router"]
@@ -169,20 +168,14 @@ async def create_function_execution(request: Request) -> JSONResponse:
         )
         return problem_response(_authz_problem(exc, request_id))
 
-    # 6. The pipeline. It returns for a block and raises for a provider outage,
-    #    and those are different conditions in the design's own terms.
+    # 6. The pipeline. It *returns* for a privacy block — a `422` with a
+    #    `BlockReceipt` — and *raises* for a provider outage, which is a
+    #    different condition in the design's own terms and is rendered by
+    #    `Boundary`, the one place in the application that turns an exception
+    #    into a response. A `ProviderError` caught here as well would be two
+    #    handlers for one condition, and the second would never run.
     execution = wiring.execution_request_from_body(body, wire_function, input_hash)
-    try:
-        result = pipeline.run(request_id, execution)
-    except ProviderError:
-        return problem_response(problem(
-            PROBLEM_PROVIDER_UNAVAILABLE,
-            status=500,
-            detail=("the model provider could not be reached or did not answer. "
-                    "This is an availability failure, not a privacy block, and "
-                    "nothing about this request was recorded as one"),
-            request_id=request_id,
-        ))
+    result = pipeline.run(request_id, execution)
     if not result.approved:
         return block_response(result.block_receipt)
     return wiring.json_response(
