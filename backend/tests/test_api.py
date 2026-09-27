@@ -225,6 +225,11 @@ def test_a_refused_scope_is_recorded_as_an_authorization_refusal(client):
     assert record["final_disposition"] == "blocked"
     assert record["layer"] == "J"
     assert record["action_codes"] == ["UNAUTHORIZED_SCOPE"]
+    # No pipeline stage was ever behind this request, which is what layer `J`
+    # means in the contract's `Layer` enum: the surface refused before the
+    # pipeline started. A reader of this record is therefore not looking at a
+    # privacy block that happened late — at a refusal that happened first.
+    assert record["stages"] == []
 
 
 def test_a_refused_function_is_recorded_with_its_own_code(client):
