@@ -538,19 +538,66 @@ class AuditLog:
     # -- Reading ------------------------------------------------------------
 
     def get(self, request_id: str) -> list[AuditEvent]:
-        """Every stored event for `request_id`, in append order.
+        """Every stored event for `request_id`. A special case of `events`.
 
         A record past its retention window is not here: the purge removed the
         row, and the tombstone that replaced it carries the position and the
         chain fields and nothing else. There is no event to rebuild from it, by
         design.
         """
+        return self.events(request_id=request_id)
+
+    def events(self, *, request_id: str | None = None,
+               function: str | None = None,
+               disposition: str | None = None,
+               since: datetime | None = None,
+               limit: int | None = None) -> list[AuditEvent]:
+        """The readback read: filter, order, and page over the stored records.
+
+        The one place anything reads this table. `get` is this with a single
+        filter, and `medarx.audit.queries` is the contract-shaped surface over
+        it — so a second way to read the same rows is not available to write.
+
+        **Order is presentation order, not chain order.** The contract asks the
+        collection endpoint for records "in ascending timestamp order", and a
+        clock that moved is a real thing, so the timestamp is the primary key
+        and the ordinal breaks the tie — which keeps the page total. That is a
+        claim about the *order records are returned in*, and nothing more: the
+        chain is walked in ordinal order by `verify_chain` regardless of how a
+        caller ordered a page, and a readback that hid a reordering behind a
+        sort would be the same defect as a stored `stages` column.
+
+        `since` is compared in Python rather than in SQL for the reason
+        `purge_expired` compares its cut-off there: the column holds canonical
+        ISO-8601 *text*, and text of mixed precision does not sort
+        chronologically. A naive `since` is refused rather than assumed to be
+        UTC — it has two readings, and the boundary would move with the guess.
+
+        No knowledge of the contract lives here: the limit bounds, the closed
+        filter vocabularies and the parameter names are `medarx.audit.queries`'s
+        business, and duplicating them would be a second place to update.
+        """
+        statement = select(*EVENT_TABLE.c)
+        if request_id is not None:
+            statement = statement.where(EVENT_TABLE.c.request_id == request_id)
+        if function is not None:
+            statement = statement.where(EVENT_TABLE.c.function == function)
+        if disposition is not None:
+            statement = statement.where(
+                EVENT_TABLE.c.final_disposition == disposition)
+        # Read in chain order — the only order that means anything — and sorted
+        # for presentation below.
+        statement = statement.order_by(EVENT_TABLE.c.ordinal)
         with self._engine.begin() as conn:
-            rows = conn.execute(
-                select(*EVENT_TABLE.c)
-                .where(EVENT_TABLE.c.request_id == request_id)
-                .order_by(EVENT_TABLE.c.ordinal)
-            ).mappings().all()
+            rows = conn.execute(statement).mappings().all()
+        if since is not None:
+            floor = _as_utc(since)
+            rows = [row for row in rows
+                    if _as_utc(datetime.fromisoformat(row["timestamp"])) >= floor]
+        rows.sort(key=lambda row: (datetime.fromisoformat(row["timestamp"]),
+                                    row["ordinal"]))
+        if limit is not None:
+            rows = rows[:limit]
         return [_event_of(row) for row in rows]
 
     def stages_for(self, event: AuditEvent) -> tuple[str, ...]:

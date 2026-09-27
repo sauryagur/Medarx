@@ -399,3 +399,52 @@ empty key omits `Authorization` entirely rather than sending a bare `Bearer `,
 which would put a credential-shaped header on the wire that authenticates
 nothing. A non-empty key is sent as `Bearer {key}`. Both are asserted against
 the headers the stub server actually received.
+
+## Component G — audit log, readback, and the log filter
+
+`medarx.audit` is the record of what happened, and `medarx.audit.queries` is the
+only way anything reads it. The readback returns the stored record and nothing
+else — an `AuditEvent`, whose fields are exactly the storage policy's. There is
+no joined row and no convenience projection, because a readback whose own idea
+of a record is wider than what was written is a second place for a value to
+appear that an auditor cannot see is a value.
+
+**Two answers are computed on read, and neither is a field.** `stages` is the
+pipeline prefix derived from the record's blocking `layer`, and `chain_verified`
+is the chain walk's result. Neither is a column, so neither can be stale; and
+`chain_verified` being *absent* from the record is the point — a record carrying
+a "verified" field would be making a claim a rewrite would rewrite along with
+it. Rewriting a row changes the values the readback returns and flips the
+separate verification answer; it cannot make the record say it verifies.
+
+**The filters are the contract's parameters, and the bounds are its bounds.**
+`search_records` takes `request_id`, `function`, `disposition`, `since` and
+`limit`; a `function` or `disposition` outside the contract's closed enum is
+refused rather than matched, because an empty page is a true statement about a
+question that was asked. Records come back oldest first, with the chain's own
+ordinal breaking a timestamp tie: the sort is presentation, and the chain is
+walked in append order regardless, so a clock that moved is something
+verification sees rather than something a sort hides.
+
+**A refusal is as visible as a sent request.** A blocked record is read back
+with the layer and the action codes that actually refused it — component D's
+codes stay D's and component F's stay F's — because a readback that flattened
+them would answer "was this refused" and nothing at all about why.
+
+`medarx.logging_filter` covers the surfaces the audit log's storage policy
+cannot: application logs, exception traces, and the HTTP and NER SDKs' own debug
+output, which echoes request bodies verbatim. It reuses the redaction layer's
+own identifier patterns rather than keeping a second copy, scrubs the *rendered*
+message and the traceback, and never drops a record.
+
+**Its coverage boundary is stated rather than implied, and it is not the whole
+logging tree.** A `logging.Filter` is consulted only for records logged to the
+logger it is attached to, so `install_filter` registers on the root logger, on
+the SDK loggers, and on everything beneath each SDK name — `httpcore` is a
+namespace rather than a logger, and Presidio's is hyphenated
+(`presidio-analyzer`), so the names in the design's task list are not the names
+the code writes to. Everything else, including the application's own loggers, is
+the caller's to attach `SensitiveDataFilter` to. The filter is not installed at
+import time; the application entry point and the test session fixture each
+decide when, and the tests assert the boundary so it cannot quietly stop being
+true.
