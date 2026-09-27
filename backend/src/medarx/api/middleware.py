@@ -54,7 +54,7 @@ from medarx.api.wiring import (
 from medarx.config import Settings
 from medarx.errors import ProviderError
 
-__all__ = ["Boundary"]
+__all__ = ["Boundary", "generate_request_id"]
 
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
@@ -83,7 +83,7 @@ class Boundary:
             await response(scope, receive, send)
 
         supplied = _header(scope, "x-request-id")
-        request_id = supplied if supplied is not None else str(uuid.uuid4())
+        request_id = wiring.resolve_request_id(supplied, generate_request_id)
         scope.setdefault("state", {})
         scope["state"]["request_id"] = request_id
 
@@ -139,6 +139,16 @@ class Boundary:
                         "nothing about the request is disclosed here or there"),
                 request_id=request_id,
             )))
+
+
+def generate_request_id() -> str:
+    """A fresh request ID, for a caller that did not supply one.
+
+    A module-level function rather than a `lambda` at the call site so
+    `resolve_request_id` can be given it, and so a test can substitute its own
+    generator and know exactly what the server will call.
+    """
+    return str(uuid.uuid4())
 
 
 def _with_request_id(send: Send, request_id: str) -> Send:

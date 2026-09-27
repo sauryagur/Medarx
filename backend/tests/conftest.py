@@ -96,11 +96,13 @@ def body_with_dicom(**overrides) -> dict:
 def settings() -> Settings:
     """Settings built explicitly, so no test depends on the process environment.
 
-    `date_order` is declared here because `create_app` refuses to build an
-    application whose numeric date order is undeclared — a deployment guard, so
-    a test that wants the refusal has to ask for it explicitly.
+    `date_order` is left **undeclared** here, exactly as it was before component J
+    existed, because several redaction tests measure what the kernel does with
+    an ambiguous numeric date and their expected numbers are the ones for the
+    undeclared case. The application fixture below declares it, because
+    `create_app` refuses to build one that has not.
     """
-    return Settings(audit_key=KEY, date_order="MDY")
+    return Settings(audit_key=KEY)
 
 
 @pytest.fixture
@@ -200,12 +202,22 @@ def provider():
 
 
 @pytest.fixture
-def app(tmp_path, settings, provider):
+def app_settings(settings, provider) -> Settings:
+    """The settings the *application* is built from.
+
+    The deployment's own settings with the numeric date order declared and the
+    gateway pointed at the loopback stub. Declared rather than inherited because
+    `create_app` treats an undeclared date order as a startup failure, and
+    setting it here would change what the component-D tests measure.
+    """
+    return settings.model_copy(update={"date_order": "MDY",
+                                      "gateway_base_url": provider.base_url})
+
+
+@pytest.fixture
+def app(tmp_path, app_settings):
     """The application, built by the one path the server uses."""
-    return create_app(
-        settings.model_copy(update={"gateway_base_url": provider.base_url}),
-        f"sqlite:///{tmp_path / 'kernel.db'}",
-    )
+    return create_app(app_settings, f"sqlite:///{tmp_path / 'kernel.db'}")
 
 
 @pytest.fixture

@@ -41,14 +41,15 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 #: the contract's schema — five fields, all required, `extra="forbid"`, codes
 #: shape-checked, layer validated against the closed `LAYERS` set — and a second
 #: class here would be a second answer to "what does a receipt contain".
-from medarx.models import LAYERS, BlockReceipt
+from medarx.models import BlockReceipt, FunctionName, PolicyMode
+from medarx.pipeline import FUNCTION_WIRE_TO_INTERNAL
 
 __all__ = [
-    "ACTION_CODES",
     "AllowlistedDicomMetadata",
     "AuditRecord",
     "AuditRecordCollection",
     "BlockReceipt",
+    "DicomDate",
     "ExecutionRequest",
     "ExecutionResponse",
     "FUNCTION_WIRE_TO_INTERNAL",
@@ -57,9 +58,7 @@ __all__ = [
     "HumanApprovalRequest",
     "HumanApprovalResponse",
     "HumanApprovalState",
-    "LAYERS",
     "ModelResponse",
-    "PIPELINE_STAGE_ORDER",
     "PolicyConfiguration",
     "PolicyMode",
     "PriorStudyReference",
@@ -68,23 +67,6 @@ __all__ = [
     "StudyContext",
     "ValidationError",
 ]
-
-# -- The closed vocabularies, read from where the kernel already pins them ----
-#
-# `FunctionName` and `PolicyMode` are held against the contract's enums by
-# `tests/test_openapi_contract.py`, and G's `CODE_TABLE` is held equal to the
-# `ActionCode` enum by `tests/test_audit.py`. Restating any of them here would be
-# another copy for a rename to miss, so they are read from those places instead.
-
-from medarx.audit.code_table import CODE_TABLE, PIPELINE_STAGES  # noqa: E402
-from medarx.models import FunctionName, PolicyMode  # noqa: E402
-from medarx.pipeline import FUNCTION_WIRE_TO_INTERNAL  # noqa: E402
-
-#: The contract's `ActionCode` enum, as component G's table holds it.
-ACTION_CODES: frozenset[str] = frozenset(entry.code for entry in CODE_TABLE)
-
-#: The stage names, in pipeline order, from component G's stage vocabulary.
-PIPELINE_STAGE_ORDER: tuple[str, ...] = PIPELINE_STAGES
 
 #: The contract's `FinalDisposition` enum, from the model the audit log stores.
 FinalDisposition = Literal["approved", "blocked", "pending_human_approval",
@@ -102,6 +84,7 @@ DicomDate = Annotated[str, StringConstraints(pattern=r"^[0-9]{8}$")]
 #: property it types is itself called `PatientAge`, and a class body resolves an
 #: annotation against its own namespace.
 PatientAgeString = Annotated[str, StringConstraints(pattern=r"^[0-9]{3}[DWMY]$")]
+
 
 class _Closed(BaseModel):
     """The base for every schema the contract marks `additionalProperties: false`.
@@ -355,39 +338,38 @@ class ValidationError(_Closed):
     message: str
 
 
-class ProblemDetail:
+class ProblemDetail(BaseModel):
     """RFC 9457 problem document, used for `400`, `403`, `404`, `409` and `415`.
 
-    The contract does **not** close this schema, so it is left open: it is the
-    error shape, and a future problem type may carry a property no reader of this
-    version expects. A privacy block never uses it — that is always a
-    `BlockReceipt`.
+    The contract does **not** close this schema, so it is left open here as it
+    is there: it is the error shape, and a future problem type may carry a
+    property no reader of this version expects. A privacy block never uses it —
+    that is always a `BlockReceipt`.
 
     `type` is a plain string rather than a URL-typed field so the values this
     application produces reach the wire byte for byte as the constants they are
     written from; a URL type would be free to normalise them.
     """
 
-    def __init__(self, *, type: str, title: str, status: int,
-                 detail: str | None = None, request_id: str | None = None,
-                 errors: list[ValidationError] | None = None) -> None:
-        self.type = type
-        self.title = title
-        self.status = status
-        self.detail = detail
-        self.request_id = request_id
-        self.errors = errors or []
+    model_config = ConfigDict(extra="allow")
+
+    type: str
+    title: str
+    status: int
+    detail: str | None = None
+    request_id: str | None = None
+    errors: list[ValidationError] = Field(default_factory=list)
 
     def as_dict(self) -> dict:
-        """The wire body, with the optional members present only when set."""
-        body: dict = {"type": self.type, "title": self.title, "status": self.status}
-        if self.detail is not None:
-            body["detail"] = self.detail
-        if self.request_id is not None:
-            body["request_id"] = self.request_id
-        if self.errors:
-            body["errors"] = [{"field": e.field, "message": e.message}
-                              for e in self.errors]
-        return body
+        """The wire body, with the optional members present only when set.
 
+        `errors` is omitted when empty rather than serialised as `[]`: a problem
+        document with no field-level detail is not a document with an empty
+        list of field-level details, and a client branching on the member's
+        presence would read the difference.
+        """
+        body = self.model_dump(exclude_none=True)
+        if not self.errors:
+            body.pop("errors", None)
+        return body
 

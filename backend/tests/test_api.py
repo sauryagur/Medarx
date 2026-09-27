@@ -19,7 +19,6 @@ The load-bearing claims in this file:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from io import StringIO
@@ -78,20 +77,19 @@ def test_the_response_stores_the_contract_spelling_of_the_function(client):
 
     One fact, one spelling, in the artefact a human reads next to the contract.
     """
+    from medarx.extraction.allowlists import ALLOWED_FIELDS
+
     r = client.post(EXEC_URL, json=body_with(function="Draft"), headers=SCOPE_HEADERS)
     assert r.status_code == 200
     assert r.json()["function"] == "Draft"
     record = client.get(f"/v1/audit/records/{r.json()['request_id']}",
                         headers=SCOPE_HEADERS).json()
     assert record["function"] == "Draft"
-    assert record["function"] != pipeline_function_spelling()
-
-
-def pipeline_function_spelling() -> str:
-    """The internal spelling, read from the kernel's own allowlist table."""
-    from medarx.extraction.allowlists import ALLOWED_FIELDS
-
-    return "draft" if "draft" in ALLOWED_FIELDS else "unknown"
+    # Two spellings of one fact, and the record carries the contract's. The
+    # kernel's own table is the other one, so the two are read from their
+    # sources rather than written out here.
+    assert "draft" in ALLOWED_FIELDS
+    assert "Draft" not in ALLOWED_FIELDS
 
 
 def test_nothing_planted_in_the_request_reaches_the_wire(client, provider):
@@ -662,18 +660,31 @@ def test_the_served_document_declares_no_authentication(client):
 # -- The log filter reaches this application's own loggers -------------------
 
 
-def test_the_api_logger_carries_the_installed_filter(client):
+@pytest.mark.parametrize("name", [
+    "medarx.api",
+    "medarx.api.approval",
+    "medarx.api.errors",
+    "uvicorn",
+    "uvicorn.error",
+    "uvicorn.access",
+])
+def test_every_application_logger_carries_the_installed_filter(client, name):
     """`install_filter` covers the root logger and the SDK loggers, not these.
 
-    A logger filter is not inherited, so `medarx.api`'s own records are covered
-    only because `create_app` attached the filter to this logger. A logger
-    created after `install_filter` and not named there is not covered, and
-    nothing in this package claims otherwise.
+    A logger filter is not inherited, so this application's own records are
+    covered only because `create_app` attached the filter to each name in
+    `APPLICATION_LOGGERS`. The list is asserted against that constant rather than
+    against a hard-coded copy, so a logger added to one and forgotten in the other
+    fails here. A logger created after `install_filter` and not named there is
+    **not** covered, and nothing in this package claims otherwise.
     """
+    from medarx.api.app import APPLICATION_LOGGERS
     from medarx.logging_filter import SensitiveDataFilter
 
-    logger = logging.getLogger("medarx.api")
+    assert name in APPLICATION_LOGGERS
+    logger = logging.getLogger(name)
     assert any(isinstance(f, SensitiveDataFilter) for f in logger.filters)
+    assert logger.filters[-1] is client.app.state.sensitive_filter
 
 
 def test_the_api_logger_scrubs_a_planted_identifier(client):
@@ -767,4 +778,3 @@ def test_the_approved_payload_hash_is_a_digest_and_the_stored_form_is_bare_hex(c
     stored = pipeline.audit.get(r.json()["request_id"])[0].approved_payload_hash
     assert DIGEST.fullmatch(stored)
     assert wire == f"sha256:{stored}"
-    assert hashlib.sha256(b"irrelevant").hexdigest()  # the digest helper is live

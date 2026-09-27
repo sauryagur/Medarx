@@ -118,7 +118,6 @@ async def create_function_execution(request: Request) -> JSONResponse:
             policy_version=settings.policy_version,
             policy_mode=settings.policy_mode,
             reason=surface.reason_for_shape(offending),
-            offending=offending,
         )
         detail = ("Unrecognized or disallowed properties present: "
                   f"{', '.join(offending)}. " if offending else "")

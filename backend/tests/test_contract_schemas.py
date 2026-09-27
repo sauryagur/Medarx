@@ -548,8 +548,6 @@ def test_every_action_code_a_published_example_names_is_a_contract_member():
 #: widen the exemption.
 _NOT_YET_EMITTED: frozenset[tuple[str, str]] = frozenset(
     {
-        ("J", "ARBITRARY_DICOM_OBJECT_REJECTED"),
-        ("J", "FREE_FORM_PROMPT_REJECTED"),
         ("E", "UNRESOLVED_DISPOSITION"),
     }
 )
@@ -637,70 +635,71 @@ def test_the_pending_pairs_are_exactly_the_ones_the_contract_actually_publishes(
     }
     assert _NOT_YET_EMITTED == published
 
-#: Reserved members of the `ActionCode` enum that no published example carries,
-#: so the example-reachability sweep above cannot see them: there is no example
-#: for them to be unreachable *in*, and `_NOT_YET_EMITTED` is deliberately held
-#: equal to the pairs the contract's own examples advertise, so adding them
-#: there would fail the equality assertion above.
+#: The two `ActionCode` members that **no published example carries**, and so
+#: cannot be reached by the sweep above: there is no example for them to be
+#: unreachable *in*, and `_NOT_YET_EMITTED` is deliberately held equal to the
+#: pairs the contract's own examples advertise, so adding them there would fail
+#: the equality assertion.
 #:
-#: Both belong to component J, which is not written. They are recorded rather
-#: than left implicit because a code that nothing tracks is a code that nothing
-#: would catch: the sweep below is the only direction available to them, and it
-#: is the direction that matters — the moment the package starts emitting one,
-#: the contract's description is claiming a reserved code is implemented, and
-#: that is a claim about behaviour.
+#: Both belong to component J. While J was unwritten they sat in a reservation
+#: whose only check was staleness — "the package must not start emitting these"
+#: — which is the check that stops mattering the moment the component is written.
+#: Now that J emits them, a set like that would either have to keep asserting
+#: their absence (false, and a test that fails on correct work) or be emptied
+#: (two tests that pass on nothing). Neither is worth keeping, so it is gone and
+#: what replaced it is the direction that is actually available: a code no
+#: example advertises is enforced by being pinned to the one component that may
+#: emit it, and by the sweep's exact-set guard on emission sites.
 #:
 #: Deliberately *not* merged into `_NOT_YET_EMITTED`. Widening the
 #: example-reachability exemption to hold codes no example advertises would make
 #: that set a place where a real failure could hide, which is exactly what the
 #: equality assertion exists to prevent.
-_RESERVED_NOT_ADVERTISED: frozenset[str] = frozenset(
+UNADVERTISED_CODES: frozenset[str] = frozenset(
     {"FUNCTION_NOT_PERMITTED", "UNAUTHORIZED_SCOPE"}
 )
 
 
-def test_a_reserved_unadvertised_code_is_not_already_emitted():
-    """The staleness check for the codes the example sweep cannot see.
+def test_the_codes_no_example_advertises_are_component_js():
+    """The direction available to a code no published example carries.
 
-    The same signal as `test_a_pending_pair_is_not_already_emitted`, and for the
-    same reason — a stale reservation is how a contract's claim about what is
-    implemented quietly stops being true. The fix is always to delete the entry
-    and let whichever sweep can see the code take over from there.
+    The example-reachability sweep resolves a code through the emission sites in
+    the package, so a code in no example is invisible to it by construction. What
+    is left is to say where the code *may* come from, and to say it in a place
+    that fails when it stops being true. This is that place: J is the only
+    component the design gives an authorization failure to, and the audit log's
+    table must keep saying so.
     """
+    from medarx.audit.code_table import CODE_TABLE
+
     emitted = {code for codes in _emitted_action_codes().values() for code in codes}
-    stale = sorted(_RESERVED_NOT_ADVERTISED & emitted)
-    assert not stale, (
-        f"{stale} are reserved for an unwritten component and appear in no "
-        f"published example, but the package now emits them; delete them from "
-        f"_RESERVED_NOT_ADVERTISED and decide whether the contract still "
-        f"describes them as unimplemented"
-    )
-
-
-def test_the_reserved_unadvertised_codes_are_still_reserved_in_the_contract():
-    """The declaration matches the artefact: still enum members, still no example.
-
-    Two halves, and both are what make the declaration mean anything. If a code
-    left this set the contract would stop describing it as reserved. If an
-    example started carrying it, it would become reachable-by-example and belong
-    in `_NOT_YET_EMITTED`, where the example-reachability sweep can enforce it —
-    and this says so, rather than leaving the move to be discovered later as a
-    stale reservation.
-    """
-    doc = _contract()
-    members = set(doc["components"]["schemas"]["ActionCode"]["enum"])
     advertised = {
-        code for _where, _layer, codes in _example_receipts(doc) for code in codes
+        code for _where, _layer, codes in _example_receipts(_contract())
+        for code in codes
     }
-    missing = sorted(_RESERVED_NOT_ADVERTISED - members)
+    for code in sorted(UNADVERTISED_CODES):
+        assert code in emitted, (
+            f"{code} appears in no published example, so nothing would notice if "
+            "the package stopped emitting it; this is the only check there is"
+        )
+        assert code not in advertised, (
+            f"{code} now appears in a published example, so the example-reachability "
+            "sweep can enforce it and the unadvertised reservation is stale"
+        )
+        entry = next(e for e in CODE_TABLE if e.code == code)
+        assert entry.owners == ("J",), (
+            f"{code} is reserved to component J by the contract's own ActionCode "
+            f"description; the table names {entry.owners}"
+        )
+
+
+def test_the_unadvertised_codes_are_still_members_of_the_enum():
+    """The reservation's other half: still declared, so the contract still holds them."""
+    members = set(_contract()["components"]["schemas"]["ActionCode"]["enum"])
+    missing = sorted(UNADVERTISED_CODES - members)
     assert not missing, (
-        f"{missing} are declared reserved here but are not members of the "
-        f"ActionCode enum"
-    )
-    newly_advertised = sorted(_RESERVED_NOT_ADVERTISED & advertised)
-    assert not newly_advertised, (
-        f"{newly_advertised} now appear in a published example, so they are "
-        f"reachable-by-example and belong in _NOT_YET_EMITTED, not here"
+        f"{missing} are tracked here as unadvertised but are not members of the "
+        "ActionCode enum, so nothing reserves them"
     )
 
 

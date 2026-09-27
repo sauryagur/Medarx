@@ -36,6 +36,7 @@ from fastapi.responses import JSONResponse
 
 from medarx.api.schemas import (
     ExecutionRequest as ExecutionRequestBody,
+    ExecutionResponse,
     ModelResponse as ModelResponseBody,
     ModelUsage,
     ProblemDetail,
@@ -185,7 +186,7 @@ def problem(name: str, *, status: int, detail: str, request_id: str | None = Non
         status=status,
         detail=detail,
         request_id=request_id,
-        errors=errors,
+        errors=errors or [],
     )
 
 
@@ -342,8 +343,6 @@ def execution_response_body(result, function: FunctionName) -> dict[str, Any]:
         finish_reason=_finish_reason_of(response),
         usage=usage,
     )
-    from medarx.api.schemas import ExecutionResponse  # a local import: a cycle
-
     return ExecutionResponse(
         request_id=result.request_id,
         function=function,

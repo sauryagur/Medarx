@@ -45,12 +45,10 @@ And the contract must be readable, for the reason above.
 from __future__ import annotations
 
 import logging
-import uuid
 from pathlib import Path
 
 import yaml
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 
 from medarx import logging_filter
 from medarx.api.authz import Authorizer
@@ -59,10 +57,8 @@ from medarx.api import (
     routes_audit,
     routes_functions,
     routes_policy,
-    wiring,
 )
 from medarx.api.middleware import Boundary
-from medarx.api.surface import _SURFACE_LAYER  # noqa: F401 - re-exported name only
 from medarx.config import Settings, require_date_order
 from medarx.pipeline import build_pipeline
 
@@ -77,6 +73,7 @@ __all__ = ["APPLICATION_LOGGERS", "create_app", "load_contract"]
 APPLICATION_LOGGERS: tuple[str, ...] = (
     "medarx.api",
     "medarx.api.approval",
+    "medarx.api.errors",
     "uvicorn",
     "uvicorn.error",
     "uvicorn.access",
@@ -178,9 +175,3 @@ def _attach_log_filter() -> logging_filter.SensitiveDataFilter:
     for name in APPLICATION_LOGGERS:
         logging.getLogger(name).addFilter(installed)
     return installed
-
-
-def problem_detail_response(document) -> JSONResponse:
-    """A problem document on the wire. Re-exported from `wiring` for callers
-    that already hold this module rather than the one that defines the shape."""
-    return wiring.problem_response(document)

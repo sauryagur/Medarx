@@ -146,7 +146,6 @@ def record_surface_refusal(
     policy_version: str,
     policy_mode: PolicyMode,
     reason: str,
-    offending: "list[str] | None" = None,
 ) -> AuditEvent:
     """Append the record for a request this surface refused, and return it.
 
@@ -171,50 +170,35 @@ def record_surface_refusal(
         "chain_hash": "",
         "previous_hash": "",
     }
+    # One construction per reachable reason, each naming its codes literally.
+    #
+    # A shared `_event(..., action_codes=chosen)` helper would read better and
+    # would break the emission sweep in `tests/test_openapi_contract.py`: the
+    # sweep resolves the value of every `action_codes=` keyword to a
+    # module-level assignment, so a name computed at run time makes it report
+    # this module as unreadable rather than as emitting four codes — and the
+    # refusal it is there to catch is precisely a code that is emitted but
+    # invisible. Six short lines are the price of the sweep staying honest.
     if reason == REASON_UNAUTHORIZED_SCOPE:
-        event = _event(**common, action_codes=(_ACTION_CODE_UNAUTHORIZED_SCOPE,))
-    elif reason == REASON_FUNCTION_NOT_PERMITTED:
-        event = _event(
-            **common, action_codes=(_ACTION_CODE_FUNCTION_NOT_PERMITTED,))
-    elif reason == REASON_ARBITRARY_DICOM_OBJECT:
-        event = _event(
+        return audit.append(AuditEvent(
+            **common, action_codes=(_ACTION_CODE_UNAUTHORIZED_SCOPE,)))
+    if reason == REASON_FUNCTION_NOT_PERMITTED:
+        return audit.append(AuditEvent(
+            **common, action_codes=(_ACTION_CODE_FUNCTION_NOT_PERMITTED,)))
+    if reason == REASON_ARBITRARY_DICOM_OBJECT:
+        return audit.append(AuditEvent(
             **common,
-            action_codes=(_ACTION_CODE_ARBITRARY_DICOM_OBJECT_REJECTED,))
-    elif reason == REASON_FREE_FORM_PROMPT:
-        event = _event(**common,
-                       action_codes=(_ACTION_CODE_FREE_FORM_PROMPT_REJECTED,))
-    elif reason == REASON_DICOM_OBJECT_AND_PROMPT:
-        event = _event(
+            action_codes=(_ACTION_CODE_ARBITRARY_DICOM_OBJECT_REJECTED,)))
+    if reason == REASON_FREE_FORM_PROMPT:
+        return audit.append(AuditEvent(
+            **common, action_codes=(_ACTION_CODE_FREE_FORM_PROMPT_REJECTED,)))
+    if reason == REASON_DICOM_OBJECT_AND_PROMPT:
+        return audit.append(AuditEvent(
             **common,
             action_codes=(_ACTION_CODE_ARBITRARY_DICOM_OBJECT_REJECTED,
-                          _ACTION_CODE_FREE_FORM_PROMPT_REJECTED))
-    else:
-        # A shape this module cannot classify. Recorded with no code rather than
-        # a plausible one: the fields around it — the request ID, the function,
-        # the policy version, the input hash — are all true, and the one that
-        # would be a guess is left empty.
-        event = _event(**common, action_codes=())
-    return audit.append(event)
-
-
-def _event(*, request_id: str, timestamp: datetime, function: FunctionName,
-           policy_version: str, policy_mode: PolicyMode, input_hash: str,
-           redacted_field_names: list, human_approval: None, final_disposition: str,
-           layer: str, chain_hash: str, previous_hash: str,
-           action_codes: "list[str]") -> AuditEvent:
-    """One audit record. The single construction every refusal above goes through."""
-    return AuditEvent(
-        request_id=request_id,
-        timestamp=timestamp,
-        function=function,
-        policy_version=policy_version,
-        policy_mode=policy_mode,
-        input_hash=input_hash,
-        redacted_field_names=redacted_field_names,
-        action_codes=action_codes,
-        human_approval=human_approval,
-        final_disposition=final_disposition,
-        layer=layer,
-        chain_hash=chain_hash,
-        previous_hash=previous_hash,
-    )
+                          _ACTION_CODE_FREE_FORM_PROMPT_REJECTED)))
+    # A shape this module cannot classify. Recorded with no code rather than a
+    # plausible one: every field around it — the request ID, the function, the
+    # policy version, the input hash — is true, and the one that would be a
+    # guess is left empty.
+    return audit.append(AuditEvent(**common, action_codes=()))

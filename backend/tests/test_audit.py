@@ -568,19 +568,29 @@ def test_hash_mismatch_belongs_to_the_gateway_and_not_to_layer_three():
 
 
 def test_the_codes_nothing_emits_are_exactly_the_unwritten_ones():
-    # The rows with no owner are the ones Phase 1 has not written: the four
-    # request-shape codes belong to component J, which does not exist yet, and
-    # `UNRESOLVED_DISPOSITION` is a declared-but-unemitted member whose retention
-    # is argued in the table itself and pinned in
-    # `tests/test_contract_schemas.py::_NOT_YET_EMITTED`.
+    # The rows with no owner are the ones nothing in the package produces. There
+    # is exactly one left: `UNRESOLVED_DISPOSITION`, declared and deliberately
+    # unemitted, whose retention is argued in the table itself and pinned in
+    # `tests/test_contract_schemas.py::_NOT_YET_EMITTED`. The four
+    # request-surface codes used to be here because component J did not exist;
+    # it does now, and `test_audit.py` and the emission sweep hold it to them.
     no_owner = sorted(e.code for e in CODE_TABLE if not e.owners)
-    assert no_owner == [
-        "ARBITRARY_DICOM_OBJECT_REJECTED",
-        "FREE_FORM_PROMPT_REJECTED",
-        "FUNCTION_NOT_PERMITTED",
-        "UNAUTHORIZED_SCOPE",
-        "UNRESOLVED_DISPOSITION",
-    ]
+    assert no_owner == ["UNRESOLVED_DISPOSITION"]
+
+
+def test_the_four_request_surface_codes_are_owned_by_j_and_emitted_only_there():
+    # The half of the reservation the example-reachability sweep cannot see.
+    # `ARBITRARY_DICOM_OBJECT_REJECTED` and `FREE_FORM_PROMPT_REJECTED` appear
+    # in a published example, so the sweep enforces them. `FUNCTION_NOT_PERMITTED`
+    # and `UNAUTHORIZED_SCOPE` appear in no example, so nothing else would notice
+    # if the table claimed an owner the package never emitted — this does.
+    emitted = _emitted_codes()
+    for code in ("FUNCTION_NOT_PERMITTED", "UNAUTHORIZED_SCOPE",
+                 "ARBITRARY_DICOM_OBJECT_REJECTED", "FREE_FORM_PROMPT_REJECTED"):
+        entry = next(e for e in CODE_TABLE if e.code == code)
+        assert entry.owners == ("J",), f"{code} is not owned by J alone"
+        sites = sorted(p for p, codes in emitted.items() if code in codes)
+        assert sites == ["backend/src/medarx/api/surface.py"], (code, sites)
 
 
 # -- The one schema-init command ------------------------------------------------

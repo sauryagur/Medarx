@@ -59,6 +59,12 @@ EXPECTED_EMISSION_SITES: frozenset[str] = frozenset(
         # other component emits and which was in the contract enum before this
         # one was written.
         "backend/src/medarx/gateway/openai_gateway.py",
+        # Component J. Its four codes are the request-surface ones — the two
+        # shapes a body cannot express and the two authorization failures — and
+        # each is named literally at the branch that records it, because the
+        # sweep resolves a name to a module-level assignment and cannot follow a
+        # value chosen at run time.
+        "backend/src/medarx/api/surface.py",
     }
 )
 

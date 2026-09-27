@@ -578,3 +578,127 @@ consumed by no code path), `study_context.modality` (the modality travels in
 `dicom_metadata`), and `report_text.source` (audit provenance). The first is a
 real gap in the kernel, not in the harness, and it is unmeasured here by
 construction.
+## Component J — application API and composition root
+
+Build the surface the way the tests build it, which is the way the server builds
+it:
+
+```python
+from medarx.api.app import create_app
+from medarx.config import load_settings
+
+app = create_app(load_settings(), "sqlite:///medarx.db")
+```
+
+`create_app` is the **only** composition point. It runs the startup guard, builds
+every component through `medarx.pipeline.build_pipeline` exactly once, and puts
+them on `app.state`. No route constructs a component, and the test suite reads
+`app.state.pipeline` back rather than building a `Pipeline` of its own — two
+wirings would be drift, and the second would be the one the server never uses.
+
+**Three startup checks, all fail-closed.** `require_date_order` refuses a
+deployment that has not said whether its reports are MDY or DMY; an ambiguous
+numeric date would otherwise be a *per-request* block that reads to whoever sees
+the receipt like a coverage gap, and this is the caller that guard was written
+for. The audit key is refused by the two stores that need it. And
+`contracts/openapi.yaml` must be readable, because it is **served verbatim**
+rather than regenerated from the route signatures — a generated document and the
+tracked one can disagree with nothing failing. `test_api.py::
+test_the_served_openapi_document_is_the_tracked_contract` compares them after
+parsing. The cost of that choice: a deployment with the package but not the
+repository layout cannot serve the document, and is refused at startup with a
+`FileNotFoundError` naming the path rather than served something that is not the
+contract.
+
+**`X-Scope` is a demonstration input, not authentication.** The contract declares
+`security: []` and no security scheme, and the design defers roles and
+per-user permissions to Phase 6. The header models an authorization *boundary* —
+a caller scoped to one study and one function — and enforces it: an absent, empty
+or unreadable header grants no scope and is a `403`. A token the grammar does not
+recognise is not an error to be reported and then ignored; it is a grant that was
+not made. Anyone who can reach the server can present any scope, and
+`test_api.py::test_the_scope_header_is_not_an_authentication_mechanism`
+demonstrates exactly that, so no future reader mistakes the header for a control.
+The grammar is closed and synthetic: `scope:study:<reference>` and
+`scope:function:<FunctionName>`, comma-separated.
+
+**`AuthzError` is outside the `MedarxError` taxonomy, on purpose.** It carries
+no `layer` and no action codes, so the handler that renders a `BlockReceipt` for a
+`MedarxError` cannot catch it by accident. A caller tells a privacy block from an
+authorization failure **by status code alone** — `422` against `403` — without
+parsing the body, which is the design's own §6 requirement and the reason the
+split is structural rather than a status chosen at a call site.
+
+**The order inside one request is the boundary.** Media type (`415`), then the
+measured body size (`400`; a chunked request carries no `Content-Length`, and a
+guard reading only the header would pass an oversized body straight through),
+then the schema (`400`, which is where an arbitrary DICOM object or a free-form
+prompt is refused, before anything is parsed into a domain object), then
+authorization (`403`), then the pipeline. A provider outage is a `500` and is
+recorded **nowhere**: §6 has no row for "the provider is down", and a record
+saying a request was blocked when it was not would be a false privacy event in
+the one store the design names as an asset.
+
+**The error taxonomy decides the status, and three hierarchies meet here.**
+`MedarxError` and its subclasses are `422` with a `BlockReceipt`; `AuthzError` is
+`403` with a `ProblemDetail`; `ProviderError` and its subclasses are `500` with a
+`ProblemDetail`. `BlockReceipt` has exactly five fields and `extra="forbid"`, so
+**no message reaches the response or the record** — the action codes are all an
+auditor gets, which is why `_receipt_for` in `medarx.pipeline` states its rule
+once and `test_the_receipt_agrees_with_the_orchestrator` runs it against
+`run_privacy_kernel`'s own `RedactionError` over the same input.
+
+**A request cannot select its own policy mode.** The mode is a deployment
+configuration, `ExecutionRequest` has no `policy_mode` field, and
+`AllowlistedDicomMetadata` and `ExecutionRequest` are both `extra="forbid"` — so
+a request that supplies one is a `400` because the field does not exist to be
+set, not because a handler noticed.
+
+**The audit readback is behind the same authorization surface, and it is
+unfiltered.** Phase 1 does not filter a readback by study, and could not: the
+storage policy has no study field, and adding one would put a study identifier
+into a log required never to hold one. The routes require a presented scope and
+document the limit rather than leaving it looking like a missing feature.
+
+**Two contract gaps are recorded here rather than smoothed over.**
+
+- The contract's `StudyContext` declares **no patient identifier**, and the
+  surface may not add one. Component C needs a patient scope to choose a date
+  offset, so `medarx.pipeline.patient_ref_for` takes it from the allowlisted
+  `PatientID` when the caller supplies one — accepted by layer A and then
+  dropped, so it reaches the input hash and no payload field — and from the study
+  reference otherwise. **Two studies of one patient arriving without a
+  `PatientID` therefore get two offsets**, and the interval between them is not
+  preserved. That is a contract gap, not a choice.
+- `HumanApprovalRequest` declares an optional `note` while
+  `HumanApprovalState` — what a readback returns — is closed and has no such
+  field, and the audit store's policy forbids a field that could hold free text.
+  The note is therefore logged rather than stored, through the application's own
+  logger, which is what the contract's own `note` description says it is subject
+  to: "the same sensitive-data filtering as every other log surface".
+
+**The log filter reaches this application's loggers because `create_app` attaches
+it.** `medarx.logging_filter.install_filter` covers the root logger and four
+named SDK loggers and their subtrees. **A logger filter is not inherited**, so
+`medarx.api`, `medarx.api.approval`, `medarx.api.errors` and the three `uvicorn`
+loggers are covered because `APPLICATION_LOGGERS` in `app.py` names them. A
+logger created after `install_filter` and not named there is **not** covered, and
+nothing in the package claims otherwise.
+
+**Two of §6's seven rows are unreachable through this surface, and the tests say
+so with evidence.** §6 row 3 (layer D.1) fires only when a date still equals the
+value component C was given, and component C always shifts it first or refuses
+the request. §6 row 6 (layer E) fires only on a misconfiguration `Settings`
+forbids or a state the orchestrator cannot be in: an unresolved disposition does
+block, and the orchestrator attributes that block to the layer that raised the
+disposition, so one refusal cannot produce two different receipts.
+`test_block_conditions.py` drives the five reachable rows through HTTP, one
+request body each, and asserts that a D.2 block carries no policy code and a
+policy block carries no redaction code.
+
+**The request ID is a header, and it is checked against the audit log's own
+shape.** `X-Request-Id` is honoured when supplied and generated when not, and it
+is on the response of **every** request including blocks and refusals. An ID
+holding a space is a `400` at the boundary, because the audit log holds request
+IDs to an identifier shape and an uncaught refusal there would surface later as a
+`500` that reads as a server fault.

@@ -158,6 +158,54 @@ def test_a_provider_outage_is_not_a_block(bare_pipeline, provider, tmp_path):
     assert unreachable.audit.get("req-w-outage") == []
 
 
+def test_the_receipt_agrees_with_the_orchestrator(bare_pipeline):
+    """The pipeline's block receipt and `run_privacy_kernel`'s error, compared.
+
+    `medarx.pipeline._receipt_for` restates the orchestrator's rule — first
+    unresolved layer, every unresolved code, deduplicated in order — because the
+    pipeline needs the dispositions to write the audit record and the raising
+    form discards them. Two statements of one rule is drift waiting to happen, so
+    both are run over the same input here and compared field for field. If either
+    changes, this fails rather than the surface quietly reporting a different
+    layer than the orchestrator would.
+    """
+    from medarx.errors import RedactionError
+    from medarx.extraction.payload_extractor import pipeline_for
+    from medarx.pseudonym.pseudonymize import pseudonymize_payload
+    from medarx.redaction.pipeline import run_privacy_kernel
+
+    text = "FINDINGS: 7 mm nodule. Ticket ZX-99-ALPHA issued at the counter."
+    through_api = bare_pipeline.run("req-w-agree", _request(report_text=text))
+    assert through_api.approved is False
+    assert through_api.block_receipt is not None
+
+    request = _request(report_text=text)
+    extracted = pipeline_for("draft", request.study_context, request.report_text,
+                             dict(request.dicom_metadata),
+                             bare_pipeline.settings.policy_version)
+    pseudonymized = pseudonymize_payload(extracted, "PAT-0001", bare_pipeline.store)
+    with pytest.raises(RedactionError) as caught:
+        run_privacy_kernel(pseudonymized, "PAT-0001", bare_pipeline.store,
+                           bare_pipeline.policy, bare_pipeline.settings,
+                           source=extracted)
+
+    assert through_api.block_receipt.layer == caught.value.layer
+    assert through_api.block_receipt.action_codes == list(caught.value.action_codes)
+    assert through_api.block_receipt.action_codes[0] == "NER_UNRESOLVED"
+
+
+def test_an_approved_result_carries_the_layers_dispositions(bare_pipeline):
+    """The record's field names come from the layers, so they are on the result."""
+    result = bare_pipeline.run("req-w-fields",
+                               _request(report_text="FINDINGS: 7 mm nodule. "
+                                                    "MRN: 4452819."))
+    assert result.approved is True
+    assert {d.field for d in result.dispositions}
+    stored = bare_pipeline.audit.get("req-w-fields")[0]
+    assert stored.redacted_field_names
+    assert all(name == name.lower() for name in stored.redacted_field_names)
+
+
 # -- The modes are configuration, not parameters -----------------------------
 
 

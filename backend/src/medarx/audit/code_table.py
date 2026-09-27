@@ -133,28 +133,30 @@ def stages_reached(layer: str | None) -> tuple[str, ...]:
 #: The table. Ordered by layer, then by code, so it reads the way the pipeline
 #: runs; membership is what is contractual, not this order.
 CODE_TABLE: tuple[CodeEntry, ...] = (
-    # -- J, the application API. Not written in Phase 1; the codes exist because
-    # the contract's row-1 example publishes them.
-    CodeEntry("ARBITRARY_DICOM_OBJECT_REJECTED", (),
-              "J: an arbitrary DICOM object at the request surface. J does not exist yet."),
-    CodeEntry("FREE_FORM_PROMPT_REJECTED", (),
-              "J: a free-form prompt at the request surface. J does not exist yet."),
-    CodeEntry("FUNCTION_NOT_PERMITTED", (),
-              "J: the function is not permitted for this scope. J does not exist "
-              "yet. **Unadvertised:** no published example carries this code, so "
-              "the example-reachability sweep in test_contract_schemas.py cannot "
-              "see it at all — there is no example for it to be unreachable in. "
-              "It is therefore tracked only in the staleness direction, in "
-              "_RESERVED_NOT_ADVERTISED, which fails if the package starts "
-              "emitting it. Owner: component J, unwritten. Until J exists, this "
-              "row and the contract's ActionCode description are the only two "
-              "things reserving it."),
-    CodeEntry("UNAUTHORIZED_SCOPE", (),
-              "J: the study scope is not authorized. J does not exist yet. "
-              "**Unadvertised**, and tracked exactly as FUNCTION_NOT_PERMITTED "
-              "is: no published example carries it, so the only direction "
-              "available is the staleness check in _RESERVED_NOT_ADVERTISED. "
-              "Owner: component J, unwritten."),
+    # -- J, the application API.
+    CodeEntry("ARBITRARY_DICOM_OBJECT_REJECTED", ("J",),
+              "J: a body carrying a property that would hand this surface a DICOM "
+              "object. The refusal is a 400, not a block receipt — the contract's "
+              "`ExecutionRequest` description names `dicom_object` and "
+              "`pixel_data` as malformed requests — so the code lands on the audit "
+              "record, where a non-raw disposition code belongs. Owned by J and "
+              "emitted from medarx.api.surface."),
+    CodeEntry("FREE_FORM_PROMPT_REJECTED", ("J",),
+              "J: a body carrying a property that would hand this surface a "
+              "free-form prompt. Same route as the DICOM-object code: a 400, "
+              "recorded rather than returned. Owned by J and emitted from "
+              "medarx.api.surface."),
+    CodeEntry("FUNCTION_NOT_PERMITTED", ("J",),
+              "J: the function is not permitted in the caller's scope. **Still "
+              "unadvertised** — no published example carries this code, so the "
+              "example-reachability sweep in test_contract_schemas.py cannot see "
+              "it, and what enforces it now is "
+              "`test_the_two_codes_no_example_advertises_are_component_js`. "
+              "Emitted by medarx.api.surface on the record for a 403."),
+    CodeEntry("UNAUTHORIZED_SCOPE", ("J",),
+              "J: the study scope is not authorized, or no scope was presented at "
+              "all. Unadvertised and tracked exactly as FUNCTION_NOT_PERMITTED "
+              "is. Emitted by medarx.api.surface on the record for a 403."),
 
     # -- A, the structured payload extractor.
     CodeEntry("MALFORMED_METADATA", ("A",),
