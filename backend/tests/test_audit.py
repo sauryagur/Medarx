@@ -847,13 +847,19 @@ def _contract_published_values() -> list[tuple[str, object]]:
     read, because a closed enum is a published vocabulary too — and `Prior
     Summary` is exactly the member a shape heuristic used to refuse.
 
-    An array property publishes its *element* values, which for a `$ref`ed
-    element means resolving `items` and reading the vocabulary there — that is
-    how `action_codes` publishes the `ActionCode` enum. Each element is written
-    as a single-element list, which is how a caller would write it. Non-string
-    values are skipped: the only ones published are `chain_verified`'s
-    `examples: [true]`, and that field is computed on read and never stored, so
-    its property name is not in `ALLOWED_AUDIT_FIELDS` to begin with.
+    An array property publishes its values in two places: on the property itself
+    (`redacted_field_names`) and on a `$ref`ed `items` schema (`action_codes`,
+    which inherits `ActionCode`'s enum). Both are read, or one goes unswept. A
+    well-formed array example is a list and is used as it stands. A bare string
+    on an array property is the *element* spelling, which is not a well-formed
+    value for the property; it is wrapped so the sweep still covers the value,
+    and `test_contract_schemas.py::
+    test_every_example_the_contract_publishes_validates_against_its_schema` is
+    what names that shape a defect — the contract published one, and it is
+    fixed. Non-string, non-list values are skipped:
+    the only ones published are `chain_verified`'s `examples: [true]`, and that
+    field is computed on read and never stored, so its property name is not in
+    `ALLOWED_AUDIT_FIELDS` to begin with.
     """
     doc = yaml.safe_load(CONTRACT.read_text(encoding="utf-8"))
     schemas = doc["components"]["schemas"]
@@ -872,10 +878,10 @@ def _contract_published_values() -> list[tuple[str, object]]:
                 continue
             resolved = deref(prop) or {}
             is_list = resolved.get("type") == "array"
-            # An array property publishes element values in two places: on the
-            # property itself (`redacted_field_names`) and on a `$ref`ed
-            # `items` schema (`action_codes`, which inherits `ActionCode`'s
-            # enum). Read both, or one of them goes unswept.
+            # An array property publishes values in two places: on the property
+            # itself (`redacted_field_names`) and on a `$ref`ed `items` schema
+            # (`action_codes`, which inherits `ActionCode`'s enum). Read both,
+            # or one of them goes unswept.
             sources = [resolved]
             if is_list:
                 sources.append(deref(resolved.get("items") or {}) or {})
@@ -886,9 +892,12 @@ def _contract_published_values() -> list[tuple[str, object]]:
                 values.extend(source.get("examples") or ())
                 values.extend(source.get("enum") or ())
             for value in values:
-                if not isinstance(value, str):
-                    continue
-                published.append((name, [value] if is_list else value))
+                if isinstance(value, list):
+                    # A well-formed array example: the value is the whole list.
+                    if is_list:
+                        published.append((name, value))
+                elif isinstance(value, str):
+                    published.append((name, [value] if is_list else value))
     return published
 
 

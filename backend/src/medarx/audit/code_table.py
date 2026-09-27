@@ -10,6 +10,14 @@ A code classifies a refusal; it never carries what was refused. That is enforced
 upstream by `medarx.models.CODE_SHAPE`, which admits no digits at all, so a
 medical record number cannot ride in on a code.
 
+Two reserved members, `FUNCTION_NOT_PERMITTED` and `UNAUTHORIZED_SCOPE`, are
+tracked differently from the other three and say so in their own rows: no
+published example carries them, so the example-reachability sweep in
+`tests/test_contract_schemas.py` cannot see them at all. They are declared in
+`_RESERVED_NOT_ADVERTISED` there and checked only for staleness. The gap is
+written down rather than smoothed over — a code no example advertises is a code
+no example sweep can enforce.
+
 `PIPELINE_STAGES` is the ordered set of stage boundaries the privacy pipeline
 passes through. No stage is stored: a record carries the `layer` that refused
 it, and `stages` is derived from that at read time by `stages_reached`, so the
@@ -132,9 +140,21 @@ CODE_TABLE: tuple[CodeEntry, ...] = (
     CodeEntry("FREE_FORM_PROMPT_REJECTED", (),
               "J: a free-form prompt at the request surface. J does not exist yet."),
     CodeEntry("FUNCTION_NOT_PERMITTED", (),
-              "J: the function is not permitted for this scope. J does not exist yet."),
+              "J: the function is not permitted for this scope. J does not exist "
+              "yet. **Unadvertised:** no published example carries this code, so "
+              "the example-reachability sweep in test_contract_schemas.py cannot "
+              "see it at all — there is no example for it to be unreachable in. "
+              "It is therefore tracked only in the staleness direction, in "
+              "_RESERVED_NOT_ADVERTISED, which fails if the package starts "
+              "emitting it. Owner: component J, unwritten. Until J exists, this "
+              "row and the contract's ActionCode description are the only two "
+              "things reserving it."),
     CodeEntry("UNAUTHORIZED_SCOPE", (),
-              "J: the study scope is not authorized. J does not exist yet."),
+              "J: the study scope is not authorized. J does not exist yet. "
+              "**Unadvertised**, and tracked exactly as FUNCTION_NOT_PERMITTED "
+              "is: no published example carries it, so the only direction "
+              "available is the staleness check in _RESERVED_NOT_ADVERTISED. "
+              "Owner: component J, unwritten."),
 
     # -- A, the structured payload extractor.
     CodeEntry("MALFORMED_METADATA", ("A",),

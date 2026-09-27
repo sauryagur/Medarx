@@ -650,15 +650,30 @@ components:
         in full.
 
         The set is an open enumeration at the schema level because G's table is the authoritative
-        source and is expected to grow. The values below are **not** all emitted in Phase 1:
-        `ARBITRARY_DICOM_OBJECT_REJECTED`, `FREE_FORM_PROMPT_REJECTED`, `FUNCTION_NOT_PERMITTED` and
-        `UNAUTHORIZED_SCOPE` belong to the application API (component J), which is not written yet,
-        and `UNRESOLVED_DISPOSITION` is declared and deliberately unemitted because component E
-        blocks an unresolved disposition under the disposition's own code. Those five are *reserved*,
-        not implemented, and each is tracked as pending in
-        `backend/tests/test_contract_schemas.py::_NOT_YET_EMITTED`, which fails the moment the
-        package starts emitting one. A code published for a block the kernel cannot produce would be
-        a claim about behaviour, so this description does not make one.
+        source and is expected to grow. The values below are **not** all emitted in Phase 1, and the
+        five that are not fall into two groups that are tracked differently.
+
+        Three are advertised by a published example, so the example-reachability sweep can see that
+        they are unreachable: `ARBITRARY_DICOM_OBJECT_REJECTED` and `FREE_FORM_PROMPT_REJECTED`,
+        which belong to the application API's request surface (component J, not written yet), and
+        `UNRESOLVED_DISPOSITION`, which is declared and deliberately unemitted because component E
+        blocks an unresolved disposition under the disposition's own code. Each of the three is
+        listed as pending in `backend/tests/test_contract_schemas.py::_NOT_YET_EMITTED`, and that
+        set is held equal to the pairs the contract's own examples advertise, so it cannot grow to
+        cover a real failure.
+
+        Two are not advertised anywhere: `FUNCTION_NOT_PERMITTED` and `UNAUTHORIZED_SCOPE` are
+        reserved for component J, and no published example carries them. A code that appears in no
+        example is invisible to the example-reachability sweep by construction — there is no
+        example for it to be unreachable *in* — so these two are declared in
+        `backend/tests/test_contract_schemas.py::_RESERVED_NOT_ADVERTISED` instead and are checked
+        in the one direction that is available to them: that the package has not started emitting
+        them. The gap is recorded rather than smoothed: until J is written, these two are reserved
+        by this description and by G's code table alone, and nothing would catch a component that
+        began emitting one without also declaring it.
+
+        A code published for a block the kernel cannot produce would be a claim about behaviour, so
+        this description does not make one.
       examples:
         - NER_UNRESOLVED
       enum:
@@ -1273,7 +1288,8 @@ components:
             second store of what was in it.
           items:
             type: string
-          examples: [report_text, dicom_metadata.patient_id, dicom_metadata.accession_number]
+          examples:
+            - [report_text, dicom_metadata.patient_id, dicom_metadata.accession_number]
         action_codes:
           type: array
           description: Non-raw disposition codes recorded for this request.

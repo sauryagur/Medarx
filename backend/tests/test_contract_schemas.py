@@ -35,6 +35,7 @@ running the layer that produces it, in `test_redaction_layers.py`.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -342,32 +343,61 @@ def test_the_200_sweep_covers_every_operation():
 
 
 def _published_examples(doc: dict) -> list[tuple[str, dict, object]]:
-    """Every `examples` value the contract publishes, with the schema for it.
+    """Every example value the contract publishes anywhere, with its schema.
 
-    Two shapes exist here: a `properties.<p>.examples` list, whose schema is
-    the object declaring it, and a media type's `examples.<name>.value`, whose
-    schema is the sibling `schema`.
+    The whole document is walked, not `components.schemas` and not the audit
+    record, because the defect this catches is not confined to one schema: a
+    property-level `examples` list, a singular `example`, and a media type's
+    named `examples.<name>.value` are three different places to publish one, and
+    the previous version of this sweep read only the second and third. That is
+    why `AuditRecord.redacted_field_names` — a `type: array` property
+    publishing three bare strings — went unnoticed: no node it looked for sits
+    on a property at all.
+
+    A media type's `examples` is a *mapping* of names to `{value: …}`, while a
+    schema's `examples` is a *list* of values; both spellings are handled and
+    neither is guessed at from the other's shape.
     """
     found: list[tuple[str, dict, object]] = []
 
     def walk(node: object, where: str) -> None:
         if isinstance(node, dict):
-            if "properties" in node and isinstance(node.get("examples"), list):
-                found.extend((f"{where}.examples", node, v) for v in node["examples"])
-            for media_type, media in (node.get("content") or {}).items():
-                if not isinstance(media, dict) or "schema" not in media:
-                    continue
-                found.extend(
-                    (f"{where}.{media_type}.{name}", media["schema"], entry["value"])
-                    for name, entry in (media.get("examples") or {}).items()
-                )
+            named = node.get("examples")
+            is_schema = any(
+                key in node
+                for key in ("type", "$ref", "properties", "allOf", "anyOf", "oneOf")
+            )
+            # A schema publishes a *list* of values; a media type publishes a
+            # *mapping* of name to `{value: …}`. Both spellings exist in this
+            # document and they are told apart by shape, not by position,
+            # because a property-level `examples` is a list and is exactly the
+            # case the previous version of this sweep could not see.
+            if isinstance(named, list) and is_schema:
+                for index, value in enumerate(named):
+                    found.append((f"{where}.examples[{index}]", node, value))
+            schema = node.get("schema")
+            if isinstance(schema, dict):
+                if isinstance(named, dict):
+                    for name, entry in named.items():
+                        if isinstance(entry, dict) and "value" in entry:
+                            found.append(
+                                (f"{where}.examples.{name}", schema, entry["value"])
+                            )
+                if "example" in node:
+                    found.append((f"{where}.example", schema, node["example"]))
+            elif is_schema and "example" in node:
+                # A singular `example` on a schema, a parameter or a header: the
+                # node itself is the schema it is an example of.
+                found.append((f"{where}.example", node, node["example"]))
             for key, value in node.items():
+                if key in ("description", "title", "example"):
+                    continue
                 walk(value, f"{where}.{key}")
         elif isinstance(node, list):
             for index, value in enumerate(node):
                 walk(value, f"{where}[{index}]")
 
-    walk(doc["components"], "components")
+    walk(doc, "contract")
     return found
 
 
@@ -380,6 +410,82 @@ def test_every_example_the_contract_publishes_validates_against_its_schema():
             _validator_for(doc, schema, formats=True).validate(value)
         except ValidationError as exc:
             pytest.fail(f"{where} publishes a value its own schema rejects: {exc.message}")
+
+
+#: A digest is `<algorithm>:<hex>` or bare `<hex>`, and the hex length is a
+#: property of the algorithm rather than a choice. This is the definition the
+#: contract's own `sha256:` spelling is written against, so a value carrying
+#: that label has to be that algorithm's digest — the label is a claim, and a
+#: 63-character one is as false as `sha256:` on a word.
+_DIGEST_ALGORITHMS: dict[str, int] = {
+    "md5": 32,
+    "sha1": 40,
+    "sha224": 56,
+    "sha256": 64,
+    "sha384": 96,
+    "sha512": 128,
+}
+_DIGEST_VALUE = re.compile(r"\A(?:([a-z0-9]+):)?([0-9a-f]+)\Z")
+
+
+def test_every_published_hash_example_is_a_digest_of_the_algorithm_it_names():
+    """The one defect JSON Schema cannot see, and the one the contract shipped.
+
+    `ExecutionResponse.approved_payload_hash` published
+    `sha256:2f1a0c9d…` with **63** hex characters. Nothing in the schema
+    rejects it — the property is `type: string` with no `pattern` and no
+    `format` — so `test_every_example_the_contract_publishes_validates_against_its_schema`
+    passed, and the storage policy was the only thing that noticed, by refusing
+    the contract's own example. Which is the wrong place for a contract defect
+    to surface.
+
+    The rule is a definition and not a shape guess: a property whose own name
+    declares it a hash must publish a value that *is* one, and if the value
+    names an algorithm, the hex length is that algorithm's digest size. A
+    property with no example is not this test's business, and a property that
+    is not declared a hash is not either.
+    """
+    doc = _contract()
+    checked = 0
+    for name, body in doc["components"]["schemas"].items():
+        for prop, schema in (body.get("properties") or {}).items():
+            if not prop.endswith(("_hash", "_digest")):
+                continue
+            published = [
+                v
+                for v in (
+                    *([schema["example"]] if "example" in schema else []),
+                    *(schema.get("examples") or []),
+                )
+            ]
+            for value in published:
+                checked += 1
+                assert isinstance(value, str), (
+                    f"{name}.{prop} publishes {value!r}; a hash example is a string"
+                )
+                match = _DIGEST_VALUE.match(value)
+                assert match, (
+                    f"{name}.{prop} publishes {value!r}, which is not a digest "
+                    f"in either the '<algorithm>:<hex>' or the bare-hex spelling"
+                )
+                algorithm, hexdigits = match.group(1), match.group(2)
+                if algorithm is not None:
+                    assert algorithm in _DIGEST_ALGORITHMS, (
+                        f"{name}.{prop} labels its example {algorithm!r}, which is "
+                        f"not one of {sorted(_DIGEST_ALGORITHMS)}"
+                    )
+                    expected = _DIGEST_ALGORITHMS[algorithm]
+                    assert len(hexdigits) == expected, (
+                        f"{name}.{prop} publishes {value!r}: {algorithm} is a "
+                        f"{expected}-character digest and the example has "
+                        f"{len(hexdigits)}. No digest gate in the package can "
+                        f"accept it without being weakened, so the example is "
+                        f"the defect, not the gate."
+                    )
+    assert checked, "the hash-example sweep found nothing; it is not reading the contract"
+
+
+
 
 
 # -- An example must describe a receipt the kernel can produce ----------------
@@ -530,6 +636,72 @@ def test_the_pending_pairs_are_exactly_the_ones_the_contract_actually_publishes(
         if code not in emitted
     }
     assert _NOT_YET_EMITTED == published
+
+#: Reserved members of the `ActionCode` enum that no published example carries,
+#: so the example-reachability sweep above cannot see them: there is no example
+#: for them to be unreachable *in*, and `_NOT_YET_EMITTED` is deliberately held
+#: equal to the pairs the contract's own examples advertise, so adding them
+#: there would fail the equality assertion above.
+#:
+#: Both belong to component J, which is not written. They are recorded rather
+#: than left implicit because a code that nothing tracks is a code that nothing
+#: would catch: the sweep below is the only direction available to them, and it
+#: is the direction that matters — the moment the package starts emitting one,
+#: the contract's description is claiming a reserved code is implemented, and
+#: that is a claim about behaviour.
+#:
+#: Deliberately *not* merged into `_NOT_YET_EMITTED`. Widening the
+#: example-reachability exemption to hold codes no example advertises would make
+#: that set a place where a real failure could hide, which is exactly what the
+#: equality assertion exists to prevent.
+_RESERVED_NOT_ADVERTISED: frozenset[str] = frozenset(
+    {"FUNCTION_NOT_PERMITTED", "UNAUTHORIZED_SCOPE"}
+)
+
+
+def test_a_reserved_unadvertised_code_is_not_already_emitted():
+    """The staleness check for the codes the example sweep cannot see.
+
+    The same signal as `test_a_pending_pair_is_not_already_emitted`, and for the
+    same reason — a stale reservation is how a contract's claim about what is
+    implemented quietly stops being true. The fix is always to delete the entry
+    and let whichever sweep can see the code take over from there.
+    """
+    emitted = {code for codes in _emitted_action_codes().values() for code in codes}
+    stale = sorted(_RESERVED_NOT_ADVERTISED & emitted)
+    assert not stale, (
+        f"{stale} are reserved for an unwritten component and appear in no "
+        f"published example, but the package now emits them; delete them from "
+        f"_RESERVED_NOT_ADVERTISED and decide whether the contract still "
+        f"describes them as unimplemented"
+    )
+
+
+def test_the_reserved_unadvertised_codes_are_still_reserved_in_the_contract():
+    """The declaration matches the artefact: still enum members, still no example.
+
+    Two halves, and both are what make the declaration mean anything. If a code
+    left this set the contract would stop describing it as reserved. If an
+    example started carrying it, it would become reachable-by-example and belong
+    in `_NOT_YET_EMITTED`, where the example-reachability sweep can enforce it —
+    and this says so, rather than leaving the move to be discovered later as a
+    stale reservation.
+    """
+    doc = _contract()
+    members = set(doc["components"]["schemas"]["ActionCode"]["enum"])
+    advertised = {
+        code for _where, _layer, codes in _example_receipts(doc) for code in codes
+    }
+    missing = sorted(_RESERVED_NOT_ADVERTISED - members)
+    assert not missing, (
+        f"{missing} are declared reserved here but are not members of the "
+        f"ActionCode enum"
+    )
+    newly_advertised = sorted(_RESERVED_NOT_ADVERTISED & advertised)
+    assert not newly_advertised, (
+        f"{newly_advertised} now appear in a published example, so they are "
+        f"reachable-by-example and belong in _NOT_YET_EMITTED, not here"
+    )
 
 
 # -- The contract and layer A must name the same things ------------------------
