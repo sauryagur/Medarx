@@ -386,6 +386,30 @@ def test_a_shortened_timeout_is_honoured_rather_than_ignored():
         assert gw.send(_approve(gw)).content == "Findings: 7mm nodule."
 
 
+
+def test_a_hung_provider_is_given_up_on_once_and_not_retried():
+    # The other half of the timeout, and it needs no model. A local model server
+    # that accepts a request and never answers is a real hang; the client must
+    # give up on it in the configured time rather than reconnect. A retry would
+    # be worse than a hang on this deployment: a second request to a model that
+    # is mid-inference on a host with no swap is how a slow answer becomes an
+    # out-of-memory kill, and the retry would be invisible in the audit record
+    # because only one execution was approved.
+    with _StubProvider(body=b"{}", delay_s=5.0) as stub:
+        gw = _client_for(stub, gateway_timeout_s=0.25)
+        with pytest.raises(ProviderTransportError):
+            gw.send(_approve(gw))
+        assert len(stub.requests) == 1, (
+            f"{len(stub.requests)} requests reached a provider that never answered; "
+            "a read timeout is a give-up, not a retry"
+        )
+    # The bytes are still reported even though nothing came back: the request
+    # did reach the transport, which is exactly what the egress evidence is for.
+    assert gw.last_request_body() == json.dumps(
+        gw.build_body(REQUEST), separators=(",", ":")
+    ).encode("utf-8")
+
+
 # -- Success path -----------------------------------------------------------
 
 
@@ -554,6 +578,57 @@ def test_the_three_failures_are_three_distinct_types():
     assert not issubclass(ProviderStatusError, GatewayError)
     assert not issubclass(ProviderTransportError, GatewayError)
     assert not issubclass(ProviderResponseError, GatewayError)
+
+
+# -- An empty answer is not a draft -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "content"),
+    [
+        ("empty string", ""),
+        ("a single space", " "),
+        ("newline only", "\n"),
+        ("whitespace only", "  \n\t "),
+    ],
+)
+def test_an_answer_with_no_text_is_refused_rather_than_returned_as_a_draft(label, content):
+    # A 4B local model asked to draft a report section can decline, and a
+    # decline is still text. What must never reach the surface is a *blank*:
+    # an empty string is shaped exactly like a successful draft, is rendered as
+    # one, and is the failure a reader cannot see. Judging the prose is Phase 4
+    # and this component does not do it — so the line is drawn at "is there any
+    # text at all", which is mechanical and has no false positives.
+    body = json.dumps(
+        {"object": "chat.completion", "model": "medarx-demo-model",
+         "choices": [{"index": 0, "message": {"role": "assistant", "content": content},
+                      "finish_reason": "stop"}]}
+    ).encode()
+    with _StubProvider(body=body) as stub:
+        gw = _client_for(stub)
+        with pytest.raises(ProviderResponseError) as ei:
+            gw.send(_approve(gw))
+    assert "not a draft" in str(ei.value)
+    # Not a privacy block: nothing was withheld for a privacy reason, so this
+    # must not be able to reach the audit log as a 422.
+    assert not isinstance(ei.value, GatewayError)
+    assert len(stub.requests) == 1, "the request was sent; the answer was not usable"
+
+
+def test_a_refusal_in_prose_is_not_caught_by_the_empty_answer_guard():
+    # The other side of the line, and the reason the line is where it is. The
+    # kernel does not judge quality, so a textual decline reaches the human
+    # who is supposed to reject it rather than being silently swallowed here.
+    decline = "I'm sorry, I can't help with that request."
+    body = json.dumps(
+        {"object": "chat.completion", "model": "medarx-demo-model",
+         "choices": [{"index": 0, "message": {"role": "assistant", "content": decline},
+                      "finish_reason": "stop"}]}
+    ).encode()
+    with _StubProvider(body=body) as stub:
+        gw = _client_for(stub)
+        assert gw.send(_approve(gw)).content == decline
+
 
 
 def test_a_provider_failure_is_not_a_privacy_block():

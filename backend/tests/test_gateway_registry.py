@@ -10,7 +10,30 @@ from medarx.gateway.model_registry import ALLOWED_MODELS, is_allowed
 
 
 def test_registry_contains_exactly_the_declared_models():
-    assert ALLOWED_MODELS == frozenset({"medarx-demo-model", "openrouter/mock-model"})
+    # The whole set, spelled out. Phase 2 added exactly one member,
+    # `gur-prime-2` — the local model this deployment is pointed at — and the
+    # point of pinning the set rather than asserting a membership is that a
+    # *widening* is a visible change to this line rather than a quiet one. The
+    # registry is the whole of design §6 row 7's local refusal, and a registry
+    # that grows to make something work is the same defect as a payload check
+    # that grows to let a leak through.
+    assert ALLOWED_MODELS == frozenset({
+        "medarx-demo-model",
+        "openrouter/mock-model",
+        "gur-prime-2",
+    })
+
+
+def test_the_local_model_is_registered_and_its_tagged_spelling_is_not():
+    # Ollama reports this model as `gur-prime-2:latest` and accepts the
+    # untagged name as well. The untagged name is the one the deployment
+    # declares, so it is the one registered. The tagged spelling is a different
+    # identifier and is refused: admitting it would mean the registry resolves
+    # names, and a registry that resolves names is a registry whose "unknown"
+    # depends on which normaliser ran.
+    assert is_allowed("gur-prime-2") is True
+    assert is_allowed("gur-prime-2:latest") is False
+    assert is_allowed("gur-prime-2:8b") is False
 
 
 def test_unknown_model_is_not_allowed():

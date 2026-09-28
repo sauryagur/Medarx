@@ -571,4 +571,30 @@ class ModelGateway:
             raise ProviderResponseError(
                 "the provider's body carries no choices[0].message.content string"
             )
+        if not content.strip():
+            # **An empty answer is not a draft, and the kernel says so here.**
+            #
+            # This is the one place the kernel declines to hand the surface a
+            # model answer, and it declines on a mechanical property only: the
+            # text is empty or whitespace. Everything beyond that — prose that
+            # declines the task, prose that is not a report section, prose that
+            # invents a finding — is **output validation, and it is Phase 4's**,
+            # and this component does not claim to do it. The distinction is
+            # drawn here rather than in a comment because the difference is
+            # load-bearing: a refusal in prose is still something a human reads
+            # and rejects, and an empty string is a draft-shaped hole that reads
+            # on screen as a successful blank.
+            #
+            # It is a `ProviderResponseError` and therefore a `ProviderError`,
+            # which is deliberately **not** a `MedarxError`: nothing was withheld
+            # for a privacy reason, so this must not become a 422 block receipt
+            # in the audit log. A provider that answers 2xx with no text is the
+            # same condition as one that answers 2xx with a body that is not a
+            # completion — a call that succeeded and produced nothing usable —
+            # and it is answered the same way.
+            raise ProviderResponseError(
+                "the provider's body carries choices[0].message.content but it is "
+                f"empty ({len(content)} characters); an empty answer is not a "
+                "draft and is not returned as one"
+            )
         return ModelResponse(model_id=_model_id_of(raw), content=content, raw=raw)

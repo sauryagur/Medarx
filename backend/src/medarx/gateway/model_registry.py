@@ -30,6 +30,19 @@ __all__ = ["ALLOWED_MODELS", "is_allowed"]
 ALLOWED_MODELS: frozenset[str] = frozenset({
     "medarx-demo-model",
     "openrouter/mock-model",
+    # The local model Ollama serves on this host (`gur-prime-2`, qwen3 4.0B,
+    # Q4_K_M). Phase 2 added it because the Phase 2 deployment is *pointed at
+    # it* — `MEDARX_GATEWAY_MODEL=gur-prime-2` — and the registry is the closed
+    # set of names this kernel is willing to put on the wire. It is the name
+    # the deployment declares, not a discovered one: nothing here queries a
+    # provider, and adding a member is a decision somebody makes on purpose.
+    #
+    # Ollama's own tag list reports the model as `gur-prime-2:latest` and accepts
+    # the untagged `gur-prime-2`; the untagged name is the one registered, and
+    # `gur-prime-2:latest` is deliberately **not** a member, so a request naming
+    # the tagged spelling is refused here rather than resolved by a
+    # normalisation step somewhere closer to the wire.
+    "gur-prime-2",
 })
 
 
