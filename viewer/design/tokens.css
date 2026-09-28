@@ -1,0 +1,130 @@
+/*
+ * GENERATED FILE - do not edit.
+ * Source: viewer/design/tokens.json
+ * Rebuild: cd viewer && bun run tokens
+ *
+ * 66 custom properties. Every one is referenced by viewer/src or
+ * reserved with a named consumer; the build fails otherwise.
+ */
+:root {
+  --medarx-border-hairline: 1px;
+  --medarx-color-accent: #80C9C5;
+  --medarx-color-accent-foreground: #071413;
+  --medarx-color-approved: #78C69D;
+  --medarx-color-blocked: #F09985;
+  --medarx-color-border: #2A3034;
+  --medarx-color-canvas: #08090A;
+  --medarx-color-caution: #E9C277;
+  --medarx-color-focus: #A5DAD7;
+  --medarx-color-foreground: #F5F7F8;
+  --medarx-color-muted: #A1A8AE;
+  --medarx-color-panel: #111315;
+  --medarx-color-raised: #191C1F;
+  --medarx-color-subtle: #737D85;
+  --medarx-color-viewer: #050607;
+  --medarx-copilot-panel-background-color: #111315;
+  --medarx-copilot-panel-border-color: #2A3034;
+  --medarx-copilot-panel-default-width: 400px;
+  --medarx-panel-maxWidth: 560px;
+  --medarx-panel-minWidth: 360px;
+  --medarx-panel-separatorStep: {spacing.lg};
+  --medarx-primary-button-background-color: #80C9C5;
+  --medarx-primary-button-min-height: 40px;
+  --medarx-primary-button-rounded: 8px;
+  --medarx-primary-button-text-color: #071413;
+  --medarx-radius-lg: 12px;
+  --medarx-radius-md: 8px;
+  --medarx-radius-sm: 4px;
+  --medarx-report-editor-background-color: #191C1F;
+  --medarx-report-editor-rounded: 8px;
+  --medarx-report-editor-text-color: #F5F7F8;
+  --medarx-secondary-button-background-color: #191C1F;
+  --medarx-secondary-button-border-color: #2A3034;
+  --medarx-secondary-button-min-height: 40px;
+  --medarx-secondary-button-rounded: 8px;
+  --medarx-secondary-button-text-color: #F5F7F8;
+  --medarx-spacing-lg: 20px;
+  --medarx-spacing-md: 12px;
+  --medarx-spacing-sm: 8px;
+  --medarx-spacing-xl: 32px;
+  --medarx-spacing-xs: 4px;
+  --medarx-type-body-font-family: Inter;
+  --medarx-type-body-font-size: 14px;
+  --medarx-type-body-font-weight: 400;
+  --medarx-type-body-line-height: 1.5;
+  --medarx-type-heading-lg-font-family: Inter;
+  --medarx-type-heading-lg-font-size: 28px;
+  --medarx-type-heading-lg-font-weight: 550;
+  --medarx-type-heading-lg-letter-spacing: -0.02em;
+  --medarx-type-heading-lg-line-height: 1.2;
+  --medarx-type-heading-md-font-family: Inter;
+  --medarx-type-heading-md-font-size: 20px;
+  --medarx-type-heading-md-font-weight: 550;
+  --medarx-type-heading-md-line-height: 1.25;
+  --medarx-type-label-font-family: Inter;
+  --medarx-type-label-font-size: 12px;
+  --medarx-type-label-font-weight: 550;
+  --medarx-type-label-line-height: 1.35;
+  --medarx-type-metadata-font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --medarx-type-metadata-font-size: 11px;
+  --medarx-type-metadata-font-weight: 400;
+  --medarx-type-metadata-line-height: 1.45;
+  --medarx-type-report-font-family: Inter;
+  --medarx-type-report-font-size: 15px;
+  --medarx-type-report-font-weight: 400;
+  --medarx-type-report-line-height: 1.65;
+}
+
+/* Focus is a token, not a browser default, so a component cannot lose it by
+     forgetting an outline. Design: "strong visible focus", Interaction and
+     accessibility. :focus-visible is the whole mechanism: a mouse click does
+     not paint a ring, a keyboard press does. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--medarx-color-focus);
+  outline-offset: 2px;
+  border-radius: var(--medarx-radius-sm);
+}
+
+/* Reduced motion. Design: "reduced-motion behaviour". Every transition and
+     animation in the panel is declared here, so one media query removes all of
+     them and no component has to consult a preference itself. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Visually hidden, still announced. Emitted here rather than written in a
+     component so the pixel dimensions of the clip are not hand-written values
+     in src/, where the literal rule would (correctly) reject them. */
+.medarx-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Page setup, emitted with the rest so that filling the window needs no
+     hand-written length anywhere under src/. */
+html,
+body,
+#medarx-root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--medarx-color-canvas);
+  color: var(--medarx-color-foreground);
+  font-family: var(--medarx-type-body-fontFamily);
+}
