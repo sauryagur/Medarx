@@ -12,7 +12,17 @@ node_modules/
 dist/
 
 # Medarx artifacts
-capture/
+#
+# `/capture/` is anchored to the repository root on purpose. The unanchored
+# `capture/` matched `infra/capture/` as well — so the agreement check and the
+# capture script, which are source, sat inside an ignore rule meant for the
+# directory a capture *writes to*, and `git add infra/capture` added nothing.
+/capture/
 *.pcap
+# The committed capture readback under `backend/tests/fixtures/capture/` is
+# deliberately *not* matched by either rule: the hex readback of a capture this
+# host actually took is the evidence the agreement check is tested against, and
+# a check proven only against a string someone typed is not proven. The
+# readbacks are named `*.pcap.txt` so `*.pcap` leaves them alone.
 evals/reports/
 evals/synthetic_phi/eval_results.json

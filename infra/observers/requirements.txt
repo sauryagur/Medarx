@@ -1,0 +1,12 @@
+# The observer has no third-party dependency.
+#
+# `observer.py` is a stdlib `http.server` application and nothing else: a second
+# opinion about what left Medarx should not itself be a package-resolution
+# problem, and there is no framework here to pin. The file exists because the
+# image build installs from it, so "this image has no dependencies" is a fact
+# the build can be asked for rather than a claim in a comment.
+#
+# The consequence is worth stating: a captured request body is stored by
+# `http.server`'s own reader, and no third-party parser ever touches it on the
+# way to disk. The re-encoding this component exists to avoid cannot happen
+# here, because there is nothing in the path that would perform one.
