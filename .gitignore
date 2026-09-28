@@ -27,7 +27,3 @@ dist/
 evals/reports/
 evals/synthetic_phi/eval_results.json
 
-# The handoff is a working document, not a tracked one. `backend/README.md` is
-# the only document this repository tracks, and a `git add -A` that swept this
-# in would quietly change that.
-/HANDOFF.md
