@@ -8,6 +8,10 @@
 #   start_capture.sh readback <out-dir>
 #   start_capture.sh interface <network>
 #
+#   MEDARX_CAPTURE_INTERFACE=any start_capture.sh start <network> <seconds> <out-dir>
+#
+#   MEDARX_CAPTURE_FILTER='tcp port 11434' start_capture.sh start <network> <seconds> <out-dir>
+#
 # ## The one thing this script exists to get right
 #
 # **The pcap is always written with `-w` and read back with `-r`.** It is never
@@ -64,7 +68,19 @@ cmd_start() {
     [ "$#" -eq 3 ] || die "usage: start_capture.sh start <network> <seconds> <out-dir>"
     local network="$1" seconds="$2" out_dir="$3"
     local iface name
-    iface="$(bridge_for_network "$network")"
+    # `MEDARX_CAPTURE_INTERFACE` overrides the discovered bridge, and is the
+    # same knob `infra/compose.yaml` already exposes as
+    # `MEDARX_BRIDGE_INTERFACE`. It exists because Phase 2's provider is a
+    # model on this host: the gateway reaches it over `lo`, not over a Docker
+    # bridge, so a capture that can only watch `br-<id>` is watching the wrong
+    # interface for exactly the traffic component I exists to observe. `any` is
+    # broad — it is the whole host, not this project's — so the value printed by
+    # `start` is what the run's evidence is about.
+    if [ -n "${MEDARX_CAPTURE_INTERFACE:-}" ]; then
+        iface="$MEDARX_CAPTURE_INTERFACE"
+    else
+        iface="$(bridge_for_network "$network")"
+    fi
     mkdir -p "$out_dir"
     out_dir="$(cd "$out_dir" && pwd)"
 
@@ -88,13 +104,28 @@ cmd_start() {
     # before the traffic of interest keeps losing it. `-U` writes each packet
     # out as it arrives rather than in blocks, so what is in the buffer is what
     # is on disk if the process is killed.
+    #
+    # `MEDARX_CAPTURE_FILTER` is a tcpdump BPF expression, word-split onto the
+    # end of the command line, and is empty by default so the beats' behaviour
+    # is unchanged. It exists for the same reason `MEDARX_CAPTURE_INTERFACE`
+    # does and for a reason this project has already been bitten by: on a
+    # shared host, `lo` carries **every other process's** loopback traffic, and
+    # a check that sweeps "every request body in the capture" for an identifier
+    # then finds another program's request and reports a leak that never
+    # happened. The capture has to be about one conversation, and a port filter
+    # is how it says which.
+    local -a filter=()
+    if [ -n "${MEDARX_CAPTURE_FILTER:-}" ]; then
+        # shellcheck disable=SC2206 - deliberate word splitting into argv.
+        filter=(${MEDARX_CAPTURE_FILTER})
+    fi
     docker run -d \
         --name "$name" \
         --network host \
         --cap-add=NET_RAW \
         -v "$out_dir:/out" \
         "${limits[@]}" \
-        "$IMAGE" -n -i "$iface" -s 0 -U -B 16384 -w /out/out.pcap >/dev/null \
+        "$IMAGE" -n -i "$iface" -s 0 -U -B 16384 -w /out/out.pcap "${filter[@]}" >/dev/null \
         || die "the capture container did not start"
 
     printf 'interface=%s\ncontainer=%s\nout_dir=%s\nseconds=%s\n' \
@@ -105,17 +136,40 @@ cmd_start() {
     # only the 24-byte pcap global header. Returning from `start` before a
     # single packet has been written is how the request that follows gets
     # missed while the capture reports no error at all.
+    #
+    # **A narrow filter makes that wait unsatisfiable**, and the reason is
+    # structural rather than a tuning problem: the frames that prove the
+    # capture is writing are the frames the *filter* excludes, and they are the
+    # ones that do not exist yet — the traffic of interest is sent after `start`
+    # returns. Waiting for them would mean waiting for the thing being measured.
+    # So with `MEDARX_CAPTURE_FILTER` set, readiness drops to "the pcap header
+    # is on disk and tcpdump is running", which is a **weaker** guarantee, and
+    # the price is paid by the caller: a truncated body no longer gets caught
+    # here, so it has to be caught by the comparison that reads the capture,
+    # where a short read is simply not byte-identical to what was sent. That
+    # check is the real one and it is not optional; this loop is a convenience
+    # for the unfiltered beats, and it says so rather than pretending otherwise.
     local waited=0
-    while [ ! -s "$out_dir/out.pcap" ] || [ "$(wc -c < "$out_dir/out.pcap")" -le 24 ]; do
-        [ "$waited" -lt 300 ] || die "the capture never wrote a frame to $out_dir/out.pcap"
-        sleep 0.1
-        waited=$((waited + 1))
-    done
+    if [ "${#filter[@]}" -eq 0 ]; then
+        while [ ! -s "$out_dir/out.pcap" ] || [ "$(wc -c < "$out_dir/out.pcap")" -le 24 ]; do
+            [ "$waited" -lt 300 ] || die "the capture never wrote a frame to $out_dir/out.pcap"
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+    else
+        while [ ! -s "$out_dir/out.pcap" ]; do
+            [ "$waited" -lt 300 ] || die "the capture never opened $out_dir/out.pcap"
+            sleep 0.1
+            waited=$((waited + 1))
+        done
+    fi
     # One more beat, so the socket is genuinely draining rather than merely open.
     sleep 0.5
+    if [ "${#filter[@]}" -ne 0 ]; then
+        printf 'note: a filter is set, so readiness was "the pcap is open", not "frames have been written"; a short read is caught by the caller, not here\n' >&2
+    fi
     printf 'capturing on %s (docker network %s) into %s/out.pcap\n' \
         "$iface" "$network" "$out_dir"
-
     if [ "$seconds" -gt 0 ] 2>/dev/null; then
         sleep "$seconds"
         "$0" stop "$out_dir"
