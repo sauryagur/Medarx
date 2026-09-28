@@ -63,35 +63,22 @@ async def create_function_execution(request: Request) -> JSONResponse:
     authorizer = request.app.state.authorizer
     request_id = request.state.request_id
 
-    # 2. Media type. Checked before the body is touched, because a body this
-    #    surface will not accept is not worth reading.
-    media_type = (request.headers.get("content-type") or "").split(";")[0].strip()
-    if media_type.lower() != "application/json":
-        return problem_response(problem(
-            PROBLEM_UNSUPPORTED_MEDIA_TYPE,
-            status=415,
-            detail=("this API accepts structured JSON only; it does not accept "
-                    "DICOM multipart payloads"),
-            request_id=request_id,
-        ))
-
-    # 3. Body size, measured. The middleware has already refused an oversized
-    #    `Content-Length` before the body was read; this is the half a chunked
-    #    request cannot avoid, and a guard reading only the header would pass an
-    #    oversized body straight through.
-    raw = await request.body()
-    if len(raw) > settings.max_body_bytes:
-        return problem_response(problem(
-            PROBLEM_MALFORMED_REQUEST,
-            status=400,
-            detail=(f"the request body is larger than the {settings.max_body_bytes} "
-                    "bytes this deployment accepts"),
-            request_id=request_id,
-        ))
-
-    # 4. The path names one of the three closed functions, or it names none.
+    # 2. The path names one of the three closed functions, or it names none.
+    #    Checked first, and before the body is touched, for two reasons: the
+    #    function set is closed and this is the cheapest statement of that, and
+    #    every refusal below it can then be recorded against a function the
+    #    audit log can actually hold.
     wire_function = request.path_params["function_name"]
     if wire_function not in FUNCTION_WIRE_TO_INTERNAL:
+        # The one refusal here that leaves **no** record, and the reason is not
+        # convenience: `AuditEvent.function` is required and is the contract's
+        # closed `FunctionName` enum, so a request naming a function that does
+        # not exist has no truthful value to file it under. Inventing one, or
+        # filing it under a sibling, would be a false record in the one store
+        # the design names as an asset. The response carries the request ID, and
+        # the operator can correlate it with the access log; the audit log
+        # cannot. A contract that let `AuditRecord.function` be null would close
+        # this, and that is a change for the owner rather than a guess here.
         return problem_response(problem(
             PROBLEM_FUNCTION_NOT_FOUND,
             status=404,
@@ -101,14 +88,16 @@ async def create_function_execution(request: Request) -> JSONResponse:
             request_id=request_id,
         ))
 
-    input_hash = wiring.hash_of_bytes(raw)
-    try:
-        body = ExecutionRequestBody.model_validate(wiring.decode_json(raw))
-    except PydanticValidationError as exc:
-        # First, because pydantic's `ValidationError` is a `ValueError` and a
-        # schema violation is not the same condition as unparseable JSON: one
-        # names properties, the other names no property at all.
-        offending = wiring.offending_properties(exc)
+    input_hash = wiring.hash_of_bytes(b"")
+
+    def refuse(document, reason=surface.REASON_UNCLASSIFIED_SHAPE):
+        """Record the refusal, then answer it.
+
+        Every refusal at this surface leaves a record. A refusal with no trace
+        is not evidence, and a probe sweep with malformed requests would
+        otherwise leave none at all — the shape of record a reader is entitled to
+        find, named by the request ID this response echoes.
+        """
         surface.record_surface_refusal(
             pipeline.audit,
             request_id=request_id,
@@ -116,21 +105,57 @@ async def create_function_execution(request: Request) -> JSONResponse:
             input_hash=input_hash,
             policy_version=settings.policy_version,
             policy_mode=settings.policy_mode,
-            reason=surface.reason_for_shape(offending),
+            reason=reason,
         )
+        return problem_response(document)
+
+    # 3. Media type. Declared before the body is read, because a body this
+    #    surface will not accept is not worth reading.
+    media_type = (request.headers.get("content-type") or "").split(";")[0].strip()
+    if media_type.lower() != "application/json":
+        return refuse(problem(
+            PROBLEM_UNSUPPORTED_MEDIA_TYPE,
+            status=415,
+            detail=("this API accepts structured JSON only; it does not accept "
+                    "DICOM multipart payloads"),
+            request_id=request_id,
+        ))
+
+    raw = await request.body()
+    input_hash = wiring.hash_of_bytes(raw)
+
+    # 4. Body size, measured. The middleware has already refused an oversized
+    #    `Content-Length` before the body was read; this is the half a chunked
+    #    request cannot avoid, and a guard reading only the header would pass an
+    #    oversized body straight through.
+    if len(raw) > settings.max_body_bytes:
+        return refuse(problem(
+            PROBLEM_MALFORMED_REQUEST,
+            status=400,
+            detail=(f"the request body is larger than the "
+                    f"{settings.max_body_bytes} bytes this deployment accepts"),
+            request_id=request_id,
+        ))
+
+    # 5. The body against the contract's `ExecutionRequest`. This is where an
+    #    arbitrary DICOM object or a free-form prompt is refused, and it happens
+    #    *before* anything is parsed into a domain object, let alone run.
+    try:
+        body = ExecutionRequestBody.model_validate(wiring.decode_json(raw))
+    except PydanticValidationError as exc:
+        offending = wiring.offending_properties(exc)
         detail = ("Unrecognized or disallowed properties present: "
                   f"{', '.join(offending)}. " if offending else "")
-        return problem_response(problem(
+        return refuse(problem(
             PROBLEM_REQUEST_VALIDATION,
             status=400,
             detail=(detail + "Medarx does not accept arbitrary DICOM objects or "
                     "free-form prompts at this surface."),
             request_id=request_id,
             errors=wiring.validation_errors(exc),
-        ))
+        ), surface.reason_for_shape(offending))
     except (ValueError, UnicodeDecodeError):
-        # Unparseable JSON: no property to name, so no shape code either.
-        return problem_response(problem(
+        return refuse(problem(
             PROBLEM_MALFORMED_REQUEST,
             status=400,
             detail="the request body is not valid JSON",
@@ -140,7 +165,7 @@ async def create_function_execution(request: Request) -> JSONResponse:
     try:
         wiring.resolve_function(body.function, wire_function)
     except ValueError as exc:
-        return problem_response(problem(
+        return refuse(problem(
             PROBLEM_REQUEST_VALIDATION,
             status=400,
             detail=str(exc),
@@ -157,16 +182,8 @@ async def create_function_execution(request: Request) -> JSONResponse:
             request_id, wire_function, body.study_context.study_reference, grants
         )
     except AuthzError as exc:
-        surface.record_surface_refusal(
-            pipeline.audit,
-            request_id=request_id,
-            function=wire_function,
-            input_hash=input_hash,
-            policy_version=settings.policy_version,
-            policy_mode=settings.policy_mode,
-            reason=surface.reason_for_authz(getattr(exc, "reason", "")),
-        )
-        return problem_response(_authz_problem(exc, request_id))
+        return refuse(_authz_problem(exc, request_id),
+                      surface.reason_for_authz(getattr(exc, "reason", "")))
 
     # 6. The pipeline. It *returns* for a privacy block — a `422` with a
     #    `BlockReceipt` — and *raises* for a provider outage, which is a

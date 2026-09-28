@@ -492,6 +492,27 @@ def test_the_audit_readback_is_behind_the_authorization_surface(client):
     assert client.get("/v1/audit/records", headers=SCOPE_HEADERS).status_code == 200
 
 
+def test_an_undeclared_audit_filter_is_refused_rather_than_ignored(client):
+    """A caller who believes they scoped a readback have not.
+
+    Silently dropping `?study_reference=` would return the **whole** page — a
+    wider result than was asked for — and the response body has no field that
+    says the filter was dropped. So an undeclared parameter is a `400`, the same
+    answer an out-of-enum value gets.
+    """
+    from medarx.api.routes_audit import ALLOWED_QUERY_PARAMETERS
+
+    client.post(EXEC_URL, json=KNOWN_POSITIVE_BODY, headers=SCOPE_HEADERS)
+    for name, value in (("study_reference", "STUDY-SYN-000041"),
+                        ("patient_reference", "PAT-0001"),
+                        ("requeste_id", "typo")):
+        response = client.get("/v1/audit/records", params={name: value},
+                              headers=SCOPE_HEADERS)
+        assert response.status_code == 400, name
+        assert name in response.json()["detail"]
+    assert "study_reference" not in ALLOWED_QUERY_PARAMETERS
+
+
 def test_the_audit_readback_cannot_filter_by_study_because_the_record_cannot_carry_one(
     client,
 ):
@@ -499,16 +520,123 @@ def test_the_audit_readback_cannot_filter_by_study_because_the_record_cannot_car
 
     A study-scoped readback is not implemented in Phase 1, and the reason is a
     privacy decision rather than an omission: the storage policy has no study
-    field to filter on, and adding one would put a study identifier into a log
-    that is required never to hold one.
+    field to filter on, the contract's `AuditRecord` is closed and has none
+    either, and adding one would put a study identifier into a log that is
+    required never to hold one.
     """
+    from medarx.api.schemas import AuditRecord
     from medarx.audit.audit_log import ALLOWED_AUDIT_FIELDS
     from medarx.models import AuditEvent
 
     assert not {"study_reference", "study_ref"} & set(ALLOWED_AUDIT_FIELDS)
     assert "study_reference" not in AuditEvent.model_fields
-    assert client.get("/v1/audit/records", params={"study_reference": "STUDY-SYN-000041"},
-                      headers=SCOPE_HEADERS).status_code == 200
+    assert "study_reference" not in AuditRecord.model_fields
+    served = client.get("/openapi.json").json()["paths"]["/v1/audit/records"]["get"]
+    assert "not study-scoped" in served["description"]
+    declared = {
+        q["$ref"].rsplit("/", 1)[-1] if "$ref" in q else q["name"]
+        for q in served["parameters"]
+    }
+    assert declared == {
+        "RequestIdQueryParam", "FunctionQueryParam", "DispositionQueryParam",
+        "SinceQueryParam", "LimitQueryParam",
+    }
+
+
+# -- The per-patient date shift, measured on the wire ------------------------
+
+
+def _outbound_study_date(provider):
+    """The `study_date` the provider actually received on the last request."""
+    body = json.loads(provider.requests[-1].body)
+    user = [m for m in body["messages"] if m["role"] == "user"][0]["content"]
+    for line in user.splitlines():
+        if line.startswith("Allowlisted metadata:"):
+            return json.loads(line.split(": ", 1)[1])["study_date"]
+    raise AssertionError("no study_date reached the provider")
+
+
+def _wire_interval(after, before):
+    from datetime import date
+
+    def as_date(value):
+        return date(int(value[0:4]), int(value[4:6]), int(value[6:8]))
+
+    return (as_date(after) - as_date(before)).days
+
+
+def test_two_studies_of_one_patient_keep_their_interval(client, provider):
+    """Design §3 C: "the date shift preserves sequence and duration".
+
+    Measured at the socket, across two requests for two studies of one patient
+    seven days apart. **Before `StudyContext.patient_reference` existed this was
+    213 days** — two unrelated per-study offsets of opposite sign, which is a
+    guarantee that inverts rather than one that weakens. A caller who says which
+    patient they mean gets the design's invariant; a caller who says nothing
+    gets a documented degradation, and neither gets a silent one.
+    """
+    first, second = "STUDY-SYN-000041", "STUDY-SYN-000042"
+    outbound = []
+    for study, sent in ((first, "20260114"), (second, "20260121")):
+        response = client.post(EXEC_URL, json={
+            "study_context": {"study_reference": study,
+                              "patient_reference": "PAT-SYN-000041"},
+            "report_text": {"text": "FINDINGS: 7 mm nodule."},
+            "dicom_metadata": {"Modality": "CT", "StudyDate": sent},
+        }, headers={"X-Scope": f"scope:study:{study},scope:function:Draft"})
+        assert response.status_code == 200, response.text
+        outbound.append(_outbound_study_date(provider))
+    assert _wire_interval(outbound[1], outbound[0]) == 7
+
+
+def test_a_shared_patient_id_also_preserves_the_interval(client, provider):
+    """The second source, so neither of the two fallbacks is decorative."""
+    outbound = []
+    for study in ("STUDY-SYN-000041", "STUDY-SYN-000042"):
+        response = client.post(EXEC_URL, json={
+            "study_context": {"study_reference": study},
+            "report_text": {"text": "FINDINGS: 7 mm nodule."},
+            "dicom_metadata": {"Modality": "CT", "StudyDate": "20260114",
+                               "PatientID": "PAT-SYN-000041"},
+        }, headers={"X-Scope": f"scope:study:{study},scope:function:Draft"})
+        assert response.status_code == 200, response.text
+        outbound.append(_outbound_study_date(provider))
+    assert _wire_interval(outbound[1], outbound[0]) == 0
+
+
+def test_the_patient_reference_is_never_carried_to_the_provider(client, provider):
+    """A pseudonymization key: used to choose a shift, then nowhere else."""
+    before = len(provider.requests)
+    response = client.post(EXEC_URL, json={
+        "study_context": {"study_reference": "STUDY-SYN-000041",
+                          "patient_reference": "PAT-SYN-000041"},
+        "report_text": {"text": "FINDINGS: 7 mm nodule."},
+        "dicom_metadata": {"Modality": "CT", "StudyDate": "20260114"},
+    }, headers=SCOPE_HEADERS)
+    assert response.status_code == 200
+    sent = provider.requests[-1].body
+    assert b"PAT-SYN-000041" not in sent
+    assert "PAT-SYN-000041" not in client.get(
+        f"/v1/audit/records/{response.json()['request_id']}",
+        headers=SCOPE_HEADERS).text
+
+
+def test_the_patient_reference_is_never_recorded_in_the_audit_log(client):
+    """The audit store has no field for a subject reference, and must not gain one."""
+    from medarx.audit.audit_log import ALLOWED_AUDIT_FIELDS
+
+    assert not {"patient_reference", "patient_ref", "subject"} & set(
+        ALLOWED_AUDIT_FIELDS)
+    response = client.post(EXEC_URL, json={
+        "study_context": {"study_reference": "STUDY-SYN-000041",
+                          "patient_reference": "PAT-SYN-000041"},
+        "report_text": {"text": "FINDINGS: 7 mm nodule."},
+        "dicom_metadata": {"Modality": "CT", "StudyDate": "20260114"},
+    }, headers=SCOPE_HEADERS)
+    assert response.status_code == 200
+    assert "PAT-SYN-000041" not in client.get(
+        f"/v1/audit/records/{response.json()['request_id']}",
+        headers=SCOPE_HEADERS).text
 
 
 # -- Human approval ----------------------------------------------------------
@@ -783,3 +911,96 @@ def test_the_approved_payload_hash_is_a_digest_and_the_stored_form_is_bare_hex(c
     stored = pipeline.audit.get(r.json()["request_id"])[0].approved_payload_hash
     assert DIGEST.fullmatch(stored)
     assert wire == f"sha256:{stored}"
+
+
+# -- Every refusal at this surface leaves a trace ----------------------------
+
+
+@pytest.mark.parametrize("label,path,kwargs,expected", [
+    ("wrong media type", EXEC_URL, {"content": b"text", "headers":
+     {**SCOPE_HEADERS, "Content-Type": "text/plain"}}, 415),
+    ("unparseable body", EXEC_URL, {"content": b"{not json", "headers":
+     {**SCOPE_HEADERS, "Content-Type": "application/json"}}, 400),
+    ("undeclared property", EXEC_URL, {"json": body_with(prompt="x")}, 400),
+    ("no scope", EXEC_URL, {"json": KNOWN_POSITIVE_BODY, "headers": {}}, 403),
+])
+def test_every_surface_refusal_leaves_a_record(client, label, path, kwargs,
+                                               expected):
+    """A refusal with no trace is not evidence.
+
+    Each of these used to answer and file nothing, so a probe sweep with
+    malformed requests left no record at all. The assertion is on the *record*,
+    not the status: the status was already right, and a test that only checked
+    it would pass against a surface that remembered nothing.
+    """
+    kwargs = dict(kwargs)
+    if "headers" not in kwargs:
+        kwargs["headers"] = SCOPE_HEADERS
+    response = client.post(path, **kwargs)
+    assert response.status_code == expected, label
+    record = client.get(f"/v1/audit/records/{response.headers['X-Request-Id']}",
+                        headers=SCOPE_HEADERS)
+    assert record.status_code == 200, label
+    body = record.json()
+    assert body["layer"] == "J", label
+    assert body["final_disposition"] == "blocked", label
+    assert body["stages"] == [], label
+
+
+def test_an_oversized_body_leaves_a_record_too(client, pipeline):
+    """Sent chunked, so the *route* measures it rather than the middleware.
+
+    The middleware refuses an oversized `Content-Length` before the body is read
+    — the right place for it, so an oversized request costs a header rather than
+    a megabyte — and it is the second refusal that cannot be recorded, because it
+    runs before the application exists to record it. Both are stated rather than
+    worked around; this sends the same body without a `Content-Length` so the
+    route's measured check is the one under test, and the assertion is that it
+    *files* the refusal.
+    """
+    from conftest import body_with_dicom
+
+    payload = body_with_dicom(InstitutionName="x" * (pipeline.settings.max_body_bytes + 1))
+    response = client.post(EXEC_URL, content=_chunked(payload), headers={
+        **SCOPE_HEADERS, "Content-Type": "application/json"})
+    assert response.status_code == 400
+    record = client.get(f"/v1/audit/records/{response.headers['X-Request-Id']}",
+                        headers=SCOPE_HEADERS)
+    assert record.status_code == 200
+    assert record.json()["layer"] == "J"
+
+
+def test_the_body_cap_the_middleware_applies_is_the_one_refusal_it_cannot_record(client,
+                                                                                 pipeline):
+    """Two refusals cannot be recorded, both for a stated structural reason.
+
+    The 404 for an unknown function has no truthful `AuditRecord.function`, and
+    the header-level body cap is answered before the application exists. Both
+    still carry the request ID, so a caller can correlate them, and both are
+    pinned here so neither is a surprise found later.
+    """
+    from conftest import body_with_dicom
+
+    payload = body_with_dicom(InstitutionName="x" * (pipeline.settings.max_body_bytes + 1))
+    response = client.post(EXEC_URL, json=payload, headers=SCOPE_HEADERS)
+    assert response.status_code == 400
+    assert response.headers["X-Request-Id"]
+    assert client.get(f"/v1/audit/records/{response.headers['X-Request-Id']}",
+                      headers=SCOPE_HEADERS).status_code == 404
+
+
+def test_an_unknown_function_in_the_path_is_the_one_refusal_it_cannot_record(client):
+    """Why, and stated rather than worked around.
+
+    `AuditEvent.function` is required and is the contract's closed
+    `FunctionName` enum. A request naming a function that does not exist has no
+    truthful value to file it under, and filing it under a sibling would be a
+    false record. The response still carries the request ID, and the contract
+    would have to let `AuditRecord.function` be null to close this.
+    """
+    response = client.post("/v1/functions/Summarize/executions",
+                           json=KNOWN_POSITIVE_BODY, headers=SCOPE_HEADERS)
+    assert response.status_code == 404
+    assert response.headers["X-Request-Id"]
+    assert client.get(f"/v1/audit/records/{response.headers['X-Request-Id']}",
+                      headers=SCOPE_HEADERS).status_code == 404

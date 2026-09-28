@@ -205,7 +205,7 @@ CODE_TABLE: tuple[CodeEntry, ...] = (
     CodeEntry("CONTRACT_VIOLATION", ("D.3",),
               "D.3: missing field, extra field, or any other breach of the "
               "per-function payload contract."),
-    CodeEntry("LEFTOVER_PATTERN_MATCH", ("D.3",),
+    CodeEntry("LEFTOVER_PATTERN_MATCH", ("D.2", "D.3"),
               "D.3: a deterministic pattern still matching in the transformed "
               "payload, which is the check the NER pass alone cannot make."),
 

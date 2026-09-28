@@ -138,11 +138,25 @@ def test_each_rule_names_the_leading_code_the_contract_publishes_for_its_row():
     published: dict[str, tuple[str, ...]] = {
         layer: codes for _where, layer, codes in _example_receipts(_contract())
     }
-    assert set(published) == {r.layer for r in RULES}, (
-        "the contract publishes a block example for a layer the table does not "
-        "carry, or the table carries a layer the contract publishes none for"
+    # Row 1 is answered by a `400`, not by a block receipt, and the contract no
+    # longer publishes a `422` example for it. Design §6 restricts the `422`
+    # receipt's `layer` to "A, D layer 1-3, E, or F" — `J` is not in that list —
+    # and `ExecutionRequest` is closed, so the only way to express "an arbitrary
+    # DICOM object or a free-form prompt" is as an undeclared property, which is
+    # a malformed request. The rule keeps its row and its layer; what changed is
+    # which response answers it, and the example that said otherwise is gone.
+    rules_without_a_block_example = {r.layer for r in RULES} - set(published)
+    assert rules_without_a_block_example == {"J"}, (
+        "a rule whose layer the contract publishes no block example for, other "
+        f"than row 1: {sorted(rules_without_a_block_example)}"
+    )
+    assert not set(published) - {r.layer for r in RULES}, (
+        "the contract publishes a block example for a layer the enforcement "
+        f"table does not carry: {sorted(set(published) - {r.layer for r in RULES})}"
     )
     for rule in RULES:
+        if rule.layer not in published:
+            continue
         assert published[rule.layer] == EXAMPLE_CODES_BY_ROW[rule.row]
         assert rule.action_code == published[rule.layer][0], (
             f"row {rule.row} ({rule.layer}) names {rule.action_code!r}, which is "

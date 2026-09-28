@@ -105,12 +105,13 @@ class StudyContext(_Closed):
 
     The study reference is an internal reference; the pseudonymization service
     exchanges it for a stable surrogate before anything is sent to a provider.
-    There is deliberately no patient identifier here — the contract declares
-    none, and `extra="forbid"` means one cannot be smuggled in. See
-    `medarx.pipeline.patient_ref_for` for what the kernel does instead.
+    `patient_reference` is what the per-patient date shift is chosen by; see
+    `medarx.pipeline.patient_ref_for` for the order the fallbacks are tried in
+    and for what the last one costs.
     """
 
     study_reference: str
+    patient_reference: str | None = None
     accession_reference: str | None = None
     encounter_reference: str | None = None
     modality: str | None = None

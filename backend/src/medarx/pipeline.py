@@ -218,27 +218,49 @@ class ExecutionResult:
             )
 
 
-def patient_ref_for(dicom_metadata: Mapping[str, str], study_reference: str) -> str:
+def patient_ref_for(dicom_metadata: Mapping[str, str], study_reference: str,
+                    patient_reference: str | None = None) -> str:
     """The patient scope component C shifts by, for one request.
 
-    **The contract's `StudyContext` has no patient identifier**, and this
-    surface may not add one: `additionalProperties: false` means a field the
-    contract does not declare cannot be sent. So the patient scope is taken from
-    `PatientID` when the caller supplies one — the contract's own allowlisted
-    attribute, which layer A accepts and then drops, so it reaches the input hash
-    and no payload field — and from the study reference otherwise.
+    **Three sources, in order, and the third is the one that inverts a guarantee.**
 
-    **The limitation this carries, stated rather than smoothed.** A study
-    reference identifies a study, not a patient, so two studies of the same
-    patient arriving without a `PatientID` get two different date offsets and the
-    interval between them is not preserved. The contract's own `StudyContext`
-    documentation says the study reference "is not a DICOM StudyInstanceUID and
-    is never transmitted as-is", so nothing about it is safe to treat as a
-    patient key. This is a Phase 1 gap in the contract, not a choice, and it is
-    recorded here so the next reader knows it exists.
+    1. `StudyContext.patient_reference` — what the caller says the patient is.
+       This is the reference design §3 C means by "per patient", and supplying it
+       is what makes the shift preserve the interval *between* two studies of one
+       patient.
+    2. `dicom_metadata["PatientID"]` — the contract's own allowlisted attribute,
+       which layer A accepts and then drops, so it reaches the input hash and no
+       payload field. A caller who puts the identifier there rather than in the
+       study context gets the same guarantee.
+    3. The study reference, when neither is present.
+
+    **The third fallback is a weaker guarantee and the weakness is measurable.**
+    A study is not a patient, so two studies of one patient that supply neither
+    reference are shifted by two unrelated offsets, the interval between them is
+    not preserved, and it can *invert*: measured through the API before the
+    `patient_reference` field existed, a true 7-day interval between
+    `20260114` and `20260121` arrived at a provider as **213 days**, with the two
+    offsets of opposite sign. The shift still applies to every date, and no
+    clinical value is corrupted; what is lost is the relationship *between*
+    studies, which is exactly what §3 C's "preserves sequence and duration"
+    claims.
+
+    The fallback is kept rather than the request refused, for two reasons that
+    are both true: a study reference is enough to pseudonymize a payload and get
+    it through the boundary, and refusing would turn a documented degradation
+    into a denial of service for every caller the contract lets omit the field.
+    What it must never be is silent, which is why the third case is written out
+    here, published in `StudyContext`'s own description, and asserted by
+    `tests/test_api.py::test_two_studies_of_one_patient_keep_their_interval`.
+
+    The reference is a pseudonymization key and nothing more: it is never
+    carried in a payload, never reaches a model provider, and is not stored in
+    the audit log, whose storage policy has no field for a subject reference.
     """
-    supplied = dicom_metadata.get("PatientID", "").strip()
-    return supplied or study_reference.strip()
+    for candidate in (patient_reference, dicom_metadata.get("PatientID")):
+        if candidate and candidate.strip():
+            return candidate.strip()
+    return study_reference.strip()
 
 
 @dataclass

@@ -30,7 +30,7 @@ info:
     | Status | Meaning | Raised by |
     |---|---|---|
     | `403 Forbidden` | Authenticated but not permitted — unauthorized study scope, or the function is not permitted for this caller. | Design §6 row 1 (authorization half) |
-    | `422 Unprocessable Entity` | Privacy-policy block. The request was well-formed and authorized, but the privacy pipeline could not produce a policy-compliant payload. | Design §6 rows 1 (input-shape half), 2, 3, 4, 5, 6, 7 |
+    | `422 Unprocessable Entity` | Privacy-policy block. The request was well-formed and authorized, but the privacy pipeline could not produce a policy-compliant payload. | Design §6 rows 2, 3, 4, 5, 6, 7 |
     | `400 Bad Request` | Structurally malformed request: unparseable body, wrong media type, or a JSON shape that does not match the schema. The request never became a valid request at all. | Design §6 row 1 (malformed request) |
 
     The `422`/`403` split is load-bearing and is asserted directly by the design's end-to-end test strategy. `403` is never returned for a privacy block, and `422` is never returned for an authorization failure.
@@ -114,6 +114,8 @@ paths:
               $ref: '#/components/schemas/ExecutionRequest'
       responses:
         '200':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           description: >-
             The privacy pipeline approved the payload and the model gateway returned a response.
             The response is a draft; it has not been approved by a human and has not been written
@@ -123,16 +125,28 @@ paths:
               schema:
                 $ref: '#/components/schemas/ExecutionResponse'
         '400':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/MalformedRequest'
         '403':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/Forbidden'
         '404':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/FunctionNotFound'
         '415':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/UnsupportedMediaType'
         '422':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/Blocked'
         '500':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/UnexpectedError'
 
   /v1/executions/{request_id}/approval:
@@ -165,18 +179,28 @@ paths:
               $ref: '#/components/schemas/HumanApprovalRequest'
       responses:
         '200':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           description: The approval or rejection was recorded in the append-only audit log.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/HumanApprovalResponse'
         '400':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/MalformedRequest'
         '403':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/Forbidden'
         '404':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/ExecutionNotFound'
         '409':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           description: >-
             A human decision has already been recorded for this request ID. The audit log is
             append-only, so a decision is immutable; a changed mind requires a new execution.
@@ -185,8 +209,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProblemDetail'
         '415':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/UnsupportedMediaType'
         '500':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/UnexpectedError'
 
   /v1/policy:
@@ -218,12 +246,16 @@ paths:
         before relying on receipts.
       responses:
         '200':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           description: The policy configuration in force for this deployment.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/PolicyConfiguration'
         '500':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/UnexpectedError'
 
   /v1/audit/records:
@@ -247,6 +279,16 @@ paths:
         Records are returned in ascending timestamp order. `chain_verified` reports the result of
         hash-chain verification over the records returned: a relational database alone does not make
         a log immutable, so tampering evidence is verified on read rather than asserted.
+
+        **This readback is not study-scoped, and no filter can make it so in Phase 1.** A caller must
+        present a scope to read anything, but the scope is not applied to the page: `AuditRecord` is
+        closed and carries no study or patient property, and the audit log's storage policy admits
+        none — adding one would put a subject reference into the one store the design requires never
+        to hold one. So the effective access control is "present a scope", and a caller holding one
+        study's scope reads the whole log. Study-scoped readback is deferred until the storage
+        policy can carry a keyed reference. A query parameter this operation does not declare is
+        refused with `400` rather than ignored, so a caller cannot believe a filter applied when it
+        did not.
       parameters:
         - $ref: '#/components/parameters/RequestIdQueryParam'
         - $ref: '#/components/parameters/FunctionQueryParam'
@@ -255,16 +297,24 @@ paths:
         - $ref: '#/components/parameters/LimitQueryParam'
       responses:
         '200':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           description: Matching audit records, oldest first.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuditRecordCollection'
         '400':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/MalformedRequest'
         '403':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/Forbidden'
         '500':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/UnexpectedError'
 
   /v1/audit/records/{request_id}:
@@ -283,18 +333,28 @@ paths:
         - $ref: '#/components/parameters/RequestIdPathParam'
       responses:
         '200':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           description: The audit record for the supplied request ID.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuditRecord'
         '400':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/MalformedRequest'
         '403':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/Forbidden'
         '404':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/AuditRecordNotFound'
         '500':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/UnexpectedError'
 
 components:
@@ -380,9 +440,23 @@ components:
         maximum: 500
         default: 100
 
+  headers:
+    RequestIdHeader:
+      description: >-
+        The request ID of this exchange, echoed on **every** response including `400`, `403`, `415`
+        and `422`. It is the caller's `X-Request-Id` when one was supplied and a server-generated ID
+        when one was not, it is the same value the audit record is filed under, and it is present
+        even on a response whose body is unparseable — which is the whole reason it is a header and
+        not a body field. Declared here rather than left to each response, so the promise is written
+        down once.
+      schema:
+        type: string
+
   responses:
 
     Blocked:
+      headers:
+        $ref: '#/components/headers/RequestIdHeader'
       description: >-
         Privacy-policy block. The request was well-formed and authorized, but the privacy pipeline
         could not produce a policy-compliant payload, so **nothing was transmitted** to a provider in
@@ -449,18 +523,10 @@ components:
                 layer: F
                 action_codes: [PAYLOAD_MISMATCH, UNKNOWN_MODEL]
                 policy_version: ps315-baseline-v1
-            rejectedInputShape:
-              summary: >-
-                Design §6 row 1 (input-shape half) — an arbitrary DICOM object or free-form prompt was
-                supplied. Rejected at this surface; the request never entered the pipeline.
-              value:
-                status: blocked
-                request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
-                layer: J
-                action_codes: [ARBITRARY_DICOM_OBJECT_REJECTED, FREE_FORM_PROMPT_REJECTED]
-                policy_version: ps315-baseline-v1
 
     MalformedRequest:
+      headers:
+        $ref: '#/components/headers/RequestIdHeader'
       description: >-
         The request could not be understood as a request at all: unparseable body, wrong media type,
         or a JSON document that does not match the request schema. This is a request-construction
@@ -499,6 +565,8 @@ components:
                 request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
 
     Forbidden:
+      headers:
+        $ref: '#/components/headers/RequestIdHeader'
       description: >-
         Authorization failure: the caller is not permitted to execute this function, or the study
         context is outside the caller's authorized scope (design §6 row 1).
@@ -534,6 +602,8 @@ components:
                 request_id: 7f3c1a90-2b6e-4f1a-9d55-2c8b7e0a1f34
 
     UnsupportedMediaType:
+      headers:
+        $ref: '#/components/headers/RequestIdHeader'
       description: >-
         The request media type is not `application/json`. This API accepts structured JSON only; it
         does not accept DICOM multipart payloads, so `multipart/related` and `application/dicom` are
@@ -544,6 +614,8 @@ components:
             $ref: '#/components/schemas/ProblemDetail'
 
     FunctionNotFound:
+      headers:
+        $ref: '#/components/headers/RequestIdHeader'
       description: >-
         The `function_name` path segment does not name one of the three closed functions
         (`Draft`, `Prior Summary`, `Ask`). The function set is closed, not free-form, so an
@@ -558,6 +630,8 @@ components:
             $ref: '#/components/schemas/ProblemDetail'
 
     ExecutionNotFound:
+      headers:
+        $ref: '#/components/headers/RequestIdHeader'
       description: No execution exists for the supplied request ID.
       content:
         application/problem+json:
@@ -565,6 +639,8 @@ components:
             $ref: '#/components/schemas/ProblemDetail'
 
     AuditRecordNotFound:
+      headers:
+        $ref: '#/components/headers/RequestIdHeader'
       description: No audit record exists for the supplied request ID.
       content:
         application/problem+json:
@@ -572,6 +648,8 @@ components:
             $ref: '#/components/schemas/ProblemDetail'
 
     UnexpectedError:
+      headers:
+        $ref: '#/components/headers/RequestIdHeader'
       description: >-
         An unexpected server-side failure. Sensitive-data filtering is applied to application logs,
         exception traces, and tracing spans under the same policy as the audit log, so no raw PHI is
@@ -614,6 +692,11 @@ components:
         The de-identification policy version in force. Appears in block receipts, execution
         responses, and audit records. An unknown or missing policy version causes a fail-closed block
         in every implemented mode.
+
+        This is a free string and every value in this document is illustrative: `ps315-baseline-v1`
+        and the values in the `Blocked` examples name the *shape* of a receipt, not what a given
+        deployment publishes. A deployment publishes the version it is configured with, so a receipt
+        read against a running system carries that deployment's own string.
       examples: [ps315-baseline-v1]
 
     PolicyMode:
@@ -745,6 +828,23 @@ components:
             scope before the payload reaches the model gateway. It is not a DICOM StudyInstanceUID and
             is never transmitted as-is.
           examples: ['STUDY-SYN-000041']
+        patient_reference:
+          type: string
+          description: >-
+            Internal patient reference, if the caller knows it. This is the reference the
+            de-identification policy's **per-patient** date shift is chosen by, and supplying it is
+            what makes design §3 C's stated invariant — "the date shift preserves sequence and
+            duration" — hold *across* two studies of one patient rather than only within one study.
+
+            Optional, and a request that omits it is not refused: the shift still applies, and the
+            fallback is the `PatientID` in `dicom_metadata` where the caller supplied one, and the
+            study reference otherwise. **The study-reference fallback is a weaker guarantee** — a
+            study is not a patient, so two studies of one patient that omit both references are
+            shifted by two unrelated offsets, the interval between them is not preserved, and can
+            invert. The reference is a pseudonymization key: it is never carried in a payload, never
+            reaches a model provider, and is not stored in the audit log, whose storage policy has no
+            field for a subject reference and must not gain one.
+          examples: ['PAT-SYN-000041']
         accession_reference:
           type: string
           description: >-
@@ -1076,6 +1176,14 @@ components:
           description: >-
             One or more non-raw disposition codes from component G's action-code table. These
             classify what the pipeline refused to do; they never carry a value.
+
+            They are **every unresolved disposition's code, not only the naming layer's**. `layer`
+            names the first component that flagged anything and the layers after it keep flagging:
+            an entity layer 2 cannot resolve is left in the payload, and layer 3's deterministic
+            re-read then finds the same span still matching. A receipt reading
+            `layer: D.2, action_codes: [NER_UNRESOLVED, LEFTOVER_PATTERN_MATCH]` is one refusal
+            reported by two layers, not a mis-filed code — and a code whose declared owners do not
+            include the naming layer is a defect in component G's table, not in the receipt.
           items:
             $ref: '#/components/schemas/ActionCode'
         policy_version:
@@ -1394,6 +1502,12 @@ components:
           type: string
           description: >-
             Attributed input source for the matched records, where the caller recorded one.
+
+            **Always absent in Phase 1.** `AuditRecord` is closed and has no input-source field, and
+            the audit log's storage policy admits none, so there is no stored value for this member
+            to report; populating it needs a new field on a record whose policy says no field may
+            hold free text. It is left declared because it is a documented part of this collection,
+            and deleting it would be a change with nothing behind it.
           enum:
             - synthetic_corpus
             - clinician_supplied

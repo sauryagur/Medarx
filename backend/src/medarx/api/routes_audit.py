@@ -15,11 +15,15 @@ second returns the stored records, one row per append, which is what an auditor
 reading a chain position needs to see. Two endpoints answering the same question
 with two different shapes would be the sort of thing a reader has to notice.
 
-**A filter value outside its closed enum is a `400`, not an empty page.** An
-empty page is a true statement about a question that was asked; a typo would
-otherwise look exactly like a request with no records. `medarx.audit.queries`
-enforces the enums and the page size, and this route turns what it raises into
-the contract's `MalformedRequest`.
+**An unrecognised filter is a `400`, not a wider page.** `medarx.audit.queries`
+enforces the closed enums and the page size, and this route refuses both a value
+outside an enum and a parameter the operation does not declare at all. The
+second is the sharper edge: this readback is not study-scoped (see the contract's
+own operation description), so a caller who writes `?study_reference=…` and is
+silently ignored receives **every** record rather than the one study they asked
+for, and the response body — `{records, count, chain_verified, input_source}` —
+has no field that says the filter was dropped. Refusing is the only answer that
+cannot mislead.
 
 **This readback is authorized and unfiltered, and the limit is a privacy
 decision.** A study-scoped readback cannot be implemented on this storage
@@ -56,9 +60,20 @@ from medarx.audit.code_table import stages_reached
 from medarx.errors import AuthzError
 from medarx.models import AuditEvent
 
-__all__ = ["router", "record_view", "merged_view"]
+__all__ = ["ALLOWED_QUERY_PARAMETERS", "router", "record_view", "merged_view"]
 
 router = APIRouter(tags=["audit"])
+
+#: The query parameters this collection declares, exactly. Anything else is
+#: refused rather than ignored, and the reason is a disclosure surface rather
+#: than tidiness: a caller who writes `?study_reference=…` and is silently
+#: ignored receives the **whole** page instead of the one study they asked for,
+#: with nothing in the response saying the filter was dropped. The contract
+#: already declares every parameter below, and `400 MalformedRequest` is the
+#: answer it gives for a request it cannot interpret.
+ALLOWED_QUERY_PARAMETERS: frozenset[str] = frozenset(
+    {"request_id", "function", "disposition", "since", "limit"}
+)
 
 
 @router.get("/v1/audit/records")
@@ -70,6 +85,17 @@ async def list_audit_records(request: Request) -> JSONResponse:
         return denied
 
     query = request.query_params
+    unknown = sorted(set(query) - ALLOWED_QUERY_PARAMETERS)
+    if unknown:
+        return problem_response(problem(
+            PROBLEM_MALFORMED_REQUEST, status=400,
+            detail=(f"undeclared query parameter(s): {', '.join(unknown)}. This "
+                    "operation accepts only "
+                    f"{', '.join(sorted(ALLOWED_QUERY_PARAMETERS))}. An "
+                    "unrecognised parameter is refused rather than ignored: "
+                    "ignoring it would return a wider page than the caller "
+                    "asked for, and nothing in the response would say so"),
+            request_id=request.state.request_id))
     try:
         since = _parse_since(query.get("since"))
         limit = _parse_limit(query.get("limit"))

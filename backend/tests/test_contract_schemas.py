@@ -655,9 +655,21 @@ def test_the_pending_pairs_are_exactly_the_ones_the_contract_actually_publishes(
 #: example-reachability exemption to hold codes no example advertises would make
 #: that set a place where a real failure could hide, which is exactly what the
 #: equality assertion exists to prevent.
-UNADVERTISED_CODES: frozenset[str] = frozenset(
-    {"FUNCTION_NOT_PERMITTED", "UNAUTHORIZED_SCOPE"}
-)
+UNADVERTISED_CODES: frozenset[str] = frozenset({
+    "ARBITRARY_DICOM_OBJECT_REJECTED", "CONTRACT_VIOLATION", "FREE_FORM_PROMPT_REJECTED", "FUNCTION_NOT_PERMITTED",
+    "HASH_MISMATCH", "LOW_CONFIDENCE_NER_UNRESOLVED", "MALFORMED_METADATA", "MISSING_SURROGATE",
+    "SURROGATE_SHAPED_REFERENCE_REJECTED", "UNAPPROVED_PAYLOAD", "UNAUTHORIZED_SCOPE", "UNKNOWN_DICOM_ATTRIBUTE",
+    "UNRESOLVED_EMPTY_BODY",
+})
+
+
+#: The four codes component J owns, and the four the contract's own `ActionCode`
+#: description reserves to it. All four appear in no published example, so the
+#: owner assertion below is the only check that has anything to say about them.
+COMPONENT_J_CODES: frozenset[str] = frozenset({
+    "ARBITRARY_DICOM_OBJECT_REJECTED", "FREE_FORM_PROMPT_REJECTED",
+    "FUNCTION_NOT_PERMITTED", "UNAUTHORIZED_SCOPE",
+})
 
 
 def test_the_codes_no_example_advertises_are_component_js():
@@ -677,7 +689,7 @@ def test_the_codes_no_example_advertises_are_component_js():
         code for _where, _layer, codes in _example_receipts(_contract())
         for code in codes
     }
-    for code in sorted(UNADVERTISED_CODES):
+    for code in sorted(COMPONENT_J_CODES):
         assert code in emitted, (
             f"{code} appears in no published example, so nothing would notice if "
             "the package stopped emitting it; this is the only check there is"
@@ -693,10 +705,35 @@ def test_the_codes_no_example_advertises_are_component_js():
         )
 
 
+def test_every_code_the_package_emits_is_either_advertised_or_listed_here():
+    """The partition is complete, so `UNADVERTISED_CODES` cannot be a dumping ground.
+
+    A code that is advertised in a published example is enforced by the
+    example-reachability sweep above. A code that is not is enforced only by
+    being named in `UNADVERTISED_CODES`, which is a list somebody maintains — so
+    this asserts the two sets partition what the package emits, and a fifth
+    unadvertised code arriving has nowhere to hide.
+    """
+    emitted = {code for codes in _emitted_action_codes().values() for code in codes}
+    advertised = {
+        code for _where, _layer, codes in _example_receipts(_contract())
+        for code in codes
+    }
+    unclassified = emitted - advertised - UNADVERTISED_CODES
+    assert not unclassified, (
+        f"{sorted(unclassified)} are emitted, appear in no published example, and "
+        "are not in UNADVERTISED_CODES; nothing would enforce them"
+    )
+    assert not (UNADVERTISED_CODES - emitted), (
+        f"{sorted(UNADVERTISED_CODES - emitted)} are listed as unadvertised but "
+        "the package no longer emits them"
+    )
+
+
 def test_the_unadvertised_codes_are_still_members_of_the_enum():
     """The reservation's other half: still declared, so the contract still holds them."""
     members = set(_contract()["components"]["schemas"]["ActionCode"]["enum"])
-    missing = sorted(UNADVERTISED_CODES - members)
+    missing = sorted(COMPONENT_J_CODES - members)
     assert not missing, (
         f"{missing} are tracked here as unadvertised but are not members of the "
         "ActionCode enum, so nothing reserves them"
@@ -898,3 +935,60 @@ def test_component_c_still_judges_the_calendar_day_the_contract_cannot():
         shift_dicom_date(_IMPOSSIBLE_DA, 0)
     for _where, subschema in _date_properties(doc).items():
         _validator_for(doc, subschema).validate(_IMPOSSIBLE_DA)
+
+
+# -- The `StudyContext.patient_reference` addition, proved additive ------------
+
+#: The property set `StudyContext` declared before the addition, named here so
+#: "additive" is a checked claim rather than a word. Taken from the contract as
+#: it stood; `test_the_patient_reference_addition_touched_nothing_else` fails if
+#: any of these is gone, changed type, or became required.
+_STUDY_CONTEXT_BEFORE: frozenset[str] = frozenset(
+    {"study_reference", "accession_reference", "encounter_reference", "modality"}
+)
+
+
+def test_the_patient_reference_is_optional_and_a_string():
+    schema = _contract()["components"]["schemas"]["StudyContext"]
+    added = schema["properties"]["patient_reference"]
+    assert added["type"] == "string"
+    assert "patient_reference" not in schema["required"]
+    assert schema["required"] == ["study_reference"]
+    assert schema.get("additionalProperties") is False, (
+        "the addition must not open the schema: an arbitrary DICOM object is "
+        "expressible the moment `additionalProperties` stops being false"
+    )
+
+
+def test_the_patient_reference_addition_touched_nothing_else():
+    """Member by member, which is what "strictly additive" has to mean.
+
+    A contract change that is *mostly* additive still breaks the callers it
+    broke, so the check is equality on the pre-existing property set rather than
+    containment, and the required list is asserted to have not grown.
+    """
+    schema = _contract()["components"]["schemas"]["StudyContext"]
+    assert schema["properties"].keys() - {"patient_reference"} == _STUDY_CONTEXT_BEFORE
+    for name in _STUDY_CONTEXT_BEFORE:
+        assert schema["properties"][name]["type"] == "string"
+
+
+def test_a_study_context_without_the_patient_reference_still_validates():
+    """The addition cannot have narrowed anything, which is the whole risk."""
+    from medarx.api.schemas import StudyContext as StudyContextBody
+
+    body = {"study_reference": "STUDY-SYN-000041", "modality": "CT"}
+    assert StudyContextBody.model_validate(body).patient_reference is None
+    assert StudyContextBody.model_validate(
+        {**body, "patient_reference": "PAT-SYN-000041"}).patient_reference == (
+        "PAT-SYN-000041")
+
+
+def test_the_patient_reference_does_not_reach_the_model_path():
+    """A pseudonymization key: the payload carries a surrogate, not this."""
+    from medarx.pipeline import patient_ref_for
+
+    assert patient_ref_for({"PatientID": "PAT-777"}, "STUDY-1", "PAT-SYN-9") == (
+        "PAT-SYN-9"), "the study context wins over the allowlisted attribute"
+    assert patient_ref_for({"PatientID": "PAT-777"}, "STUDY-1") == "PAT-777"
+    assert patient_ref_for({}, "STUDY-1") == "STUDY-1"

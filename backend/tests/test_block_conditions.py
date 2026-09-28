@@ -57,8 +57,24 @@ UNRESOLVABLE_REPORT = {
 }
 
 
+def _owners(code: str) -> frozenset[str]:
+    """The layers component G's table says may emit `code`."""
+    from medarx.audit.code_table import CODE_TABLE
+
+    entry = next(e for e in CODE_TABLE if e.code == code)
+    return frozenset(entry.owners)
+
+
 def _receipt(response):
-    """The block receipt, after asserting that it is one."""
+    """The block receipt, after asserting that it is one.
+
+    Including the check the family-wide sets cannot make: **every code on the
+    receipt must be one the receipt's own layer is declared to own.** A family
+    check would pass a `D.2` receipt carrying a code only `F` may emit, and the
+    table's `owners` column is the only statement in the package about which
+    component a code belongs to — so it is read here, on every receipt this file
+    produces, rather than trusted as documentation.
+    """
     assert response.status_code == 422, response.text
     body = response.json()
     assert set(body) == RECEIPT_KEYS, body
@@ -66,7 +82,23 @@ def _receipt(response):
     assert body["policy_version"] == "medarx-policy-1.0.0"
     assert body["action_codes"]
     assert body["action_codes"] == list(dict.fromkeys(body["action_codes"]))
+    unowned = {c for c in body["action_codes"] if body["layer"] not in _owners(c)}
+    assert not unowned, (
+        f"receipt names layer {body['layer']} with codes it does not own: "
+        f"{sorted(unowned)}. Either the code is mis-filed on the receipt or "
+        f"component G's table is wrong about who emits it.")
     return body
+
+
+def test_every_code_the_table_declares_is_owned_by_a_real_layer():
+    """The other direction, so the check above is not satisfied by empty owners."""
+    from medarx.audit.code_table import CODE_TABLE
+    from medarx.models import LAYERS
+
+    for entry in CODE_TABLE:
+        assert set(entry.owners) <= set(LAYERS), (entry.code, entry.owners)
+    owned = {e.code for e in CODE_TABLE if e.owners}
+    assert owned, "no row declares an owner; the check on a receipt would pass on none"
 
 
 def _unresolved_body(**dicom_overrides):

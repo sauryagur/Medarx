@@ -297,7 +297,8 @@ def execution_request_from_body(body: ExecutionRequestBody,
         if value is not None
     }
     study_reference = body.study_context.study_reference
-    patient_ref = patient_ref_for(metadata, study_reference)
+    patient_ref = patient_ref_for(metadata, study_reference,
+                                  body.study_context.patient_reference)
     prior_studies = tuple(
         PriorStudyReference(prior_study_reference=prior.prior_study_reference,
                             study_date=prior.study_date)
