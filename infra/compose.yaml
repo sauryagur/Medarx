@@ -1,0 +1,178 @@
+# The Medarx Phase 1 stack: the stores, the observer, and the two services that
+# stay down unless you ask for them.
+#
+#   bash infra/verify_env.sh                       # preflight; run this first
+#   docker compose -f infra/compose.yaml up -d     # postgres + observer only
+#   docker compose -f infra/compose.yaml --profile capture up -d capture
+#   docker compose -f infra/compose.yaml --profile orthanc up -d orthanc
+#
+# `name: medarx` fixes the project name, which is also the Docker network's
+# name. Component I's capture needs that network's bridge interface, and the
+# interface is derived from the network id at run time by
+# `infra/capture/start_capture.sh` — never written down here, because a
+# hard-coded `br-...` names an interface that does not exist until the next
+# `docker network rm`.
+#
+# **Orthanc is not integrated in Phase 1.** It is here so that the image recipe
+# and the configuration that Phase 2 will wire up are versioned and reviewable
+# now, and it is behind a profile so a default `up -d` cannot start it. No
+# Medarx component speaks DICOMweb to it, and there is no DICOMweb client
+# anywhere in the tree.
+
+name: medarx
+
+services:
+  # -- The stores -------------------------------------------------------------
+  #
+  # `postgres:18-alpine` specifically. 16 and 17 are not present on the images
+  # already on this host, and pulling one costs disk against a filesystem that
+  # has been at 94-99% full; 18-alpine is here, so the stack builds without a
+  # download.
+  #
+  # The schema is **not** created by this file and is not migrated by it. Both
+  # stores are created on first use by `medarx.audit.schema_init` and by
+  # `MappingStore.__init__`, which call `create_all` — a convenience for a
+  # single process, not a migration, and a TOCTOU race on multi-worker startup.
+  # Owning that DDL is the open item in HANDOFF §8 item 5; it is not closed
+  # here, and pretending otherwise would be a claim this file cannot support.
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: medarx
+      POSTGRES_USER: medarx
+      # A development password for a database that holds nothing but this
+      # project's fabricated records. Override it for anything else.
+      POSTGRES_PASSWORD: ${MEDARX_POSTGRES_PASSWORD:-medarx-dev-password}
+    volumes:
+      # **`/var/lib/postgresql`, not `/var/lib/postgresql/data`.** PostgreSQL 18
+      # moved `PGDATA` into a version-named subdirectory of
+      # `/var/lib/postgresql`, and the official image refuses to start against a
+      # mount at the old path with a message about `pg_upgrade` that has nothing
+      # to do with this project's data. Measured here: mounting at
+      # `/var/lib/postgresql/data` on `postgres:18-alpine` is an immediate exit
+      # 1 and a restart loop. A single mount at `/var/lib/postgresql` is what the
+      # image asks for, and it is also what makes a future `pg_upgrade --link`
+      # possible without a mount-point boundary in the way.
+      - medarx-pgdata:/var/lib/postgresql
+    ports:
+      # Bound to loopback: the audit log is an asset the design names, and a
+      # database port on every interface is not a Phase 1 default.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U medarx -d medarx"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      - medarx
+    restart: unless-stopped
+
+  # -- The provider -----------------------------------------------------------
+  #
+  # The observer **is** the model provider for Phase 1. It is a stand-in that
+  # answers the OpenAI chat-completions shape and writes every request body it
+  # receives to disk before it replies. There is no model client in the image and
+  # no route to one, so "no cloud model, ever" is a property of what is deployed
+  # rather than a promise about configuration.
+  observer:
+    build:
+      context: ./observers
+    environment:
+      # Passed through from the host environment, and required: the audit log's
+      # chain is keyed, and an observer with no key is an observer whose records
+      # cannot be tied to anything. `${VAR:?message}` makes an unset value a
+      # refusal at parse time rather than an empty key at run time.
+      MEDARX_AUDIT_KEY: ${MEDARX_AUDIT_KEY:?set MEDARX_AUDIT_KEY in the environment}
+    volumes:
+      # A named volume, not a bind mount: the container runs as an unprivileged
+      # uid and a host directory this user owns raises PermissionError on the
+      # first request, after which the observer answers nothing at all.
+      - medarx-observer-records:/records
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - medarx
+    restart: unless-stopped
+
+  # -- Down unless asked for --------------------------------------------------
+  #
+  # `orthanc/orthanc` is a 404 on Docker Hub — not rate limiting — and
+  # `jodogne/orthanc:latest` ships no DICOMweb plugin, so `POST
+  # /dicom-web/studies` returns 404 against it. Neither may be pinned. The
+  # binary is `/usr/sbin/Orthanc`, not `/usr/local/sbin/Orthanc`, and
+  # `orthanc-tools` is not a Debian package. See `orthanc/Dockerfile.orthanc`.
+  orthanc:
+    profiles: ["orthanc"]
+    build:
+      context: ./orthanc
+    volumes:
+      - ./orthanc/orthanc.json:/etc/orthanc/orthanc.json:ro
+      - medarx-orthanc-data:/var/lib/orthanc/db
+    ports:
+      - "127.0.0.1:8042:8042"
+
+  # The second observer, as a service rather than as the host script that
+  # normally starts it.
+  #
+  # It runs in the **host** network namespace with exactly one added capability,
+  # `NET_RAW`, because that is the only topology in which the traffic is visible
+  # to it. A third container on the same bridge is not: a Linux bridge switches
+  # container A's veth straight to container B's, so frames between them never
+  # traverse a third container's interface. That topology was measured on the
+  # development host — 21 packets of mDNS and ARP captured, zero of the traffic,
+  # while the observer was actively receiving the requests.
+  #
+  # `MEDARX_BRIDGE_INTERFACE` is left unset by default and resolves to `any`,
+  # which is broad: it captures the whole host's traffic, not just this
+  # project's. Set it to the `br-...` id that
+  # `bash infra/capture/start_capture.sh interface medarx` prints before
+  # starting a capture you intend to reason about.
+  capture:
+    profiles: ["capture"]
+    build:
+      context: ./capture
+    network_mode: host
+    cap_add:
+      - NET_RAW
+    volumes:
+      # A named volume, not a bind mount into the working tree. `tcpdump` in this
+      # image runs as root, so a bind mount leaves root-owned artefacts in the
+      # repository that the host user can neither read nor delete — measured
+      # here, and it is the reason this is a volume. Get the capture out with
+      #   docker compose -f infra/compose.yaml cp capture:/out/out.pcap ./
+      - medarx-capture-artifacts:/out
+    command:
+      - "-n"
+      - "-i"
+      - "${MEDARX_BRIDGE_INTERFACE:-any}"
+      - "-s"
+      - "0"
+      # `-U` writes each packet out as it arrives, and `-B` enlarges the kernel
+      # capture buffer, so what is in the buffer is what is on disk if the
+      # process is killed. SIGINT always, never SIGTERM: `docker stop`'s default
+      # kills tcpdump mid-write and the pcap comes back short by whatever was in
+      # flight.
+      - "-U"
+      - "-B"
+      - "16384"
+      - "-w"
+      - "/out/out.pcap"
+
+volumes:
+  medarx-pgdata:
+  medarx-observer-records:
+  medarx-orthanc-data:
+  medarx-capture-artifacts:
+
+# The network is named `medarx` rather than left to Compose's `<project>_default`
+# default, because component I derives a bridge interface from it at run time and
+# `bash infra/capture/start_capture.sh interface medarx` is a command a reader
+# can type. The name is therefore a fixed interface of the infrastructure, not a
+# derived one, and the capture service is deliberately not attached to it: it
+# runs in the host namespace, and the whole point is that it can see the bridge
+# rather than being another endpoint behind it.
+networks:
+  medarx:
+    name: medarx
+    driver: bridge

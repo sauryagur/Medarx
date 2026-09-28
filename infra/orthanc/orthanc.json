@@ -1,0 +1,92 @@
+{
+  "//": [
+    "Medarx Phase 1 — Orthanc configuration. VERSIONED, NOT WIRED.",
+    "",
+    "No Medarx component reads this file, nothing in the tree speaks DICOMweb,",
+    "and `docker compose -f infra/compose.yaml up -d` does not start this",
+    "container: the `orthanc` service is behind `profiles: [\"orthanc\"]` and",
+    "stays down until someone asks for it by name. It exists so that Phase 2",
+    "wires up a configuration that has been read rather than one assembled from",
+    "memory, and so the three DICOMweb gotchas below are written down next to",
+    "the file they will cost somebody an afternoon to rediscover.",
+    "",
+    "GET /plugins  is the cheapest way to confirm the DICOMweb plugin loaded.",
+    "If /dicom-web is a 404 there, the image is jodogne/orthanc and not this one."
+  ],
+
+  "Name": "Medarx-Phase1-Orthanc",
+
+  "// RemoteAccessAllowed": [
+    "The key is `RemoteAccessAllowed`, NOT `AllowRemoteAccess`.",
+    "",
+    "Orthanc ignores a key it does not know, silently. With the wrong key the",
+    "server starts, reports itself healthy, and answers every remote request with",
+    "401 — which reads exactly like an authentication problem and sends you to",
+    "look at credentials that were never the issue. This one cost a real",
+    "debugging session and it is the single most likely mistake anyone will make",
+    "with this file.",
+    "",
+    "In 1.10.1 (the version Debian bookworm ships, and the version this image",
+    "builds) remote access CANNOT be enabled without authentication. So this is",
+    "a Phase 2 decision that has not been made, not a Phase 1 setting: turning",
+    "it on is one way to expose a DICOM server to the network, and Phase 2 has to",
+    "decide how callers are authenticated before it does. It is left false here",
+    "because nothing in Phase 1 connects, and a DICOM server reachable from",
+    "another host is a finding in itself."
+  ],
+  "RemoteAccessAllowed": false,
+
+  "// Authentication": [
+    "Left commented out on purpose. An `Authentication` block with a plain-text",
+    "user list is a credential in a tracked file, and Phase 1 has no user to",
+    "authenticate. Phase 2 sets this, and sets it from the environment."
+  ],
+
+  "HttpServerPort": 8042,
+  "HttpServerAddress": "0.0.0.0",
+  "HttpServerEnabled": true,
+  "HttpsServerEnabled": false,
+
+  "DicomAet": "MEDARX",
+  "DicomPort": 4242,
+  "DicomWebServerEnabled": true,
+
+  "// DicomWebServer plugin list": [
+    "In Orthanc 1.10.1 the built-in REST API serves /dicom-web itself; the",
+    "`DicomWebServer` section below adds the *extra* routes on top, and naming a",
+    "module that does not exist is a startup failure rather than a no-op. The",
+    "DICOMweb routes are available as soon as orthanc-dicomweb is installed —",
+    "which is why the package is in the Dockerfile and why the two registry",
+    "images that lack it cannot be used.",
+    "",
+    "Two more things, both measured, both worth writing down now:",
+    "",
+    "1. STOW-RS must send",
+    "     Content-Type: multipart/related; type=\"application/dicom\"; boundary=...",
+    "   or Orthanc answers 415. The `type` parameter and the boundary are both",
+    "   required; a bare `multipart/related` is not enough.",
+    "",
+    "2. `GET /dicom-web/studies/{uid}` with `Accept: application/dicom+json`",
+    "   returns 400 in 1.10.1. Use",
+    "     GET /dicom-web/studies/{uid}/metadata",
+    "   instead, which returns the instance's metadata without the DICOM payload",
+    "   in the response body."
+  ],
+  "DicomWebServer": {
+    "EnablePublic": false,
+    "EnablePrivate": false,
+    "EnableStudyList": true
+  },
+
+  "StorageDirectory": "/var/lib/orthanc/db",
+
+  "// Logging": [
+    "SystemFile and its level are left at Orthanc's defaults. A DICOM server's",
+    "log names studies, series and SOP instance UIDs, and every one of those is",
+    "an identifier; Phase 1 has no logging policy for DICOM traffic and inventing",
+    "one here would be inventing it badly. Phase 2 inherits the same",
+    "sensitive-data policy that `medarx.logging_filter` applies to Python logs."
+  ],
+
+  "IndexDirectory": "/var/lib/orthanc/db"
+}

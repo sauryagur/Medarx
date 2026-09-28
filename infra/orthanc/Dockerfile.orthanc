@@ -1,0 +1,34 @@
+# Orthanc, with the DICOMweb plugin, built from Debian rather than pulled.
+#
+# ## Why not an image from a registry
+#
+# `orthanc/orthanc` is a **404 on Docker Hub** — not rate limiting, not a
+# transient failure — and `jodogne/orthanc:latest` builds and runs but ships no
+# DICOMweb plugin, so `POST /dicom-web/studies` returns 404 against it. Neither
+# may be pinned for a Phase 2 that intends to use DICOMweb. Debian bookworm ships
+# Orthanc 1.10.1 in its own archive, and `orthanc-dicomweb` is the plugin
+# package that makes the DICOMweb routes exist at all.
+#
+# ## Why `/usr/sbin/Orthanc`
+#
+# The binary is at `/usr/sbin/Orthanc`. Not `/usr/local/sbin/Orthanc`, which is
+# where a source build puts it and where a Dockerfile copied from a source-build
+# recipe will look for it and find nothing. `orthanc-tools` — the command line
+# utilities — **is not a Debian package**; the image carries the server only, and
+# anything that needs `orthanc-storescu` will have to bring its own.
+#
+# **Orthanc is not integrated into Medarx in Phase 1.** This file builds an
+# image; no Medarx component talks to it, and there is no DICOMweb client
+# anywhere in the tree. It is versioned now so that Phase 2 wires up a
+# configuration that has been read rather than one assembled from memory.
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends orthanc orthanc-dicomweb \
+    && rm -rf /var/lib/apt/lists/*
+
+EXPOSE 8042
+
+ENTRYPOINT ["/usr/sbin/Orthanc"]
+CMD ["/etc/orthanc/orthanc.json"]

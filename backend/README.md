@@ -1,7 +1,10 @@
 # Medarx — backend
 
-The privacy kernel: allowlisted extraction, pseudonymization, four-layer
-redaction, and a fail-closed policy engine, in front of a model gateway.
+The privacy kernel: allowlisted extraction, pseudonymization, three redaction
+layers, and a fail-closed policy engine, in front of a model gateway. The
+design describes four redaction layers, the fourth of which is the policy
+decision; in the implementation that decision is component E, in its own right,
+and the contract's `Layer` enum carries no `D.4`.
 
 The normative API contract is `contracts/openapi.yaml` at the repo root — it is
 tracked, because code that depends on it is tracked. `test_openapi_contract.py`
@@ -802,3 +805,252 @@ is on the response of **every** request including blocks and refusals. An ID
 holding a space is a `400` at the boundary, because the audit log holds request
 IDs to an identifier shape and an uncaught refusal there would surface later as a
 `500` that reads as a server fault.
+## Phase 1 — running it
+
+Everything below is a command, not a description. Both beats start a container,
+run a packet capture, and tear the whole arrangement down again; both need a
+usable Docker daemon and neither has a fixture fallback, because a fixture that
+silently stood in for a live capture is the exact substitution this component
+exists to rule out.
+
+### The two demo beats
+
+```bash
+cd backend
+
+# Beat 1 — the approved path. Identifiers go in, a transformed payload comes
+# out, and the bytes that crossed the network are compared against it by two
+# observers that are not Medarx.
+uv run python ../evals/demo_beat1_approved.py
+uv run python ../evals/demo_beat1_approved.py --json --out /tmp/beat1
+
+# Beat 2 — the blocked path. An identifier that cannot be safely transformed
+# reaches the boundary, and zero bytes reach either observer.
+uv run python ../evals/demo_beat2_blocked.py
+uv run python ../evals/demo_beat2_blocked.py --case all_phi --json
+```
+
+`--json` emits the whole report as one JSON object on stdout, which is what the
+tests read. `--out` chooses where the observer's records and the capture are
+left; without it a fresh temporary directory is created and its path is in the
+output. The default is the human-readable rendering, and it shows the full
+before/after diff including the fabricated identifiers — the data is invented,
+and the diff is the point. **`--json` masks the identifiers in the request body
+and nothing else**: the transformed payload, the model reply and the captured
+bytes are printed exactly as they were, because a reader seeing the identifiers
+*absent* is the entire demonstration, and the machine-readable output is the
+part most likely to be pasted into an issue.
+
+Both scripts exit non-zero rather than reporting a red run. A demo that printed
+a leak and exited 0 would have converted its own failure into a data point.
+
+**There is no model in either path.** The observer *is* the provider: a container
+built from `infra/observers/Dockerfile` that answers the OpenAI
+chat-completions shape and writes every request body it receives to disk before
+it replies. There is no model client in that image and no route to one, so "no
+cloud model, ever" is a property of what is deployed rather than a promise about
+configuration. The reply the beats print, `Findings: 7mm nodule.`, is the
+observer's own constant, computed for itself.
+
+### The two observers, and the topology that makes the second one possible
+
+Observer one is a process at the far end of the socket: it writes down every
+byte it is given. Observer two is a `tcpdump` in the **host network
+namespace**, pointed at the project's Docker bridge. Agreement between them is
+evidence; either alone is a witness.
+
+**A third container on the same bridge cannot see the traffic between the other
+two.** A Linux bridge switches container A's virtual interface straight to
+container B's, and frames between them never traverse a third container's
+interface, however that container is attached. This is not a theory — it was
+measured on the development host, where a sniffer placed that way captured 21
+packets of mDNS and ARP and **none** of the traffic, while the observer was
+actively receiving the requests it was supposed to be watching. The capture
+therefore runs with `--network host --cap-add=NET_RAW` and one added capability:
+not root, not `--privileged`.
+
+The bridge interface is **discovered at run time** and never written into a
+file, because an interface name is at most 15 characters including the `br-`
+prefix (Linux truncates to `IFNAMSIZ - 1`) and a hard-coded one names an
+interface that does not exist until the next `docker network rm`:
+
+```bash
+bash ../infra/capture/start_capture.sh interface medarx   # prints br-xxxxxxxxxxxx
+```
+
+Two more things about the capture, both learned the hard way and both enforced
+in `start_capture.sh`:
+
+- **The pcap is always written with `-w` and read back with `-r`.** It is never
+  produced by piping `tcpdump -A` through `tee`. Under a timeout, SIGTERM kills
+  tcpdump before its block-buffered stdout flushes, and the run then reports "0
+  packets captured" having actually seen the traffic.
+- **`stop` exits non-zero when the capture saw zero frames or lost any
+  packets**, and both beats act on that exit status. A capture that silently
+  caught nothing turns every check over it into a check that passed over an
+  empty evidence set — which is a check that cannot fail, and a check that
+  cannot fail is worse than none.
+
+The capture readback is a **cooked** capture when it is taken on `any` and an
+Ethernet capture when it is taken on a named bridge; `agreement.py` reads both,
+and the two formats differ in the link-layer offset and in whether `tcpdump`
+prefixes each frame summary with an interface name and a direction.
+
+### Beat 2's zero, and why it is a measurement
+
+Beat 2's claim is a zero, and a zero is what a broken observer also produces. So
+the run sends a **control** request first — the beat-1 input, approved, on the
+same observer, the same bridge and the same capture — and four independent
+statements have to hold before the blocked request's silence means anything:
+
+| statement | what it rules out |
+|---|---|
+| the observer answered `/healthz` after the run | an observer that died silently |
+| its own record count equals the index entries on disk | a record directory someone emptied |
+| the capture saw frames, and saw the control's request body | a sniffer on the wrong interface |
+| the control's approved content is visible in the capture | a capture watching traffic but not requests |
+
+The blocked request is then measured as a **delta** against the control. Without
+the delta, the control's record and captured body answer the blocked request's
+question, and a request that sent nothing is certified by an earlier request
+that sent something. That is a false green this component produced in a real run
+once.
+
+### The stack
+
+```bash
+bash infra/verify_env.sh                            # the preflight; run this first
+docker compose -f infra/compose.yaml up -d          # postgres + observer only
+docker compose -f infra/compose.yaml ps
+```
+
+`verify_env.sh` is the test for the infrastructure. It checks that `docker
+version` answers for both client and daemon, that the `medarx` network resolves
+and yields a 15-character `br-` interface id, prints free disk, prints the
+memory budget the plan remembered against what is measured now, refuses a
+virtual environment under `/tmp`, and validates `infra/compose.yaml` with
+`docker compose config`. It exits 0 only when all three of its headline
+booleans — `docker_usable`, `network_resolvable`, `compose_valid` — are true.
+
+`docker compose up -d` starts **only** `postgres` and `observer`. `orthanc` and
+`capture` are behind `profiles`, so a default bring-up cannot start them, and
+`verify_env.sh` prints the partition rather than asserting it:
+
+```bash
+docker compose -f infra/compose.yaml --profile capture up -d capture
+docker compose -f infra/compose.yaml --profile orthanc up -d orthanc
+docker compose -f infra/compose.yaml down            # stops everything in the project
+```
+
+`MEDARX_AUDIT_KEY` must be set in the environment; the compose file uses
+`${VAR:?…}` so an unset value is a refusal at parse time rather than an empty
+key at run time.
+
+The `capture` service captures on `any` unless `MEDARX_BRIDGE_INTERFACE` is
+set, and `any` is broad — it captures the whole host's traffic, not just this
+project's. Set it to the id `start_capture.sh interface medarx` prints before
+starting a capture you intend to reason about. Its pcap lands in a named volume,
+not a bind mount, because `tcpdump` in that image runs as root and a bind mount
+leaves root-owned files in the working tree; get it out with
+`docker compose -f infra/compose.yaml cp capture:/out/out.pcap ./`.
+
+**The database schema is not created by the compose file.** Both stores are
+created on first use by `MappingStore.__init__` and by
+`medarx.audit.schema_init`, each of which calls `create_all` — a convenience for
+a single process, not a migration, and a TOCTOU race on multi-worker startup.
+Owning that DDL in one step is open work; `infra/compose.yaml` does not pretend
+to have closed it. Note also that `postgres:18-alpine` requires its volume at
+`/var/lib/postgresql`, not `/var/lib/postgresql/data`: the old path is an
+immediate exit 1 and a restart loop, with a message about `pg_upgrade` that has
+nothing to do with this project's data.
+
+### Orthanc is not integrated in Phase 1
+
+`infra/orthanc/Dockerfile.orthanc` and `infra/orthanc/orthanc.json` are
+versioned so that Phase 2 wires up a configuration that has been read rather
+than one assembled from memory. **Nothing in this repository talks to them.**
+There is no DICOMweb client anywhere in the tree, the service sits behind a
+profile, and no Phase 1 request path touches it. The three facts baked into the
+configuration are in the file beside the keys they affect: the setting is
+`RemoteAccessAllowed` and not `AllowRemoteAccess` (the wrong key is silently
+ignored and presents as a 401), STOW-RS needs a `multipart/related` content type
+with a boundary or Orthanc answers 415, and
+`GET /dicom-web/studies/{uid}` with `Accept: application/dicom+json` returns 400
+in 1.10.1, so use `…/metadata`.
+
+### Running the tests
+
+```bash
+cd backend
+find . -name __pycache__ -type d -prune -exec rm -rf {} +   # before any run after an edit
+uv run pytest --junit-xml=../backend-junit.xml
+uv run pytest ../evals --junit-xml=../evals-junit.xml        # a separate suite
+```
+
+No count is written here on purpose. A number in a document is a claim that
+goes stale the moment a test is added, and this one has been wrong before. Read
+it out of the XML, which is what the run just wrote.
+
+Count from the **JUnit XML**, not from pytest's summary line: the summary is
+lost when stdout is a pipe, and a count read from a pipe is a guess.
+
+`backend/pyproject.toml` sets `testpaths = ["tests"]`, so the canonical run
+collects `backend/tests/` only. The evaluation harness is a second suite with
+its own fixtures and has to be named explicitly.
+
+Three habits this repository depends on, each of which has cost real time here:
+
+- **Clear `__pycache__` before any run after a file change.** CPython can accept
+  a `.pyc` that passes its `(mtime, size)` staleness check while the source
+  actually differs. That produced 23 spurious failures here, twice, and the
+  symptom is a cluster of unrelated failures a re-run cannot reproduce.
+- **Run seed matrices sequentially, never concurrently.** `test_egress_e2e.py`
+  creates its Docker network with `check=False` and removes it in module
+  teardown, so two concurrent runs of that module race and produce six
+  `docker run` errors that look like a defect and are not one.
+- **After any `uv sync`, run `bash src/medarx/scripts/bootstrap_ner_model.sh`.**
+  See Setup above.
+
+### What this software is, and is not
+
+Medarx is intended for research and demonstration. It performs administrative
+report assistance using clinician-supplied findings and authorized report text.
+It does not independently interpret medical images, make diagnostic or
+treatment recommendations, or autonomously submit clinical reports. Its
+regulatory classification has not been established, and it is not validated for
+clinical use.
+
+That paragraph is reproduced **verbatim** from `info/description` in
+`contracts/openapi.yaml`, which is the normative artefact. It is not
+paraphrased anywhere in this repository, and it must not be: a regulatory
+statement that exists in three slightly different wordings is three statements,
+and the one an auditor reads is whichever one they happened to find.
+
+### Known and accepted limitations
+
+These are measured, not suspected, and they are not being fixed in Phase 1:
+
+- **`PATIENT_ID` is unreachable on the spelling a report actually writes.**
+  Anchor-label stripping blanks labels to equal-length spaces before analysis,
+  and every spelling a radiology report uses — `Patient ID:`, `PATIENT ID:`,
+  `Pat Id:`, `Patient-ID:`, `Pat:` — is an anchor label. The one spelling that
+  reaches the recogniser is `PatientID:` with no space. This is a **detection
+  gap, not a boundary gap**: nothing reaches an approved payload, because
+  layer 3's deterministic re-read catches it.
+- **About 5 of the 28 identifier-free sentences in the precision corpus have
+  clinical words masked inside an approved payload** — `CT`, `Nodule`, `Scan`,
+  `Pulmonary`, `Pleural`, `HU` read as named entities. Accepted because the
+  corruption is visible and recoverable, unlike the invisible block it
+  replaced, and because a partial fix would establish a second vocabulary table
+  nobody owns.
+- **Three enforcement conditions across two rows of the design's §6 table are
+  unreachable through the current surface**: row 3 (D.1) and row 5's unshifted-
+  date half, because component C always shifts a date first or refuses, and
+  row 6 (E), because every condition the engine can fail on is either a
+  misconfiguration `Settings` forbids or a state the orchestrator cannot be in.
+  `test_block_conditions.py` carries the evidence for each.
+- **An audit readback returns every record to any caller presenting any
+  scope.** Scoping would require storing a study or patient reference in the
+  record, and the storage policy forbids it. The log is therefore not a second
+  PHI store *and* not a per-study partitioned store; the two goals are in direct
+  tension and the storage policy won.
