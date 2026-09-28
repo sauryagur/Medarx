@@ -84,6 +84,109 @@ environment**; every other component takes the `Settings` object returned by
 | `MEDARX_GATEWAY_TIMEOUT_S` | `120.0` |
 | `MEDARX_MAX_BODY_BYTES` | `1048576` |
 
+### Running against a local model (Phase 2)
+
+The gateway speaks the OpenAI chat-completions wire spec, and Ollama already
+speaks that spec at `http://127.0.0.1:11434/v1`. **Pointing the kernel at a
+local model is configuration, and nothing else** — three environment variables
+and one registry member:
+
+```bash
+export MEDARX_GATEWAY_BASE_URL=http://127.0.0.1:11434/v1
+export MEDARX_GATEWAY_MODEL=gur-prime-2
+export MEDARX_POLICY_MODE=strict_local
+uv run python ../evals/demo_beat3_local_model.py --json --out /tmp/beat3
+```
+
+`MEDARX_GATEWAY_MODEL` must be a member of `ALLOWED_MODELS` in
+`medarx.gateway.model_registry`, which now carries `gur-prime-2` — the model
+this host serves. The registry is the closed set of names the kernel will put
+on the wire and it is **not** widened to make anything work: an identifier
+outside it is refused at layer `F` before a body is built, and the check is
+whole-identifier equality, so `gur-prime-2:latest` is a different name and is
+refused rather than normalised. `MEDARX_GATEWAY_API_KEY` stays empty; the
+client omits the `Authorization` header entirely when it is.
+
+**There is no provider branch, and the reason is that there never needed to be
+one.** The gateway builds exactly one body — `{model, messages, temperature,
+max_tokens}` — and posts it to whatever base URL the deployment names. The
+model is not named in code; it is a setting. A module that branched on a
+provider would have to hold a string literal, a name or an attribute naming
+one, and `tests/test_local_model_e2e.py::test_no_module_in_the_kernel_branches_on_a_provider`
+walks the abstract syntax tree of every module under `backend/src` to say that
+none does. The single exemption is the registry itself, which names models
+because naming models is its entire job, and it is a set compared for equality
+with no conditional in it.
+
+#### The memory constraint, and why it is a design constraint
+
+**The model and the full stack cannot always be co-resident on this host.**
+Measured, not estimated:
+
+| | |
+|---|---|
+| model on disk | 2 497 283 049 bytes (Ollama's own `api/tags`) |
+| model resident | ~3.0 GB RSS in the runner process, measured with the runner loaded |
+| host total | 15 633 MB |
+| swap | **0** |
+| available with the model resident | ~650 MB |
+| available with it unloaded | ~3 700 MB |
+
+The phase-1 design estimated the model at "~3.4 GB" and the estimate was wrong
+in the direction that matters least on paper: the file is 2.5 GB, the resident
+set is larger than the file, and **the number that matters is the resident set
+plus everything else on the machine**, because with zero swap there is nowhere
+for the overflow to go. Postgres, the observer, the backend, a browser and an
+image viewport are not optional on this deployment. An OOM kill on a shared
+host does not stop the process that caused it; it stops whatever else was
+resident.
+
+So the operational consequence, stated plainly: **a deployment that serves a
+4B model locally must decide, before it serves anything, what gives way when
+the host is full.** The three options, none of which this workstream picks,
+because the choice is a deployment's:
+
+1. **Reserve the headroom.** Cap the model size against the host's free memory
+   at start-up and refuse to load otherwise, so the failure is a refusal
+   rather than an OOM kill.
+2. **Add swap, or size the model to the host.** A smaller quantisation of the
+   same model, or a host with swap, removes the cliff edge. Neither is free:
+   swap on a clinical workstation turns a fast failure into a slow one.
+3. **Run the model on separate hardware** and point `MEDARX_GATEWAY_BASE_URL`
+   at it. This is the only option that does not make the model's footprint a
+   shared-resource negotiation, and it is the one the deployment should reach
+   for first — at which point the "local" claim in `strict_local` needs its own
+   scrutiny, because the boundary is now a network boundary.
+
+**Nothing in the kernel manages this.** A model server that is not resident is
+a `ProviderTransportError` at the gateway, which is an availability failure and
+deliberately **not** a privacy block — design §6 has no row for it, and
+recording it as a block would put a redaction event in the audit log that never
+happened. That is the correct behaviour and it is also not a substitute for
+deciding the policy.
+
+#### Latency
+
+Measured on this host against `gur-prime-2` (qwen3 4.0B, Q4_K_M), through the
+full validate-then-send path:
+
+| | |
+|---|---|
+| cold send (model explicitly unloaded first, `keep_alive: 0`) | **~14.9 s** |
+| warm send (model resident) | **~1.2 s** |
+| `MEDARX_GATEWAY_TIMEOUT_S` | 120.0 s |
+
+`demo_beat3_local_model.py` measures both rather than quoting them, and it
+forces the cold case with an explicit unload so "cold" is a measurement and not
+a recollection of when the machine last touched the model. The 120 s default is
+the right one for this: a 14.9 s cold call is 8% of the budget, and a timeout
+shorter than the cold start would fire on exactly the request a user is waiting
+for. **A hang is not a slow call**: a provider that accepts a request and never
+answers is given up on at the configured timeout, once, with no retry —
+`test_a_hung_provider_is_given_up_on_once_and_not_retried`. A retry would be
+actively dangerous here, because a second request to a model already running an
+inference is how a slow answer becomes an out-of-memory kill.
+
 ### Credentials
 
 Both `MEDARX_AUDIT_KEY` and `MEDARX_GATEWAY_API_KEY` default to the empty
@@ -954,6 +1057,88 @@ it replies. There is no model client in that image and no route to one, so "no
 cloud model, ever" is a property of what is deployed rather than a promise about
 configuration. The reply the beats print, `Findings: 7mm nodule.`, is the
 observer's own constant, computed for itself.
+
+### Beat 3 — the real kernel against a real local model
+
+```bash
+cd backend
+
+# A real Draft: clinician-supplied findings, through the real pipeline, through
+# a preflight, through a human's send, to a real local model, and back — with
+# the bytes the model received reassembled off the wire.
+uv run python ../evals/demo_beat3_local_model.py
+uv run python ../evals/demo_beat3_local_model.py --json --out /tmp/beat3
+
+# Warm only, without unloading the model first.
+uv run python ../evals/demo_beat3_local_model.py --skip-cold
+```
+
+**This one is different from beats 1 and 2 in one way that matters, and the
+difference is the evidence.** In both of those the provider is a container that
+writes down what it was sent, so there are two witnesses to the wire and neither
+is Medarx. Here the provider is a real model, which does exactly one thing with
+a request: run inference. It records nothing. So there is **one** witness — the
+`tcpdump` — and the second is the gateway's own record, which is Medarx
+attesting to itself. `check_agreement` is run anyway and its verdict is in the
+report: it refuses, as an asymmetric observation, and that is the correct answer.
+A run with one observer must not read as agreement, and this is the assertion
+that keeps beat 3's single-observer claim honest instead of a downgrade nobody
+notices.
+
+What does **not** depend on that pairing: the needle is the approved report
+text, read out of the `StructuredPayload` component E approved, and the run
+turns on that text being in the captured bytes and on every fabricated
+identifier being absent from **every** body on the wire. The capture is
+byte-for-byte what the gateway handed the transport, and it carries the
+kernel's redacted report text and none of the caller's identifiers.
+
+Two environment variables make the capture work against a local model, both
+additive and both defaulting to today's behaviour:
+
+```bash
+# `lo`, not `any`: Ollama listens on loopback, so `lo` is the narrow interface
+# carrying this traffic and `any` would capture the whole host's.
+MEDARX_CAPTURE_INTERFACE=lo
+
+# Scope to the port the deployment is pointed at. On a shared host `lo` carries
+# every other process's traffic, and a check that swept every body in the
+# capture for an identifier finds another program's request and reports a leak
+# that never happened. This was not hypothetical: it is what this run did
+# before the filter existed.
+MEDARX_CAPTURE_FILTER='tcp port 11434'
+```
+
+**A filter changes what `start` waits for, and says so.** Unfiltered, `start`
+returns only once the capture has written a frame, which proves it is
+*draining*; filtered, the frames that would prove that are the ones the filter
+excludes, and waiting for them would mean waiting for the thing being measured.
+With a filter, readiness drops to "the pcap is open", `start` prints that, and
+a truncated body is caught by the caller — a short read is simply not
+byte-identical to what was sent, which is the real check and was never optional.
+
+**Beat 3's test module is opt-in**, because running it loads 2.5 GB of model
+into memory and a test suite that silently reserves that on a shared host does
+not fail itself, it fails everything else resident:
+
+```bash
+cd backend
+
+# Off by default; skipped with the reason in the skip line.
+uv run pytest tests/test_local_model_e2e.py -q -rs
+
+# Run it.
+MEDARX_LOCAL_MODEL_E2E=1 uv run pytest tests/test_local_model_e2e.py -q
+
+# Run it, and make any skip a collection error. This is the only mode in which
+# "the tests passed" cannot mean "the tests did not run".
+MEDARX_LOCAL_MODEL_E2E=required uv run pytest tests/test_local_model_e2e.py -q
+```
+
+The module holds the same negative tests beats 1 and 2 do: it takes the
+evidence a passing run produced and damages it four ways — substituted bytes,
+both witnesses agreeing about the wrong payload, an identifier in a *second*
+body on the wire, and a duplicated body that makes the "exactly one
+byte-identical body" count wrong — and asserts the check refuses each one.
 
 ### The two observers, and the topology that makes the second one possible
 

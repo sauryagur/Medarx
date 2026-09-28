@@ -113,6 +113,47 @@ f22d85d feat(deident): seed surrogate UIDs on the value and never pad an illegal
 732f078 feat(contract): make every response schema satisfiable and name the keywords layer A accepts
 ```
 
+### Phase 2, workstream 4 — the real kernel against a real local model
+
+Phase 1 is closed; this is the first Phase 2 workstream to change the kernel
+itself rather than the surface in front of it. It is small, and the reason it
+is small is the point.
+
+| Commit | What it did |
+|---|---|
+| `feat(gateway): register the local model and refuse an empty draft` | `gur-prime-2` added to `ALLOWED_MODELS` as a deliberate member, and `ModelGateway._parse` refuses a `choices[0].message.content` with no text in it |
+| `feat(e2e): add the local-model beat, the two capture knobs, and the module` | `evals/demo_beat3_local_model.py`, `MEDARX_CAPTURE_INTERFACE` / `MEDARX_CAPTURE_FILTER`, `backend/tests/test_local_model_e2e.py` |
+| `docs(readme,handoff): record the local-model configuration and the memory cliff` | the configuration, the measured timing and memory, and section 8 items 9 to 12 |
+
+**No provider branch was needed and none was added.** Ollama already speaks the
+OpenAI chat-completions wire spec, so the whole of the work is three
+environment variables and one registry member. The claim is not asserted: the
+byte body the real model received is the OpenAI body the gateway built, and
+`test_no_module_in_the_kernel_branches_on_a_provider` walks the abstract syntax
+tree of every module under `backend/src` to show that none holds a string
+literal, a name or an attribute naming a provider — the model registry being
+the single exemption, and it being a set compared for equality with no
+conditional in it.
+
+**The registry was not widened to make anything work.** It gained exactly one
+member, the one this deployment is pointed at, and `gur-prime-2:latest` is
+still refused: admitting it would mean the registry resolves names, and a
+registry that resolves names has an "unknown" that depends on which normaliser
+ran. The refusal for an identifier outside the set still happens at layer `F`
+before a body is built, and the tests that pin it still pass.
+
+**What landed in the kernel, beyond configuration, is one refusal.** An empty
+model answer is not returned as a draft, because an empty string is shaped
+exactly like a successful one and is the failure a reader cannot see. A refusal
+*in prose* is deliberately not caught: that is output validation, it is Phase
+4's, and the line is drawn at "is there any text at all". Section 8 item 11
+states both halves.
+
+**The one-observer degradation is real and is recorded, not smoothed over.**
+Section 8 item 10: a real model records nothing, so component I's two-observer
+rule has one outsider and one piece of Medarx attesting to itself, and
+`check_agreement` says so rather than passing.
+
 ### What changed since this document was written
 
 Eight commits landed after the `47544a2` this document recorded. Six of them
@@ -846,6 +887,10 @@ test for every item that has one — items 1, 2, 3 and 4 — and each is still
 present under the name given here. **No item has changed.** Only the two line
 references below moved, and both are noted in place.
 
+**Items 9 to 12 were added by Phase 2 workstream 4, 2026-09-28**, and they are
+the same kind of entry: a boundary that was measured rather than inherited.
+Items 1 to 8 are phase 1's and are unchanged; nothing below was closed.
+
 **1. `PATIENT_ID` is unreachable on the spelling a report actually uses.**
 Anchor-label stripping blanks labels to equal-length spaces *before* analysis,
 and every spelling a radiology report writes ("Patient ID:", "PATIENT ID:",
@@ -953,6 +998,107 @@ per-task reports as claims to re-verify. `progress.md` is 250 lines and
 `grep -c '^Task 1[3-7]:'` returns 5. *Owner:* discharged. The residual gap is
 that `.superpowers/sdd/` is still gitignored, so none of it is in git.
 
+**9. The local model and the full stack cannot always be co-resident, and
+nothing in the kernel manages that.** Phase 2 workstream 4 pointed the kernel at
+a real local model and measured the thing the phase-1 design only estimated.
+Measured on this host, 2026-09-28:
+
+| | |
+|---|---|
+| model | `gur-prime-2`, qwen3 4.0B, Q4_K_M |
+| model on disk | 2 497 283 049 bytes (Ollama `api/tags`) |
+| model resident | ~3.0 GB RSS across the model server's processes |
+| host total | 15 633 MB |
+| swap | **0** |
+| available, model resident | ~650 MB |
+| available, model unloaded | ~3 700 MB |
+
+**The phase-1 design's "~3.4 GB" estimate was wrong, and the correction does
+not help.** The file is 2.5 GB, not 3.4; the resident set is larger than the
+file; and the number that decides anything is the resident set plus everything
+else on the machine, because with zero swap there is nowhere for the overflow
+to go. A browser, an editor, Postgres, the observer and an image viewport are
+not optional on this deployment. **An OOM kill on a shared host does not stop
+the process that caused it — it stops whatever else was resident.** That was
+observed in practice during this workstream: loading the model took available
+memory from ~3.7 GB to ~650 MB while other work was in progress, and the
+workstream's own test module had to be made opt-in as a result.
+
+So this is a constraint a deployment must **design around**, not a transient:
+cap the model size against free memory and refuse to load, or add swap, or move
+the model to separate hardware. The third is the one to reach for first, and
+it carries its own consequence — at that point `strict_local` describes a
+network boundary, not a loopback one, and the mode's meaning has to be argued
+rather than assumed. **No option is chosen here**: the choice belongs to the
+deployment, and a kernel that picked one would be making a capacity decision on
+behalf of an operator who owns the hardware.
+
+What the kernel *does* own is the failure mode, and it is already correct and
+is unchanged: a model server that is not resident is a `ProviderTransportError`,
+which is deliberately **not** a `MedarxError` and therefore not a 422 block
+receipt. Design §6 has no row for availability, and recording an OOM as a
+privacy block would put a redaction event in the one store the design names as
+an asset that never happened. That is right, and it is not a substitute for
+deciding the policy.
+*Owner:* unassigned; it is a deployment decision, and the measurement is what
+the decision has to be based on.
+
+**10. The one-observer degradation of the egress evidence against a real
+model.** Component I's rule is the **two-observer** rule: a process at the far
+end of the socket writing every byte it is given, and a `tcpdump` in the host
+namespace. Against the Phase 1 observer container, the observer *is* the
+provider and both witnesses are outsiders. Against a real local model there is
+no second witness at all — a model does not record its input — so the pairing
+becomes "the capture and Medarx's own record of what it handed the transport",
+and one half of that is Medarx attesting to itself. The tcpdump half is as
+independent as it was; the *pairing* is weaker, and the report says so rather
+than presenting a one-observer run as a two-observer one. `check_agreement` is
+still run and returns `agree: false` with `observer_record_count: 0`, which is
+the correct answer and is asserted by
+`backend/tests/test_local_model_e2e.py::test_the_two_observer_rule_refuses_when_only_one_observer_saw_the_request`.
+What still binds the wire to the approved payload does not depend on the
+pairing: the needle is the approved report text read out of the object
+component E approved, and the run turns on that text being present and on every
+fabricated identifier being absent from every body on the wire.
+*Owner:* a second independent witness for a real provider is not available
+without the provider cooperating. Phase 3 owns the cloud case, where the
+provider is third-party and the observer is the only witness available at all.
+
+**11. The kernel does not judge the model's output, and a 4B model answering
+`Draft` is exactly the case where that matters.** Two things are decided and
+both are visible in the code:
+
+- **An empty answer is refused.** `ModelGateway._parse` raises
+  `ProviderResponseError` when `choices[0].message.content` is a string with
+  no non-whitespace in it. An empty string is shaped exactly like a successful
+  draft, renders as one, and is the failure a reader cannot see. It is a
+  `ProviderError` and therefore not a `MedarxError`, so it cannot become a 422
+  block receipt — nothing was withheld for a privacy reason.
+- **A refusal in prose is not caught, and that is deliberate.** A textual
+  decline is still text, still reaches the human who is meant to reject it, and
+  catching it would be output validation — which is **Phase 4's** and not this
+  kernel's. The same goes for prose that is not a report section and for prose
+  that invents a finding. The line is drawn at "is there any text at all",
+  which is mechanical and has no false positives.
+
+`tests/test_gateway.py` holds both directions: an empty answer is refused, and
+a textual decline is returned unchanged. The report's answer to "what does
+this not check" is: everything above the line.
+*Owner:* Phase 4 owns output validation. This is a boundary statement, not a
+deferral.
+
+**12. `Prior Summary` and `Ask` are still reachable through the API and were
+deliberately not exercised against the local model.** They are Phase 5, the API
+accepts them today, and the server has no way to know what phase it is in. A 4B
+model answering `Ask` un-validated, un-cited and un-attributed is precisely what
+the design forbids, so the workstream did not put one there: a request naming
+either function reaches the same pipeline a Phase 5 deployment will use, and
+nothing in the kernel distinguishes them. **The containment is the client, and
+it is currently the client only** — which is the same live hazard the phase-2
+plan records for the viewer's three-tab switcher, and the reason those two tabs
+must be rendered visible-and-disabled rather than enabled-and-ignored.
+*Owner:* Phase 5, and the viewer workstream for the control itself.
+
 ---
 
 ## 9. Environment
@@ -976,6 +1122,14 @@ that moved are given as **was → now**.
   / 12 cores". Availability moves with what is running, so treat it as a range;
   what matters for Phase 2 is that a 2.5 GB resident model plus Orthanc, the
   OHIF dev server and the test suite is tight, not that the number is exact.
+  **Re-measured 2026-09-28 by Phase 2 workstream 4, and the "tight" is sharper
+  than a range**: with `gur-prime-2` resident the host reports ~650 MB
+  available, and unloaded it reports ~3 700 MB. The model is 2 497 283 049 bytes
+  on disk and about 3.0 GB resident across the model server's processes. **Zero
+  swap means the difference between those two numbers is the whole margin**, and
+  an OOM kill on a shared host takes down whatever else is resident rather than
+  the process that caused it. See section 8 item 9; this is a deployment
+  decision, not something the kernel manages.
 - **Disk: 13 GB available on `/` (218G total, 194G used) — the filesystem is
   95% full. This is a large improvement: it was 3.9 GiB free at 99% full.**
   `docker image prune -a -f` during Task 20 reclaimed **10.01 GB**. Docker's
