@@ -625,8 +625,20 @@ actively receiving requests. The pcap is always written with `-w` and read
 back with `-r`, never `tcpdump -A | tee` — under `timeout`, SIGTERM kills
 tcpdump before its block-buffered stdout flushes and the run reports "0 packets
 captured" having seen real traffic. `stop` counts the frames in the readback and
-**exits non-zero when the count is zero**, so a capture that saw nothing cannot
-pass quietly.
+**exits non-zero both when the count is zero and when packets were lost**, so a
+capture that saw nothing — and a capture that dropped the frame carrying the
+request — cannot pass quietly. It names the cause from tcpdump's own numbers
+rather than assuming one: a non-zero `dropped by kernel` really is a ring buffer
+too small for the offered load, while a zero there with a positive gap is the
+shutdown race, frames the filter had matched that had not been copied out when
+SIGINT ended the read loop. An earlier version printed "kernel buffer overflow"
+unconditionally, naming a cause its own evidence contradicted.
+
+Both demo beats act on that exit status. A capture that saw **nothing** is
+worthless outright. A capture that **lost frames** is judged against whether it
+demonstrably reassembled the control request's whole body, because that is what
+makes the reassembly path known-good on this capture — the difference is stated
+rather than assumed, and the loss is reported in every output either way.
 
 **The check: `infra/capture/agreement.py`.** `check_agreement` agrees when
 either **(a)** both observers saw the request, the recorded bytes equal the
@@ -662,24 +674,28 @@ not say); it can only ever make the result *less* agreeable.
 
 **Reading the capture.** Only `tcpdump -X -s 0 -r` is parsed — the one readback
 that carries packet bytes verbatim rather than tcpdump's rendering of them. The
-link-layer offset is **detected, not assumed**: on this host the frames on the
-Docker bridge arrive beginning at the IPv4 header with no Ethernet header in
-front, despite `link-type EN10MB`. A parser assuming 14 bytes of Ethernet would
-extract nothing and report "no request was seen" for every capture — a check
-that cannot fail. Reassembly is by TCP stream and sequence number, and **a
-stream with a gap contributes nothing**: a missing segment would otherwise yield
-a plausible reconstruction rather than the bytes that were transmitted.
+link-layer offset is **detected, not assumed**, at each of the four offsets this
+project can actually be handed: 0 (the frames on the Docker bridge arrive
+beginning at the IPv4 header with no Ethernet header in front, despite
+`link-type EN10MB`), 14 (Ethernet), 16 (`LINUX_SLL`) and 20 (`LINUX_SLL2`, which
+is what `-i any` and the compose capture service's default produce). A candidate
+is accepted only if the version nibble says IPv4 and the protocol byte says TCP,
+so a wrong guess is rejected rather than silently read. The frame *summary* is
+searched rather than anchored, because a cooked readback prefixes every summary
+with an interface name and a direction. Both of those were wrong at one point and
+both failed the same way: no frames parsed, `request_bodies` returned nothing, and
+a **blocked** request's "neither observer saw anything" scored full agreement over
+a capture that had watched it go past. A parser that cannot read a capture has to
+say so, not report an absence.
 
-**Running it.** Build both images, start the observer on a bridge network with a
-named volume for its records (`docker cp` them out afterwards — the unprivileged
-container cannot write a host directory), start the capture, drive requests
-through `create_app`, stop the capture, then read the two artifacts with
-`check_agreement`. `tests/test_egress_e2e.py` does exactly that, live, marked
-`e2e` and skipped when Docker is unusable. `tests/test_egress_agreement.py` runs
-the rule against a **real recorded capture** committed under
-`tests/fixtures/capture/`, and asserts the capture and the observer record are
-genuinely the same bytes so the fixture cannot drift into two hand-written files
-that agree.
+Reassembly is by TCP stream and sequence number, and **a stream with a gap
+contributes nothing**: a missing segment would otherwise yield a plausible
+reconstruction rather than the bytes that were transmitted.
+
+**A capture that was not watching is not agreement.** The silence clause requires
+the capture to have carried TCP, not merely to have carried frames. Bridge
+chatter is ARP, mDNS and SSDP, and a frame count alone is satisfied by exactly the
+tool this project already got wrong once.
 
 ## Component J — application API and composition root
 
