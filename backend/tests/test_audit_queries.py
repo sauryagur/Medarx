@@ -93,9 +93,18 @@ def test_the_limit_bounds_are_the_contract_parameter_definition():
 
 
 def test_the_search_keywords_are_the_contract_parameter_names():
+    """The readback's filters are the contract's *query* parameters, and only those.
+
+    `X-Scope` is now declared on this operation too, because the code enforces it
+    and a client generated from the document has to know it is there. It is a
+    header rather than a filter, so it is excluded by `in` and not by name — a
+    name-based exclusion would keep passing if the header were renamed and a real
+    filter added under its name.
+    """
     document = _contract()
     declared = document["paths"]["/v1/audit/records"]["get"]["parameters"]
-    names = {_resolve(p, document)["name"] for p in declared}
+    names = {_resolve(p, document)["name"] for p in declared
+             if _resolve(p, document)["in"] == "query"}
     keyword_only = set(inspect.signature(search_records).parameters) - {"log"}
     assert names == keyword_only
 

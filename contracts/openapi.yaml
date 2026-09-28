@@ -46,6 +46,56 @@ info:
     ## Audit readback
 
     The audit log is append-only and raw PHI is never stored in it, by field-by-field storage policy. The readback response therefore returns **exactly the stored fields** — hashes, field names, action codes, approvals, dispositions. It deliberately exposes no raw-PHI field, because none exists to expose; a consumer needing payload content is looking at the wrong store.
+
+    ## Three states, and where each one is produced
+
+    | State | Produced by | Meaning |
+    |---|---|---|
+    | `needs_review` | `preflightFunctionExecution` (`200`) | Validated by A, C, D and E. **Nothing has been transmitted.** Awaiting an explicit human decision to send. |
+    | `blocked` | any operation (`422` + `BlockReceipt`) | A component refused. **Nothing was transmitted.** The receipt names the component and its codes. |
+    | `approved` | `sendApprovedExecution`, `createFunctionExecution` (`200` + `ExecutionResponse`) | The payload was approved *and* transmitted, and the model answered. |
+
+    The third state exists because the atomic execution makes `approved` and `sent` the same
+    instant, so before `preflightFunctionExecution` there was no moment at which a human was
+    reviewing anything — a client showing a "needs review" state would have been asserting a
+    privacy state the system never evaluated. Here the server produces it, from a pipeline that
+    ran, and a `send` is a separate call that either transmits the payload that preflight
+    published or refuses.
+
+    **A validated preflight leaves no audit record**, because nothing was refused and nothing was
+    transmitted: the record is written by the send, or by the block. `getAuditRecord` for a
+    preflight that has not been sent is therefore `404`, and a client drawing a timeline for one
+    must handle that rather than assume the record is there.
+
+    ## The authorization boundary, and what it is not
+
+    Every operation except `getPolicyConfiguration` requires the `X-Scope` header, declared once
+    in `components.parameters.ScopeHeader` and referenced by each. `X-Scope` is a **synthetic
+    demonstration input that models an authorization boundary. It is not an authentication
+    mechanism and it is not a defence against an attacker**: this document declares no security
+    scheme, root `security` is the empty list, and anyone who can reach this server can present
+    any scope they like. A client that treats the header as a credential, or that omits it because
+    a generated client did not know to send it, is wrong in the two opposite directions and both
+    are visible at the first request. Real authentication and per-user authorization are deferred
+    to Phase 6.
+
+    `getPolicyConfiguration` takes no scope and declares no `403`: it reads the deployment's own
+    configuration and touches no study, draft or record. That is stated on the operation rather
+    than left as an omission, because a header that is required everywhere else and silently
+    optional on one route is a header a client cannot reason about.
+
+    ## Where the pipeline stages are, and are not
+
+    `PreflightResponse.stages` carries the stages a preflight reached — five of the six, because
+    `Model request` belongs to component F and a preflight stops before it. `ExecutionResponse` and
+    `BlockReceipt` deliberately do **not** carry `stages`: both are closed schemas the design
+    fixes, and adding a field to a block receipt that an auditor reads as "the whole of what was
+    refused" is a change to that artefact rather than a convenience. A client drawing a timeline
+    for either reads `getAuditRecord`, where `stages` is derived from the stored `layer` — which is
+    the architecturally correct source, because the audit log is the evidence and a timeline built
+    from the live execution would be Medarx attesting to itself. **A `layer` of `J` yields an empty
+    `stages` list**: the request surface refused before any stage was behind the request, and a
+    client must render that as "refused at the request surface", not as a missing timeline.
   contact:
     name: Medarx (research / demonstration project)
   license:
@@ -70,6 +120,13 @@ tags:
     description: >-
       Component G — append-only, tamper-evident audit readback. Returns stored fields only;
       raw PHI is never stored and therefore never returned.
+  - name: preflight
+    description: >-
+      Component J — validate-then-send. Runs A, C, D and E and **stops before F**: returns the
+      transformed payload the model would receive, the field-action summary, the payload hash, the
+      stage list, and the policy configuration in force. A second operation transmits exactly the
+      payload a preflight approved. Phase 2 scope; additive to the Phase 1 surface, which is
+      unchanged.
 
 servers:
   - url: http://localhost:8000
@@ -103,6 +160,7 @@ paths:
         `report_text`, which is a documented pipeline input rather than a prompt. Submitting anything
         outside those shapes is rejected at this surface and never enters the pipeline.
       parameters:
+        - $ref: '#/components/parameters/ScopeHeader'
         - $ref: '#/components/parameters/FunctionNamePathParam'
         - $ref: '#/components/parameters/RequestIdHeader'
       requestBody:
@@ -170,6 +228,7 @@ paths:
         Requires a human-supplied reviewer identity. In Phase 1 this is a synthetic identifier, since
         the design's per-user authorization model is deferred to Phase 6.
       parameters:
+        - $ref: '#/components/parameters/ScopeHeader'
         - $ref: '#/components/parameters/RequestIdPathParam'
       requestBody:
         required: true
@@ -217,6 +276,178 @@ paths:
             $ref: '#/components/headers/RequestIdHeader'
           $ref: '#/components/responses/UnexpectedError'
 
+  /v1/functions/{function_name}/executions/preflight:
+    post:
+      tags: [preflight]
+      operationId: preflightFunctionExecution
+      summary: Validate a request and publish the payload a send would transmit, without sending it.
+      description: |
+        Runs components A (allowlisted extraction), C (pseudonymization), D (redaction layers 1–3)
+        and E (policy), in that order, and **stops before F**. No provider is contacted, no socket
+        is opened and no request body leaves the environment: the return is `needs_review`, the
+        third state, and it is produced by the server from a pipeline that actually ran.
+
+        On success the response carries:
+
+        * `payload` — **the transformed payload itself**, field for field, being exactly what the
+          model would receive and nothing more. It is not a description of it and not a rendering
+          of it, so a client must not reconstruct, re-derive or approximate it;
+        * `field_actions` — one entry per field of the payload plus one per property the caller
+          supplied that no payload field carries, each `included`, `transformed` or `excluded`;
+        * `approved_payload_hash` — the hash component F re-derived from that payload's own
+          content, in the `sha256:` spelling. This is the value a send is bound to, and the value
+          independent egress verification compares observed bytes against;
+        * `stages` — the pipeline stages this preflight reached. **Five, not six**: `Model request`
+          belongs to component F and a preflight stops before it, so a client rendering six stages
+          here would be claiming a provider was called;
+        * `policy_version` and `policy_mode` — the configuration in force. Both are **read-only
+          reporting**. This operation takes the same closed `ExecutionRequest` as the atomic path,
+          which has no `policy_mode` property and is `additionalProperties: false`, so a request
+          that supplies one is a `400`. A client must render the mode and must not offer a control
+          that changes it: the mode is a deployment configuration precisely so that a caller cannot
+          route around the boundary by picking a laxer one, and a working selector would be a
+          second, unaudited way to choose the boundary;
+        * `request_id` — the identifier a send takes.
+
+        On any privacy-policy block the response is `422` with a `BlockReceipt`, exactly as the
+        atomic operation returns one, and the block is recorded in the audit log the same way.
+        **A blocked preflight transmits nothing.**
+
+        A preflight that validates writes **no** audit record: nothing was refused and nothing was
+        transmitted, and the record's `stages` is derived from a stored `layer` whose only null
+        case means "reached every stage" — a record here would claim a model call that never
+        happened. `getAuditRecord` for a validated-but-unsent preflight is `404`. The record is
+        written by `sendApprovedExecution`, or by the block.
+
+        The payload returned here is the payload, not a summary of one, and every value in it has
+        been approved for a model. It is still the payload: a client must not persist it in
+        browser storage, and must not log a response body.
+      parameters:
+        - $ref: '#/components/parameters/FunctionNamePathParam'
+        - $ref: '#/components/parameters/ScopeHeader'
+        - $ref: '#/components/parameters/RequestIdHeader'
+      requestBody:
+        required: true
+        description: The execution request to validate. Identical to `createFunctionExecution`'s.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecutionRequest'
+      responses:
+        '200':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
+          description: >-
+            The privacy pipeline approved the payload and nothing has been transmitted. The
+            response is `needs_review`: a validated payload awaiting an explicit human decision to
+            send it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreflightResponse'
+        '400':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
+          $ref: '#/components/responses/MalformedRequest'
+        '403':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
+          $ref: '#/components/responses/FunctionNotFound'
+        '415':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
+          $ref: '#/components/responses/Blocked'
+        '500':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
+          $ref: '#/components/responses/UnexpectedError'
+
+  /v1/executions/{request_id}/send:
+    post:
+      tags: [preflight]
+      operationId: sendApprovedExecution
+      summary: Transmit exactly the payload a preflight approved, and return the model's answer.
+      description: |
+        Takes a request ID from a preflight and transmits **exactly the payload that preflight
+        approved** — the same object, and the same wire bytes built and encoded when component F
+        authorised it. Nothing is recomputed: no component is re-run, no payload is re-derived, no
+        second attempt is made to build the body. A preview and a transmission therefore cannot
+        disagree, because there is no second computation for them to disagree about.
+
+        This is the human's explicit go. `recordHumanApproval` is a different operation with a
+        different job — it records a judgement about a draft that already exists — and this one is
+        the transmission gate in front of it.
+
+        **It accepts no body and no content of any kind.** The draft cannot be edited,
+        substituted or smuggled through this path: the caller names a request ID and the server
+        transmits what it authorised for it. Editing a draft requires a new preflight, which re-runs
+        the whole privacy pipeline and re-approves.
+
+        An approval is **one-shot** and is consumed by the first send, whether or not that send
+        succeeded, so a double-clicked control cannot transmit twice and cannot file two records
+        under one request ID. A later send for the same request ID is `404`, as is a send for a
+        request ID that was never preflighted.
+
+        An approval is **not durable**. The pending payload is held in the serving process, in
+        memory, bounded in number, and is never written to the audit log — whose storage policy
+        admits no field that could hold a value. A restart of the process therefore loses every
+        pending approval, and a send across a restart is `404` rather than a re-derivation. That
+        is the deliberate cost: re-running the pipeline at send time would transmit a payload
+        nobody previewed, which is the failure this pair of operations exists to make impossible.
+
+        Three conditions refuse the send before any byte moves, and none of them is a
+        `ProblemDetail` about a privacy block except where the contract says so:
+
+        * `404` — no pending approval: an unknown, already-sent, evicted or restarted request ID.
+        * `422`, layer `E`, `UNKNOWN_POLICY_VERSION` — the policy version in force is not the one
+          the approval was made under (design §6 row 6).
+        * `422`, layer `F`, `PAYLOAD_MISMATCH` + `HASH_MISMATCH` — the token the send would transmit
+          was authorised for a different payload than the preflight approved (design §6 row 7).
+
+        On success the response is the same `ExecutionResponse` the atomic operation returns, with
+        `status: approved`, the model response as a **draft requiring explicit human sign-off**, and
+        the hash of the payload that was transmitted. A record is appended to the audit log with
+        `final_disposition: pending_human_approval`, and `human_approval` is `null` on the record
+        until a human decision is recorded against the request ID.
+      parameters:
+        - $ref: '#/components/parameters/RequestIdPathParam'
+        - $ref: '#/components/parameters/ScopeHeader'
+      responses:
+        '200':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
+          description: >-
+            The approved payload was transmitted and the model gateway returned a response. The
+            response is a draft; it has not been approved by a human and has not been written to
+            any clinical system.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionResponse'
+        '403':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
+          $ref: '#/components/responses/ExecutionNotFound'
+        '422':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
+          $ref: '#/components/responses/Blocked'
+        '500':
+          headers:
+            $ref: '#/components/headers/RequestIdHeader'
+          $ref: '#/components/responses/UnexpectedError'
   /v1/policy:
     get:
       tags: [policy]
@@ -237,8 +468,23 @@ paths:
 
         The policy mode is a **deployment configuration**, not a per-request parameter. A request
         cannot choose its mode: the mode is fixed for the deployment precisely so that a caller
-        cannot route around the boundary by picking a laxer mode. Consequently `ExecutionRequest`
+        cannot route around the boundary by picking a laxer one. Consequently `ExecutionRequest`
         has no `policy_mode` field, and a request that supplies one is a malformed request (`400`).
+
+        **A client must render this value read-only and must not offer a control that changes it.**
+        The route control in the UI is display, not selection: a working selector would be a
+        second, unaudited way to choose the boundary, which is the exact thing the paragraph above
+        exists to prevent, and it would reach a different boundary than the one every receipt and
+        audit record was written under. Changing modes is a deployment change — a restart with a
+        different configuration — and there is no endpoint, in this document or any other, that
+        performs it. `PreflightResponse.policy_mode` reports the same value for the same reason, so
+        a client showing the active route next to a payload preview has one source and not two.
+
+        **This operation requires no `X-Scope` and declares no `403`.** It reads the deployment's own
+        configuration and touches no study, draft or record, so there is nothing to authorize
+        against. This is stated on the operation rather than left as an omission, because a header
+        that is required on every other operation and silently optional here is a header a client
+        cannot reason about.
 
         The returned `policy_version` is the value that appears in block receipts and audit records.
         An unknown or missing policy version causes a fail-closed block in every implemented mode
@@ -290,6 +536,7 @@ paths:
         refused with `400` rather than ignored, so a caller cannot believe a filter applied when it
         did not.
       parameters:
+        - $ref: '#/components/parameters/ScopeHeader'
         - $ref: '#/components/parameters/RequestIdQueryParam'
         - $ref: '#/components/parameters/FunctionQueryParam'
         - $ref: '#/components/parameters/DispositionQueryParam'
@@ -330,6 +577,7 @@ paths:
         If no record exists for the supplied request ID, `404` is returned. The audit log is
         append-only and is never rewritten, so a record that exists cannot disappear.
       parameters:
+        - $ref: '#/components/parameters/ScopeHeader'
         - $ref: '#/components/parameters/RequestIdPathParam'
       responses:
         '200':
@@ -439,6 +687,34 @@ components:
         minimum: 1
         maximum: 500
         default: 100
+
+    ScopeHeader:
+      name: X-Scope
+      in: header
+      required: true
+      description: >-
+        The scopes the caller holds, as a comma- or semicolon-separated list of tokens. Each token
+        is either `scope:study:<study_reference>` or `scope:function:<FunctionName>`, with the
+        function name in the contract's own spelling. A token in any other form grants nothing, and
+        so do an absent header, an empty header and a header of unreadable tokens: a caller that
+        named no scope holds none, and a request outside the scope presented is `403`.
+
+        **This header is a synthetic demonstration input that models an authorization boundary. It
+        is NOT an authentication mechanism and NOT a defence against an attacker.** This document
+        declares no security scheme — `components.securitySchemes` is empty and root `security` is
+        the empty list — and the design defers roles and per-user permissions to Phase 6. Anyone
+        who can reach this server can present any scope they like and the server will believe it.
+        What the header *does* exercise is the property the design cares about: a request outside
+        the scope it presented is refused with `403` and never reaches the pipeline.
+
+        Declared on every operation that enforces it, because a client generated from a document
+        that omits it sends no scope and receives `403` on every operation. The one operation that
+        does not require it is `getPolicyConfiguration`, which reads the deployment's own
+        configuration and touches no study, draft or record; that is stated on the operation rather
+        than left as an omission.
+      schema:
+        type: string
+      example: 'scope:study:STUDY-SYN-000041,scope:function:Draft'
 
   headers:
     RequestIdHeader:
@@ -801,6 +1077,18 @@ components:
         request got*; a layer says *who refused it*; neither is derivable from the other, and the
         readback publishes both.
 
+
+        The same derivation appears on `PreflightResponse.stages`, applied to a request that reached
+        no refusal **and stopped before F**: a preflight reports the five stages whose components it
+        ran, and never `Model request`. The two lists come from one component table, so they cannot
+        disagree about which stage a component owns.
+
+        **A `layer` of `J` yields an empty list.** The request surface refused before any stage was
+        behind the request, so a timeline built from `stages` alone is zero-length. A client must
+        render that as "refused at the request surface, before the pipeline ran" and not as a missing
+        or broken timeline: a `403` shown on an empty privacy timeline with no explanation reads as a
+        bug rather than as the answer.
+
         A stage name carries no value and no PHI: it says which boundary this is, never what passed
         through it.
       enum:
@@ -1094,6 +1382,208 @@ components:
             total_tokens:
               type: integer
 
+    PreflightResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - request_id
+        - policy_version
+        - payload
+        - approved_payload_hash
+        - stages
+      description: >-
+        A validated payload awaiting an explicit human decision to send it. The **third state**:
+        `ExecutionResponse.status` is `const approved` and `BlockReceipt.status` is `const blocked`,
+        so before this schema the API had two states and a client showing a "needs review" chip
+        would have been asserting a privacy state the system never evaluated.
+
+        `status` is `needs_review` and nothing was transmitted. The three states are produced by:
+        `preflightFunctionExecution` → `needs_review`; any operation → `blocked`; and
+        `sendApprovedExecution` or `createFunctionExecution` → `approved`.
+
+        **This is not a draft and carries no model response.** There is no model in it: it is an
+        authorisation to send, held by the server, and `sendApprovedExecution` is the only thing
+        that acts on it.
+      properties:
+        status:
+          type: string
+          const: needs_review
+          description: >-
+            Always `needs_review`. Validated, **not yet transmitted**, awaiting a human's explicit
+            decision. The only value this schema admits.
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        payload:
+          $ref: '#/components/schemas/PayloadPreview'
+        field_actions:
+          type: array
+          description: >-
+            One entry per field of the transformed payload, plus one per request property the
+            caller supplied that no payload field carries. Every entry is derived by comparing the
+            payload component A produced with the one the policy approved, so a transformation the
+            redaction layers did not perform cannot appear here.
+
+            **No entry carries a value, a count or a score.** The `excluded` entries are the
+            caller's own identifiers, and a summary that answered "what did you drop?" by quoting
+            it would be a leak in the answer.
+          items:
+            $ref: '#/components/schemas/FieldAction'
+        stages:
+          type: array
+          minItems: 5
+          maxItems: 5
+          readOnly: true
+          description: >-
+            The pipeline stages this preflight reached, derived from the component table and not
+            stored. **Five of the six, and the one absent is `Model request`**: that stage is
+            component F's and a preflight stops before F. A client rendering a six-stage timeline
+            from this would be claiming a provider was called.
+
+            This is the same derivation as `AuditRecord.stages` applied to a request that reached
+            no refusal, which is why the two can never disagree.
+          items:
+            $ref: '#/components/schemas/PipelineStage'
+        approved_payload_hash:
+          type: string
+          description: >-
+            Hash of the exact payload object a send would transmit, re-derived from that object's
+            own content at redaction layer 3 and re-checked by component F. **This is the value a
+            send is bound to**, and the value independent egress verification compares observed
+            outbound bytes against.
+        function:
+          $ref: '#/components/schemas/FunctionName'
+        policy_version:
+          $ref: '#/components/schemas/PolicyVersion'
+        policy_mode:
+          $ref: '#/components/schemas/PolicyMode'
+        selected_model:
+          type: string
+          description: >-
+            The model the send will use, resolved through the model registry during the preflight.
+            An unknown identifier is a `422` under layer `F` here, with no provider call made, so a
+            caller learns the model is not registered before it has shown anyone a payload.
+        input_hash:
+          type: string
+          description: >-
+            Hash of the caller's input as received, for audit correlation. **This is not
+            `payload.input_hash`**, which is component A's own hash of what it extracted and which
+            is inside the payload because it is a member of the object being previewed. Two
+            different values over two different things; collapsing them would make the preview
+            describe something the kernel never hashed.
+
+    PayloadPreview:
+      type: object
+      additionalProperties: false
+      required:
+        - function
+        - report_text
+        - dicom_fields
+        - study_ref
+        - policy_version
+      description: >-
+        The transformed payload — the object a send would put on the wire, and **nothing more**.
+
+        Every member of the payload is here, including both hashes, because omitting one would make
+        this a *description* of the payload rather than the payload, and the description is the
+        thing a client would then be tempted to reconstruct. The OpenAI-wire body the model
+        actually receives is built from these values by component F; nothing here is a rendering of
+        it, and a client must not build one.
+
+        Every value here has been through allowlisted extraction, pseudonymization, redaction and
+        the policy decision, which is what makes returning it safe: it is the content the model was
+        going to see, shown before it was sent. It is nevertheless the payload itself, so a client
+        must not persist it — the same rule that applies to the request that produced it.
+      properties:
+        function:
+          type: string
+          description: The function the payload was built for, in the kernel's own vocabulary.
+        report_text:
+          type: string
+          description: >-
+            The report text **as transformed**: pseudonymized and redacted. It is never the text the
+            caller supplied, and a client must not show the two side by side as though the
+            transformation were a comparison it performed.
+        dicom_fields:
+          type: object
+          additionalProperties:
+            type: string
+          description: >-
+            The allowlisted DICOM fields the payload carries, in component A's canonical snake_case
+            field names (`modality`, `study_date`, `patient_age_band`, `prior_report_text`,
+            `prior_study_date`). The keyword vocabulary (`Modality`, `StudyDate`, …) is the
+            *request* vocabulary; component A's attribute table is the boundary's own, and the two
+            are related in exactly one place.
+
+            The identifier attributes a caller supplied are **absent, not blanked**: `PatientID`,
+            `AccessionNumber` and `InstitutionName` are accepted by `AllowlistedDicomMetadata`,
+            reach the input hash, and carry no payload field at all.
+        study_ref:
+          type: string
+          description: >-
+            The study reference as a **surrogate**, exchanged by component C. Never the caller's
+            reference as written.
+        prior_study_refs:
+          type: array
+          description: >-
+            Prior-study references as surrogates. Empty for functions whose allowlist carries no
+            prior fields.
+          items:
+            type: string
+        policy_version:
+          $ref: '#/components/schemas/PolicyVersion'
+        input_hash:
+          type: string
+          description: >-
+            Component A's hash of what it extracted, carried on the payload as provenance. **Not**
+            the hash of the caller's raw input, which is `PreflightResponse.input_hash`.
+        payload_hash:
+          type: string
+          description: >-
+            The hash redaction layer 3 wrote over the pre-redaction one, and the value component F
+            re-derives before it will authorise a transmission. This is the payload's identity.
+
+    FieldAction:
+      type: object
+      additionalProperties: false
+      required:
+        - field
+        - state
+      description: >-
+        One field of the caller's request, and what happened to it. A classifier, in the same sense
+        an action code is a classifier: it says what was done and never carries what was done to.
+      properties:
+        field:
+          type: string
+          description: >-
+            Either a member of the transformed payload — `report_text`, `study_ref`, `function`,
+            `prior_study_refs`, `policy_version`, `input_hash`, `payload_hash`,
+            `dicom_fields.<name>` — or a request property the pipeline read and did not carry:
+            `dicom_metadata.<DICOMKeyword>`, `study_context.patient_reference`,
+            `study_context.accession_reference`, `study_context.encounter_reference`,
+            `study_context.modality`, `report_text.source`.
+
+            One namespace, because a summary that enumerated only the payload would leave a caller
+            unable to see that a value they supplied was dropped — which is the answer they most
+            need. A dotted name is a path into the payload, or into the request body as the caller
+            wrote it.
+        state:
+          type: string
+          enum:
+            - included
+            - transformed
+            - excluded
+          description: >-
+            * `included` — carried into the payload unchanged from what component A produced.
+            * `transformed` — present in the payload but different from what component A produced,
+              by component C's surrogate substitution, a redaction layer, or layer 3's re-hash.
+            * `excluded` — the caller supplied it and no payload field carries it. **The value is
+              not returned.**
+
+            The set is closed. There is no fourth state, and in particular no "partially redacted":
+            a field is either a payload member or it is not, and the only question the pipeline can
+            answer about one that is has been transformed or not.
+
     ExecutionResponse:
       type: object
       additionalProperties: false
@@ -1109,6 +1599,14 @@ components:
         The payload is identified by hash. The hash is what egress verification checks observed
         outbound bytes against, using two observers that are both external to the Medarx process —
         Medarx's own audit log is explicitly not accepted as evidence of what left.
+
+        **This response carries no `stages` and no `layer`.** It is a closed schema the design
+        fixes, and the pipeline timeline is the audit log's to answer: a client that wants to draw
+        one reads `getAuditRecord`, where `stages` is derived from the stored `layer` on read. That
+        is the architecturally correct source — the audit log is the evidence, and a timeline built
+        from the live execution would be Medarx attesting to itself. A caller on the validate-then-
+        send path does not need it: `PreflightResponse` carries the stages for the preflight, and
+        this operation is the atomic one.
       properties:
         status:
           type: string
@@ -1159,6 +1657,12 @@ components:
 
         The receipt is returned in every block condition, and the two independent egress observers
         record zero outbound bytes for a blocked request.
+
+        **This receipt carries no `stages` and no `layer`-derived timeline, by design.** It has
+        exactly five fields because five is what an auditor is given, and a message field would
+        change that artefact rather than describe it. A client that wants to know how far the
+        request got reads `getAuditRecord` for the same request ID, where `stages` is derived from
+        the stored `layer` — including the zero-length case, which is what a `layer` of `J` yields.
       properties:
         status:
           type: string

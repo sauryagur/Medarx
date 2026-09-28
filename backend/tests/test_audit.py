@@ -562,9 +562,25 @@ def test_hash_mismatch_belongs_to_the_gateway_and_not_to_layer_three():
     entry = next(e for e in CODE_TABLE if e.code == "HASH_MISMATCH")
     assert entry.owners == ("F",)
 
+    # The owner is still `F` and only `F`. The *emission sites* are the gateway
+    # and the composition root, and the difference matters: `Pipeline` does not
+    # own this code, it raises `GatewayError` — which carries `LAYER = "F"` — so
+    # a receipt it produces is still attributed to the gateway, which is what
+    # this table row and the design both say. The composition root compares the
+    # authorisation token a preflight minted against the hash the preflight
+    # published, and refuses a disagreement with the gateway's own two codes
+    # before the token reaches a socket. Narrowing this to one site would
+    # reinstate the exact hole the row exists to close: a refusal of this
+    # condition raised anywhere but in `F` would go unnoticed.
     emitted = _emitted_codes()
     sites = sorted(p for p, codes in emitted.items() if "HASH_MISMATCH" in codes)
-    assert sites == ["backend/src/medarx/gateway/openai_gateway.py"]
+    assert sites == [
+        "backend/src/medarx/gateway/openai_gateway.py",
+        "backend/src/medarx/pipeline.py",
+    ]
+    from medarx.errors import GatewayError
+
+    assert GatewayError.LAYER == "F"
 
 
 def test_the_codes_nothing_emits_are_exactly_the_unwritten_ones():

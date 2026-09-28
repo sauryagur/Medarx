@@ -538,8 +538,8 @@ def test_the_audit_readback_cannot_filter_by_study_because_the_record_cannot_car
         for q in served["parameters"]
     }
     assert declared == {
-        "RequestIdQueryParam", "FunctionQueryParam", "DispositionQueryParam",
-        "SinceQueryParam", "LimitQueryParam",
+        "ScopeHeader", "RequestIdQueryParam", "FunctionQueryParam",
+        "DispositionQueryParam", "SinceQueryParam", "LimitQueryParam",
     }
 
 

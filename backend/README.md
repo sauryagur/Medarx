@@ -821,6 +821,93 @@ is on the response of **every** request including blocks and refusals. An ID
 holding a space is a `400` at the boundary, because the audit log holds request
 IDs to an identifier shape and an uncaught refusal there would surface later as a
 `500` that reads as a server fault.
+
+### Validate-then-send: preflight, and the send bound to it
+
+`POST /v1/functions/{function_name}/executions` is **atomic**: it validates,
+transforms, decides, calls the provider and answers, so `approved` and `sent` are
+the same instant and there is no moment at which a human is reviewing anything.
+Phase 2 adds the two operations that split it, without changing that one:
+
+| Operation | Runs | Returns |
+|---|---|---|
+| `POST /v1/functions/{function_name}/executions/preflight` | A → C → D → E | `needs_review`: the transformed payload, the field-action summary, the payload hash, **five** stages, the policy configuration, the request ID |
+| `POST /v1/executions/{request_id}/send` | nothing | the same `ExecutionResponse` the atomic path returns |
+
+**A preflight opens no socket.** Component F *builds* the wire body — that is
+how its authorisation token comes to exist — but `send` is never called, and
+`last_request_body()` stays `None` because that value is assigned inside `send`
+at the moment bytes are handed to a transport.
+`test_an_approved_preflight_transmits_nothing_and_the_check_can_fail` measures
+that against the loopback stub's own record of what it received, and then makes
+the send in the same test so a gateway that never fired would be visible in the
+same run rather than a different one.
+
+**The send transmits the token the preflight minted, and nothing is recomputed.**
+`Pipeline.preflight` calls `verify_approved_payload` and holds the resulting
+frozen `ApprovedSend`; `Pipeline.send_approved` hands *that* to
+`ModelGateway.send`. The bytes were built and encoded at the moment of
+authorisation, so there is no second computation for a preview and a
+transmission to disagree about. The mechanism is component F's existing one —
+this wires it, it does not add a second authorisation path.
+
+Three things refuse a send before any byte moves, and all three were shown
+failing by injection rather than asserted from a comment:
+
+- **`404`** — no pending approval: an unknown, already-sent, evicted or
+  restarted request ID. Never re-derived; re-running the pipeline at send time
+  is exactly how a caller would transmit a payload nobody previewed.
+- **`422`, layer `E`, `UNKNOWN_POLICY_VERSION`** — §6 row 6. `Settings` is
+  frozen, so the observable form of "the policy version moved" is the engine no
+  longer holding the version the approval was made under.
+- **`422`, layer `F`, `PAYLOAD_MISMATCH` + `HASH_MISMATCH`** — §6 row 7. A
+  token and an approval are minted together, so a disagreement between their
+  hashes is a substitution, not a coincidence.
+
+**An approval is one-shot and is not durable.** It is consumed by the first send
+whether or not that send succeeded, so a double-clicked control cannot transmit
+twice or file two records under one request ID. It is held in this process, in
+memory, bounded at 256, and is never written to the audit log — whose storage
+policy admits no field that could hold a value. A restart loses every pending
+approval and the send answers `404`; the contract says so rather than smoothing
+it over.
+
+**A validated preflight writes no audit record.** Nothing was refused and nothing
+was transmitted, and `AuditRecord.stages` is derived from a stored `layer` whose
+only null case means "reached every stage" — a record there would claim a model
+call that never happened. The record is written by the send, or by the block. A
+`GET /v1/audit/records/{request_id}` for a validated-but-unsent preflight is
+`404`, and a client drawing a timeline has to handle that.
+
+**`needs_review` is a transport state, not a new audit disposition.** The
+`FinalDisposition` enum is unchanged; a transmitted draft still records
+`pending_human_approval`, and `AuditRecord.human_approval` is `null` meaning "not
+yet decided". A third *stored* vocabulary would be a parallel one growing beside
+the contract's.
+
+**The field-action summary is a reading, not a description.** Each entry compares
+the payload component A produced with the one the policy approved, so a
+transformation the redaction layers did not perform cannot appear. `excluded`
+entries name a request property no payload field carries —
+`dicom_metadata.PatientID`, `study_context.patient_reference`,
+`study_context.modality` — and **never carry its value**; a summary that
+answered "what did you drop?" by quoting it would be a leak in the answer.
+
+**`X-Scope` is now declared in the contract.** Every operation except
+`GET /v1/policy` requires it, and `components.parameters.ScopeHeader` says what
+it is: a synthetic demonstration input that models an authorization boundary,
+**not an authentication mechanism and not a defence against an attacker**. The
+policy operation is the one exception because it reads the deployment's own
+configuration and touches no study, draft or record, and it says so on the
+operation — a header that is required everywhere and silently optional on one
+route is a header a client cannot reason about.
+
+**The route control is display-only.** `GET /v1/policy` and
+`PreflightResponse.policy_mode` both report the deployment's mode, and both
+operations say a client must render it read-only. A working selector would be a
+second, unaudited way to choose the boundary, which is what the policy-mode
+design exists to prevent.
+
 ## Phase 1 — running it
 
 Everything below is a command, not a description. Both beats start a container,

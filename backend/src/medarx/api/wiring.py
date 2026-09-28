@@ -37,8 +37,11 @@ from fastapi.responses import JSONResponse
 from medarx.api.schemas import (
     ExecutionRequest as ExecutionRequestBody,
     ExecutionResponse,
+    FieldAction as FieldActionBody,
     ModelResponse as ModelResponseBody,
     ModelUsage,
+    PayloadPreview,
+    PreflightResponse,
     ProblemDetail,
     ValidationError,
 )
@@ -66,6 +69,8 @@ __all__ = [
     "resolve_function",
     "execution_request_from_body",
     "execution_response_body",
+    "excluded_request_inputs",
+    "preflight_response_body",
     "decode_json",
     "offending_properties",
     "validation_errors",
@@ -326,7 +331,50 @@ def execution_request_from_body(body: ExecutionRequestBody,
         model_id=body.model_id,
         input_hash=input_hash,
         requested_language=body.requested_language,
+        excluded_inputs=excluded_request_inputs(body),
     )
+
+
+#: The `StudyContext` and `ReportText` properties this boundary accepts and
+#: nothing on the request path reads. They are named here rather than inferred
+#: so that the field-action summary can tell a caller their value was dropped
+#: instead of leaving it silently absent from a preview that claims to be
+#: complete — and the list is a **declaration**, not a behaviour: each name is
+#: already accepted by the contract's schema and already discarded by
+#: `execution_request_from_body`, and this function only reports the fact.
+#:
+#: `modality` is the one that surprises people: a caller who sets it on the
+#: study context and not on `dicom_metadata` gets no payload field, because
+#: component A reads the modality from the DICOM attribute and from nowhere
+#: else.
+_DROPPED_REQUEST_PROPERTIES: tuple[tuple[str, str], ...] = (
+    ("study_context", "patient_reference"),
+    ("study_context", "accession_reference"),
+    ("study_context", "encounter_reference"),
+    ("study_context", "modality"),
+    ("report_text", "source"),
+)
+
+
+def excluded_request_inputs(body: ExecutionRequestBody) -> tuple[str, ...]:
+    """The request properties `body` supplied that no payload field carries.
+
+    A property counts as supplied when it is present and not an empty string.
+    An explicit `null` and an absent property are the same case for this
+    purpose — both mean the caller did not supply it — and an empty string is
+    a value with nothing in it, which is what the schemas already refuse
+    elsewhere.
+    """
+    values: dict[str, object] = {
+        "study_context": body.study_context,
+        "report_text": body.report_text,
+    }
+    dropped: list[str] = []
+    for parent, name in _DROPPED_REQUEST_PROPERTIES:
+        value = getattr(values[parent], name, None)
+        if value is not None and (not isinstance(value, str) or value.strip()):
+            dropped.append(f"{parent}.{name}")
+    return tuple(dropped)
 
 
 def execution_response_body(result, function: FunctionName) -> dict[str, Any]:
@@ -353,6 +401,54 @@ def execution_response_body(result, function: FunctionName) -> dict[str, Any]:
         approved_payload_hash=prefixed(result.approved_payload_hash),
         input_hash=prefixed(result.input_hash),
         draft=draft,
+    ).model_dump(mode="json", exclude_none=False)
+
+
+def preflight_response_body(result, function: FunctionName) -> dict[str, Any]:
+    """The preflight's `200` body: the payload, its hash, its stages, its actions.
+
+    **The payload is the one a send will transmit.** It is the same frozen
+    object component F minted its token over, rendered field for field, so a
+    caller comparing this against the bytes an external observer later recorded
+    is comparing two values that cannot differ. Nothing is re-derived here and
+    nothing is described: an `include`-less, property-by-property assembly of
+    the payload's own members is the whole of it.
+
+    The two hashes are both present and they are **different values**, which is
+    why they are named rather than deduplicated. `input_hash` here is the hash
+    of the caller's input as received, the one the audit record carries; the
+    payload's own `input_hash` is component A's hash of what it extracted, and
+    it is inside `payload` because it is a member of the object being previewed.
+    Collapsing them would make the preview describe something the kernel never
+    hashed.
+    """
+    payload = result.payload
+    assert payload is not None, (  # narrowed by PreflightResult.__post_init__
+        "a preflight that needs review always carries its payload"
+    )
+    return PreflightResponse(
+        request_id=result.request_id,
+        function=function,
+        policy_version=result.policy_version,
+        policy_mode=result.policy_mode,
+        selected_model=result.selected_model,
+        approved_payload_hash=prefixed(result.approved_payload_hash),
+        input_hash=prefixed(result.input_hash),
+        stages=list(result.stages),
+        field_actions=[
+            FieldActionBody(field=action.field, state=action.state)
+            for action in result.field_actions
+        ],
+        payload=PayloadPreview(
+            function=payload.function,
+            report_text=payload.report_text,
+            dicom_fields=dict(payload.dicom_fields),
+            study_ref=payload.study_ref,
+            prior_study_refs=list(payload.prior_study_refs),
+            policy_version=payload.policy_version,
+            input_hash=payload.input_hash,
+            payload_hash=payload.payload_hash,
+        ),
     ).model_dump(mode="json", exclude_none=False)
 
 

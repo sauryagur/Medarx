@@ -62,6 +62,12 @@ EXPECTED_200_SCHEMAS: dict[str, str] = {
     "/v1/executions/{request_id}/approval": "HumanApprovalResponse",
     "/v1/policy": "PolicyConfiguration",
     "/v1/audit/records": "AuditRecordCollection",
+    # Phase 2, validate-then-send. `PreflightResponse` is the third state, and
+    # `sendApprovedExecution` reuses `ExecutionResponse` rather than declaring a
+    # fourth shape for "a model answered": the payload and the draft are the same
+    # objects whichever route produced them.
+    "/v1/functions/{function_name}/executions/preflight": "PreflightResponse",
+    "/v1/executions/{request_id}/send": "ExecutionResponse",
     "/v1/audit/records/{request_id}": "AuditRecord",
 }
 
@@ -257,7 +263,16 @@ def _minimal(schema: dict, doc: dict) -> object:
             for name in schema.get("required", [])
         }
     if kind == "array":
-        return [_minimal(schema["items"], doc)] if "items" in schema else []
+        # `minItems` is honoured rather than ignored. An array property with a
+        # floor — `PreflightResponse.stages`, five of them because a preflight
+        # stops before component F — would otherwise be sampled at one item and
+        # validate happily, leaving the floor a number in the document that
+        # nothing checks. The floor is the most interesting thing about a
+        # fixed-length list, so this is the generator earning its keep.
+        if "items" not in schema:
+            return []
+        return [_minimal(schema["items"], doc)
+                for _ in range(max(1, int(schema.get("minItems", 1))))]
     if kind == "integer":
         return 1
     if kind == "number":

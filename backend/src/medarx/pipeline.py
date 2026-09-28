@@ -7,6 +7,16 @@ depends on is written down:
     D layers 1–3 with E deciding last → E authorises the object it approved →
     F verifies that object and only then sends it.
 
+**Two ways to run it, and the difference is one arrow.** `run` does all five
+in one call. `preflight` does the first four, publishes the payload the fifth
+would send, and stops; `send_approved` then hands component F the token the
+preflight minted and stops there. The split exists so a caller can be shown
+the payload before anything leaves, which is what makes `Needs review` a state
+the system evaluated rather than one a client asserted. Both paths run the
+same components in the same order through `_through_policy`, and both mint the
+send token through the same `verify_approved_payload`: the split changes *when
+a human is asked*, never *what the kernel decides*.
+
 Each arrow is a place a future edit could put the boundary in the wrong spot, so
 each one carries a note saying what it is protecting. The two that matter most:
 
@@ -39,18 +49,21 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Mapping, Protocol, Sequence
 
 from medarx.audit import AuditLog
 from medarx.audit.audit_log import FIELD_PATH
+from medarx.audit.code_table import preflight_stages, stages_reached
 from medarx.config import Settings
-from medarx.errors import MedarxError
-from medarx.extraction.payload_extractor import pipeline_for
+from medarx.errors import GatewayError, MedarxError, PolicyError
+from medarx.extraction.payload_extractor import ATTRIBUTE_TO_FIELD, pipeline_for
 from medarx.extraction.study_context import StudyContext
-from medarx.gateway.openai_gateway import ModelGateway
+from medarx.gateway.openai_gateway import ApprovedSend, ModelGateway
 from medarx.models import (
     AuditEvent,
     BlockReceipt,
@@ -68,13 +81,36 @@ from medarx.redaction.pipeline import _ENGINE_LAYER, run_redaction
 
 if TYPE_CHECKING:  # pragma: no cover - a type reference, not a runtime dependency
     from medarx.redaction.layers import Disposition
+    from medarx.redaction.pipeline import RedactionOutcome
+
+    class _RequestFacts(Protocol):
+        """The attributes an audit record needs, and no more.
+
+        `ExecutionRequest` and `PendingApproval` both carry exactly these, which
+        is what lets `_blocked` and `_record_approved` be written once rather
+        than taking a whole request each: a send refused at the last moment has
+        no `ExecutionRequest` left to hand them, and inventing one would mean
+        reconstructing a request the caller never made.
+        """
+
+        function: str
+        addressed_function: FunctionName
+        input_hash: str
+
+    _Outcome = tuple["RedactionOutcome", StructuredPayload]
 
 __all__ = [
+    "FIELD_EXCLUDED",
+    "FIELD_INCLUDED",
+    "FIELD_TRANSFORMED",
     "ExecutionRequest",
     "ExecutionResult",
     "FUNCTION_INTERNAL_TO_WIRE",
     "FUNCTION_WIRE_TO_INTERNAL",
+    "FieldAction",
+    "PendingApproval",
     "Pipeline",
+    "PreflightResult",
     "build_pipeline",
     "patient_ref_for",
 ]
@@ -125,10 +161,61 @@ _SYSTEM_PROMPT = (
 #: after `install_filter` and not named there is not covered.
 _APPROVAL_LOG = logging.getLogger("medarx.api.approval")
 
+#: How many validated-but-unsent payloads this process will hold at once.
+#:
+#: A pending approval **is** a payload: it is held in memory, in this process,
+#: for exactly as long as it takes a human to look at the preview and press
+#: send. It is deliberately not persisted — the audit log's storage policy
+#: admits no field that could hold a value, and writing this one anywhere
+#: durable would make the audit store a second copy of what is about to be sent.
+#: The cost of holding it in memory is that a restart loses every pending
+#: approval, and the send answers `404` for one; the alternative — re-running
+#: the pipeline at send time — would transmit a payload nobody previewed, which
+#: is the failure this whole mechanism exists to prevent.
+#:
+#: Bounded, because an unbounded map keyed by caller-supplied request IDs is an
+#: unbounded memory cost for a deployment anyone can POST to. The oldest
+#: approval is dropped to make room, and a send for a dropped one is the same
+#: `404` as a send for one that never existed.
+_MAX_PENDING_APPROVALS = 256
+
+#: The action codes a send raises when the thing it would transmit is not the
+#: thing the preflight approved. Both are contract members, both are true of
+#: the same condition, and neither is invented here: `PAYLOAD_MISMATCH` is
+#: design §6 row 7's own name for it and `HASH_MISMATCH` names the check that
+#: detected it. Declared here rather than in `medarx.gateway` because the
+#: comparison happens in this module and the AST sweep in
+#: `tests/test_openapi_contract.py` resolves these names to the strings and
+#: holds them to the contract's `ActionCode` enum.
+_ACTION_CODE_PAYLOAD_MISMATCH = "PAYLOAD_MISMATCH"
+_ACTION_CODE_HASH_MISMATCH = "HASH_MISMATCH"
+
+#: The code for a send whose approval was made under a different policy than
+#: the one in force now. Design §6 row 6's condition — an unrecognised or
+#: mismatched policy version fails closed — so the code is that row's own.
+_ACTION_CODE_UNKNOWN_POLICY_VERSION = "UNKNOWN_POLICY_VERSION"
+
+#: The three states a field of the caller's request can be in on the way to the
+#: model, and the only three the contract declares.
+FIELD_INCLUDED = "included"
+FIELD_TRANSFORMED = "transformed"
+FIELD_EXCLUDED = "excluded"
+
 
 @dataclass(frozen=True)
 class ExecutionRequest:
     """One execution, already parsed by the surface.
+
+    `excluded_inputs` is a **declaration, not a transformation**: the request
+    properties the surface accepted and that no payload field carries, named
+    with the path the caller wrote them at. The surface is the only place that
+    can see them — `StudyContext.patient_reference`, `accession_reference`,
+    `encounter_reference` and `modality` are read by nothing on the request
+    path, which is a fact about this boundary rather than about the kernel's
+    inputs, so the kernel is told rather than left to guess. It exists so that
+    the field-action summary can name a value the caller supplied as excluded
+    instead of leaving it silently absent from a preview that otherwise claims
+    to be complete. The kernel reads no value from any of them.
 
     `function` is the function to run **in the kernel's vocabulary** when the
     caller named one the kernel knows, and **in the caller's own spelling** when
@@ -165,6 +252,7 @@ class ExecutionRequest:
     model_id: str | None = None
     input_hash: str = ""
     requested_language: str | None = None
+    excluded_inputs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.input_hash:
@@ -183,6 +271,14 @@ class ExecutionResult:
     result that was neither approved nor blocked, or both, would leave the route
     to guess, and "the caller decides" is how a fail-closed boundary stops being
     one.
+
+    `addressed_function` is the contract's spelling of the function the request
+    named, carried beside `function` — which is the kernel's own snake_case — so
+    that a result produced by a **send** can still be rendered with the
+    function's contract name. The send holds no `ExecutionRequest` to read it
+    from, and a response that guessed the spelling or dropped the field would
+    make one caller-visible fact unavailable on one of two paths to the same
+    event.
     """
 
     request_id: str
@@ -191,6 +287,7 @@ class ExecutionResult:
     input_hash: str
     policy_version: str
     policy_mode: str
+    addressed_function: FunctionName | None = None
     block_receipt: BlockReceipt | None = None
     model_response: ModelResponse | None = None
     approved_payload_hash: str | None = None
@@ -215,6 +312,137 @@ class ExecutionResult:
             raise ValueError(
                 "a blocked request approved nothing, so it has no approved "
                 "payload hash to report"
+            )
+
+
+@dataclass(frozen=True)
+class FieldAction:
+    """What happened to one field on the way from the caller's request to the model.
+
+    `field` is either a member of the transformed payload (`report_text`,
+    `study_ref`, `dicom_fields.modality`, …) or a request property the pipeline
+    read and did not carry (`dicom_metadata.PatientID`,
+    `study_context.patient_reference`, …). One namespace, because a preview that
+    enumerated only half of what the caller supplied would be the incomplete
+    sort, and the incomplete sort is what a privacy drawer has to be trusted not
+    to be.
+
+    `state` is one of the three constants at the top of this module and carries
+    no value, no count and no score. **An excluded entry never carries the value
+    the caller supplied**: that value is the identifier the whole pipeline
+    exists to keep away from a model, and answering "what did you drop?" with
+    the dropped thing would be a leak in the answer.
+    """
+
+    field: str
+    state: str
+
+    def __post_init__(self) -> None:
+        if self.state not in (FIELD_INCLUDED, FIELD_TRANSFORMED, FIELD_EXCLUDED):
+            raise ValueError(
+                f"{self.state!r} is not a field state; the set is closed at "
+                f"{FIELD_INCLUDED!r}, {FIELD_TRANSFORMED!r} and {FIELD_EXCLUDED!r}"
+            )
+
+
+@dataclass(frozen=True)
+class PendingApproval:
+    """One preflight's authorisation, held until a send consumes it.
+
+    `approved_send` is component F's own token, minted by
+    `verify_approved_payload` **during the preflight**, over the approved
+    payload and the wire body built from it. Holding the token rather than the
+    payload is what makes "the send transmits exactly what the preview showed"
+    a property of the object rather than a promise: the bytes were built and
+    encoded at the moment of authorisation, so there is nothing left to
+    re-derive at send time and no second chance for them to differ. The
+    pipeline does not mint tokens by any other route, and `send` accepts nothing
+    else — this is the existing mechanism, wired, not a second one.
+
+    `approved_payload_hash` is kept beside it precisely so the send can check
+    that the two still describe the same object. A token and a record that
+    disagree cannot both come from one preflight, so a disagreement is a
+    substitution, and the send refuses rather than transmitting it.
+
+    `payload` is kept for the record's `approved_payload_hash` and for nothing
+    else: the token is what goes, and a second object carrying the same text is
+    a second place for that text to live.
+    """
+
+    request_id: str
+    function: str
+    addressed_function: FunctionName
+    input_hash: str
+    policy_version: str
+    policy_mode: str
+    payload: StructuredPayload
+    approved_payload_hash: str
+    approved_send: ApprovedSend
+    dispositions: tuple["Disposition", ...]
+    approved_at: datetime
+
+    @property
+    def selected_model(self) -> str:
+        """The model the token will be sent to, read from the token itself."""
+        return self.approved_send.request.model
+
+
+@dataclass(frozen=True)
+class PreflightResult:
+    """What one preflight produced: a payload awaiting review, or a refusal.
+
+    The either/or is enforced in `__post_init__` for the same reason
+    `ExecutionResult` enforces its own: a result that was neither validated nor
+    blocked would leave the route to guess, and a guess here is a green tick
+    over a payload nobody approved.
+
+    `stages` is the **prefix the preflight actually reached**, and it is not the
+    same list as a completed run's. An approved preflight stops before
+    component F, so `Model request` is absent from it
+    (`medarx.audit.code_table.preflight_stages`); a blocked one carries the
+    prefix up to and including the stage that refused
+    (`stages_reached`). Both are derived from a table rather than written out,
+    so the list cannot name a stage the request did not reach.
+
+    A preflight that validated writes **no** audit record. Nothing was refused
+    and nothing was transmitted, and the record's `stages` is derived from a
+    stored `layer` whose only null case means "reached all six" — a record here
+    would claim a model call that never happened. The record is written by the
+    send, or by the block; a validated-and-never-sent preflight leaves no
+    trace, and that is the honest size of the trace for a request that changed
+    nothing outside this process.
+    """
+
+    request_id: str
+    function: str
+    needs_review: bool
+    input_hash: str
+    policy_version: str
+    policy_mode: str
+    stages: tuple[str, ...]
+    field_actions: tuple[FieldAction, ...] = ()
+    payload: StructuredPayload | None = None
+    approved_payload_hash: str | None = None
+    selected_model: str | None = None
+    block_receipt: BlockReceipt | None = None
+
+    def __post_init__(self) -> None:
+        if self.needs_review == (self.block_receipt is not None):
+            raise ValueError(
+                "a preflight either validated for review or was refused, never "
+                f"both and never neither; got needs_review={self.needs_review} "
+                f"block_receipt={self.block_receipt is not None}"
+            )
+        if self.needs_review and self.payload is None:
+            raise ValueError(
+                "a preflight that needs review must carry the payload it is "
+                "reviewing; without one there is nothing to preview and nothing "
+                "a later send could be bound to"
+            )
+        if not self.needs_review and self.payload is not None:
+            raise ValueError(
+                "a refused preflight produced no payload, so it has none to "
+                "report"
             )
 
 
@@ -297,10 +525,294 @@ class Pipeline:
     _approval_lock: threading.RLock = field(default_factory=threading.RLock,
                                            repr=False)
 
+    #: Validated-but-unsent payloads, keyed by request ID, awaiting a human.
+    #:
+    #: `OrderedDict` because eviction is oldest-first and "oldest" has to mean
+    #: something: insertion order is the only clock in here, and a wall clock
+    #: would make a send's outcome depend on how long a person spent looking at
+    #: a preview. The lock is because two requests can preflight at once and two
+    #: sends can race the pop, and an approval that two sends both found is an
+    #: approval that was transmitted twice.
+    _pending: "OrderedDict[str, PendingApproval]" = field(
+        default_factory=OrderedDict, repr=False
+    )
+    _pending_lock: threading.RLock = field(default_factory=threading.RLock,
+                                          repr=False)
+
+    # -- Validate, then send ------------------------------------------------
+
+    def _through_policy(self, request: ExecutionRequest) -> "_Outcome":
+        """Components A, C, D and E — everything before the gateway. Raises on refusal.
+
+        The one place the four components run, because `run` and `preflight`
+        differ only in what they do with the result and running the sequence
+        twice is how a preflight ends up approving something the atomic path
+        would have blocked.
+
+        Returns the outcome **and** the payload component A produced, which
+        `preflight` needs as the "before" side of every field comparison. A
+        `MedarxError` from any of the four propagates; the caller turns it into
+        a receipt, which is the one translation `_receipt_from_error` exists
+        for.
+        """
+        # A: allowlisted extraction, per the function's field allowlist.
+        extracted = pipeline_for(
+            request.function,
+            request.study_context,
+            request.report_text,
+            dict(request.dicom_metadata),
+            self.settings.policy_version,
+        )
+        # C: surrogates for references, one shift for every date.
+        pseudonymized = pseudonymize_payload(
+            extracted, request.study_context.patient_ref, self.store
+        )
+        # D then E: layers 1-3, then the fail-closed decision. `source` is the
+        # payload as component A produced it, *before* the shift, because two of
+        # layer 3's checks are statements about a difference between the
+        # original and the transformed payload.
+        return run_redaction(
+            pseudonymized,
+            request.study_context.patient_ref,
+            self.store,
+            self.policy,
+            self.settings,
+            source=extracted,
+        ), extracted
+
+    def preflight(self, request_id: str,
+                  request: ExecutionRequest) -> PreflightResult:
+        """Run A, C, D and E, publish the payload, and stop before component F.
+
+        **No provider is contacted and no socket is opened.** The wire body is
+        *built* here — component F's `verify_approved_payload` builds it as part
+        of verification, and that is how the token comes to exist — but
+        `send` is not called, and `last_request_body()` stays `None` because
+        that value is assigned inside `send` at the moment bytes are handed to a
+        transport.
+
+        The returned payload is the one a send will transmit, not a description
+        of it: it is the same frozen object the token was minted over, and the
+        hash beside it is the hash F re-derived from that object's own content.
+        A caller comparing the preview against the bytes the observer later
+        recorded is therefore comparing two values that cannot differ.
+
+        A block is returned as a receipt, exactly as `run` returns one, and is
+        recorded in the audit log the same way — so a refused preflight and a
+        refused execution leave the same evidence. A validated preflight is
+        deliberately **not** recorded; see `PreflightResult`.
+        """
+        try:
+            outcome, extracted = self._through_policy(request)
+            if outcome.blocked:
+                receipt = _receipt_for(request_id, outcome, self.settings)
+                self._blocked(request_id, request, receipt)
+                return PreflightResult(
+                    request_id=request_id,
+                    function=request.function,
+                    needs_review=False,
+                    input_hash=request.input_hash,
+                    policy_version=self.settings.policy_version,
+                    policy_mode=self.settings.policy_mode,
+                    stages=stages_reached(receipt.layer),
+                    block_receipt=receipt,
+                )
+            approved = outcome.approved
+            if approved is None:
+                # Unreachable: `run_redaction` ties the two together. Raised
+                # rather than asserted, because `assert` vanishes under `-O`.
+                raise AssertionError("an unblocked outcome must carry a payload")
+
+            # The same two authorisations `run` performs, in the same place:
+            # E vouches the object is the one it decided about, and F mints the
+            # only token `send` accepts. A preflight that skipped either would
+            # mint a token the atomic path would have refused.
+            self.policy.authorize_payload(approved, str(approved.payload_hash))
+            model = self.gateway.model_for(request.model_id)
+            approved_send = self.gateway.verify_approved_payload(
+                approved,
+                str(approved.payload_hash),
+                ModelRequest(
+                    model=model,
+                    messages=_messages(approved, request),
+                    temperature=_TEMPERATURE,
+                    max_tokens=_MAX_TOKENS,
+                ),
+            )
+        except MedarxError as refused:
+            receipt = _receipt_from_error(request_id, refused, self.settings)
+            self._blocked(request_id, request, receipt)
+            return PreflightResult(
+                request_id=request_id,
+                function=request.function,
+                needs_review=False,
+                input_hash=request.input_hash,
+                policy_version=self.settings.policy_version,
+                policy_mode=self.settings.policy_mode,
+                stages=stages_reached(receipt.layer),
+                block_receipt=receipt,
+            )
+
+        self._hold(request_id, PendingApproval(
+            request_id=request_id,
+            function=request.function,
+            addressed_function=request.addressed_function,
+            input_hash=request.input_hash,
+            policy_version=self.settings.policy_version,
+            policy_mode=self.settings.policy_mode,
+            payload=approved,
+            approved_payload_hash=str(approved.payload_hash),
+            approved_send=approved_send,
+            dispositions=tuple(outcome.dispositions),
+            approved_at=_now(),
+        ))
+        return PreflightResult(
+            request_id=request_id,
+            function=request.function,
+            needs_review=True,
+            input_hash=request.input_hash,
+            policy_version=self.settings.policy_version,
+            policy_mode=self.settings.policy_mode,
+            stages=preflight_stages(),
+            field_actions=_field_actions(extracted, approved, request),
+            payload=approved,
+            approved_payload_hash=str(approved.payload_hash),
+            selected_model=model,
+        )
+
+    def send_approved(self, request_id: str) -> ExecutionResult:
+        """Transmit the exact bytes one preflight authorised, and record it.
+
+        **The payload is not recomputed.** Nothing here runs A, C, D or E: the
+        token carried the body built and encoded during the preflight, and
+        `send` transmits that object. Re-deriving it would mean sending whatever
+        the pipeline produces now, which is a different object from the one the
+        reviewer saw, and the preview would be a picture of a payload that never
+        left.
+
+        Two things can still refuse it, and both are checked before any byte
+        moves:
+
+        - **the policy version moved.** The version the approval was made under
+          is compared with the version component E has in force. In
+          `build_pipeline` those are the same object and the comparison cannot
+          fire; it fires when a deployment is reconfigured under a running
+          process, or when a test swaps the engine, and both are states in which
+          the payload was approved under a policy the engine no longer holds.
+          Design §6 row 6 makes an unrecognised policy version a fail-closed
+          block, so this is that row, at the moment the bytes would move.
+        - **the token is not the one the approval recorded.** A token and an
+          approval are minted together, so a disagreement between their hashes
+          is a substitution rather than a coincidence, and it is refused with
+          the two codes row 7 names.
+
+        The approval is **consumed** by this call, before either check: an
+        authorisation is one-shot, and a second send of the same bytes under one
+        request ID would file two records the append-only log cannot tell
+        apart. A later send is a `LookupError`, which the surface answers `404`.
+
+        A `ProviderError` is not caught, for the same reason `run` does not
+        catch it: availability is not privacy, and recording an outage as a
+        block would be a false privacy event in the one store the design names
+        as an asset. The bytes were handed to the transport before it was
+        raised, and the approval is already spent.
+        """
+        approval = self._take(request_id)
+        try:
+            if not secrets.compare_digest(approval.policy_version,
+                                          self.policy.policy_version):
+                raise PolicyError(
+                    action_codes=(_ACTION_CODE_UNKNOWN_POLICY_VERSION,),
+                    message=(
+                        f"the approval for request {request_id!r} was made under "
+                        f"policy version {approval.policy_version!r} and the "
+                        f"policy in force is {self.policy.policy_version!r}; a "
+                        "payload approved under one policy is not approved "
+                        "under another, so nothing may be transmitted. Run the "
+                        "preflight again."
+                    ),
+                )
+            if not secrets.compare_digest(approval.approved_payload_hash,
+                                          approval.approved_send.approved_payload_hash):
+                raise GatewayError(
+                    action_codes=(_ACTION_CODE_PAYLOAD_MISMATCH,
+                                  _ACTION_CODE_HASH_MISMATCH),
+                    message=(
+                        "the token this send would transmit was authorised for a "
+                        "different payload than the preflight approved; the two "
+                        "are minted together, so this is a substitution, and "
+                        "nothing may be transmitted"
+                    ),
+                )
+            response = self.gateway.send(approval.approved_send)
+        except MedarxError as refused:
+            receipt = _receipt_from_error(request_id, refused, self.settings)
+            return self._blocked(request_id, approval, receipt)
+
+        self._record_approved(request_id, approval, approval.dispositions,
+                              approval.selected_model, approval.payload)
+        return ExecutionResult(
+            request_id=request_id,
+            function=approval.function,
+            approved=True,
+            input_hash=approval.input_hash,
+            policy_version=approval.policy_version,
+            policy_mode=approval.policy_mode,
+            model_response=response,
+            approved_payload_hash=approval.approved_payload_hash,
+            selected_model=approval.selected_model,
+            dispositions=approval.dispositions,
+            addressed_function=approval.addressed_function,
+        )
+
+    def _hold(self, request_id: str, approval: PendingApproval) -> None:
+        """Remember an approval, dropping the oldest when the map is full."""
+        with self._pending_lock:
+            self._pending[request_id] = approval
+            while len(self._pending) > _MAX_PENDING_APPROVALS:
+                self._pending.popitem(last=False)
+
+    def _take(self, request_id: str) -> PendingApproval:
+        """Consume an approval. `LookupError` when there is not one to consume."""
+        with self._pending_lock:
+            approval = self._pending.pop(request_id, None)
+        if approval is None:
+            raise LookupError(
+                f"no pending preflight approval exists for request {request_id!r}. "
+                "An approval is consumed by the first send and is not durable, so "
+                "a send for an unknown, already-sent, restarted or evicted request "
+                "ID is refused rather than served by re-running the pipeline. Run "
+                "the preflight again to get a new one."
+            )
+        return approval
+
+    def pending_for(self, request_id: str) -> "PendingApproval | None":
+        """The approval a send would consume, or `None`. Does not consume it.
+
+        For the surface, which has to name a function to record a refusal
+        against and must not consume an approval to do it — a caller refused at
+        the authorization step must not be able to destroy a pending send
+        belonging to someone else merely by naming its request ID.
+
+        A read under the same lock `_take` uses, so it cannot observe an entry
+        a concurrent send is in the middle of popping. It is a **peek**, not an
+        authorisation: nothing here mints, alters or transmits anything.
+        """
+        with self._pending_lock:
+            return self._pending.get(request_id)
+
     # -- The one path from a request to a decision -------------------------
 
     def run(self, request_id: str, request: ExecutionRequest) -> ExecutionResult:
         """Run one request through A, C, D, E and F, and record what happened.
+
+        **The atomic path, and it stays.** `preflight` and `send_approved` split
+        the same work in two so a caller can see the payload before anything
+        leaves; this does it in one round trip for a caller that does not need
+        to. Both run the identical component sequence through
+        `_through_policy`, and both authorise through component E and component
+        F in the identical order — the split is *when a human is asked*, not
+        *what the kernel decides*.
 
         Returns rather than raises for a privacy block, so the caller has one
         thing to handle. A `ProviderError` is **not** caught: a provider being
@@ -310,33 +822,10 @@ class Pipeline:
         event in the one store the design names as an asset.
         """
         try:
-            # A: allowlisted extraction, per the function's field allowlist.
-            extracted = pipeline_for(
-                request.function,
-                request.study_context,
-                request.report_text,
-                dict(request.dicom_metadata),
-                self.settings.policy_version,
-            )
-            # C: surrogates for references, one shift for every date.
-            pseudonymized = pseudonymize_payload(
-                extracted, request.study_context.patient_ref, self.store
-            )
-            # D then E: layers 1-3, then the fail-closed decision. `source` is
-            # the payload as component A produced it, *before* the shift, because
-            # two of layer 3's checks are statements about a difference between
-            # the original and the transformed payload.
-            outcome = run_redaction(
-                pseudonymized,
-                request.study_context.patient_ref,
-                self.store,
-                self.policy,
-                self.settings,
-                source=extracted,
-            )
+            outcome, _extracted = self._through_policy(request)
             if outcome.blocked:
-                return self._blocked(request, request_id,
-                                     _receipt_for(request_id, outcome, self.settings))
+                return self._blocked(request_id, request, _receipt_for(
+                    request_id, outcome, self.settings))
             approved = outcome.approved
             if approved is None:
                 # Unreachable: `run_redaction` ties the two together. Raised
@@ -366,7 +855,7 @@ class Pipeline:
             )
             response = self.gateway.send(approved_send)
         except MedarxError as refused:
-            return self._blocked(request, request_id, _receipt_from_error(
+            return self._blocked(request_id, request, _receipt_from_error(
                 request_id, refused, self.settings))
 
         # The record is appended **after** the send, not before. It states what
@@ -377,8 +866,8 @@ class Pipeline:
         # whose bytes are already on the wire; the failure is loud rather than a
         # silent hole in the audit trail, which is the trade this project makes
         # everywhere else.
-        self._record_approved(request, request_id, outcome.dispositions, approved,
-                              model)
+        self._record_approved(request_id, request, outcome.dispositions, model,
+                              approved)
         return ExecutionResult(
             request_id=request_id,
             function=request.function,
@@ -390,13 +879,24 @@ class Pipeline:
             approved_payload_hash=str(approved.payload_hash),
             selected_model=model,
             dispositions=tuple(outcome.dispositions),
+            addressed_function=request.addressed_function,
         )
 
     # -- The records --------------------------------------------------------
 
-    def _blocked(self, request: ExecutionRequest, request_id: str,
+    def _blocked(self, request_id: str, subject: "_RequestFacts",
                  receipt: BlockReceipt) -> ExecutionResult:
         """Record the refusal and return the receipt the route will render.
+
+        `request_id` is a separate argument because the two callers hold it in
+        different places: `run` receives it as an argument, and an
+        `ExecutionRequest` cannot carry it — the contract is
+        `additionalProperties: false`, so the request ID is a header rather than
+        a body field — while a `PendingApproval` was given one by its preflight.
+        `subject` is typed as the attributes both carry rather than as either
+        class, because a send refused at the last moment has no
+        `ExecutionRequest` left to name and fabricating one would mean
+        reconstructing a request the caller never made.
 
         The receipt is built from the refusing component's own `layer` and
         `action_codes` and from nothing else. There is no message field on it —
@@ -408,10 +908,10 @@ class Pipeline:
             AuditEvent(
                 request_id=request_id,
                 timestamp=_now(),
-                function=request.addressed_function,
+                function=subject.addressed_function,
                 policy_version=self.settings.policy_version,
                 policy_mode=self.settings.policy_mode,
-                input_hash=request.input_hash,
+                input_hash=subject.input_hash,
                 redacted_field_names=[],
                 action_codes=list(receipt.action_codes),
                 final_disposition="blocked",
@@ -422,18 +922,26 @@ class Pipeline:
         )
         return ExecutionResult(
             request_id=request_id,
-            function=request.function,
+            function=subject.function,
             approved=False,
-            input_hash=request.input_hash,
+            input_hash=subject.input_hash,
             policy_version=self.settings.policy_version,
             policy_mode=self.settings.policy_mode,
             block_receipt=receipt,
         )
 
-    def _record_approved(self, request: ExecutionRequest, request_id: str,
-                         dispositions: "list[Disposition]", payload: StructuredPayload,
-                         model: str) -> None:
-        """The pending-human-approval record for a run that was transmitted.
+    def _record_approved(self, request_id: str, subject: "_RequestFacts",
+                         dispositions: "Sequence[Disposition]", model: str,
+                         payload: StructuredPayload) -> None:
+        """The pending-human-approval record for a payload that was transmitted.
+
+        One record for both paths, because both transmitted the same thing and a
+        second implementation would be a second answer to "what does a
+        transmission leave behind". The disposition is the contract's existing
+        `pending_human_approval`, not a new member: a preflight's `needs_review`
+        is a *transport* state of the preflight response and never becomes a
+        stored one, precisely because nothing was transmitted to be pending
+        about.
 
         `redacted_field_names` is the *names* of the fields the layers acted on,
         never the values they held, and a name the storage policy's `FIELD_PATH`
@@ -450,11 +958,11 @@ class Pipeline:
             AuditEvent(
                 request_id=request_id,
                 timestamp=_now(),
-                function=request.addressed_function,
+                function=subject.addressed_function,
                 selected_model=model,
                 policy_version=self.settings.policy_version,
                 policy_mode=self.settings.policy_mode,
-                input_hash=request.input_hash,
+                input_hash=subject.input_hash,
                 approved_payload_hash=payload.payload_hash,
                 redacted_field_names=sorted(names),
                 # Nothing was refused, so there is no disposition code to record.
@@ -578,6 +1086,83 @@ def build_pipeline(settings: Settings, db_url: str) -> Pipeline:
         policy=PolicyEngine(settings),
         gateway=ModelGateway(settings),
     )
+
+
+
+# -- The field-action summary ------------------------------------------------
+
+
+def _field_actions(before: StructuredPayload, after: StructuredPayload,
+                   request: ExecutionRequest) -> tuple[FieldAction, ...]:
+    """What happened to every field between the caller's request and the payload.
+
+    **Derived, never asserted.** Each entry is a comparison of two objects the
+    pipeline already holds: `before` is what component A produced and `after`
+    is what the policy approved. A field whose two values differ was
+    transformed by component C, D or E; a field whose values match was carried.
+    There is no third source and no inference, so a transformation the layers
+    did not perform cannot appear here — the summary is a reading of the
+    pipeline's own output, not a description of what it ought to have done.
+
+    The exclusions are derived the same way. A DICOM attribute the caller
+    supplied is named `excluded` when no payload field holds its value, decided
+    by looking at the approved payload's own `dicom_fields` rather than at a
+    second table of which attributes are droppable: the one place that decides
+    what a payload carries is component A, and the summary reads its result
+    rather than restating its rule. `request.excluded_inputs` covers the request
+    properties the kernel cannot see at all, because the surface dropped them
+    before the request became a kernel request.
+
+    Ordering is fixed and readable rather than sorted alphabetically: the eight
+    payload members in the order `StructuredPayload` declares them, then the
+    exclusions. A preview whose rows jump around between two runs of the same
+    request is a preview nobody can read.
+
+    No entry carries a value. The transformed payload is returned beside this
+    summary and does contain values — that is the preview, and every value in it
+    has been approved for a model. The exclusions are the half that must not:
+    they are the caller's own identifiers, and a summary that answered "what did
+    you drop?" by quoting it would be a leak in the answer.
+    """
+    actions: list[FieldAction] = []
+
+    def carry(name: str, left: object, right: object) -> None:
+        actions.append(FieldAction(
+            field=name,
+            state=FIELD_INCLUDED if left == right else FIELD_TRANSFORMED,
+        ))
+
+    carry("function", before.function, after.function)
+    carry("report_text", before.report_text, after.report_text)
+    for name in sorted(set(before.dicom_fields) | set(after.dicom_fields)):
+        carried = after.dicom_fields.get(name)
+        if carried is None:
+            # Unreachable on an approved payload: layer 3 refuses a field that
+            # vanished, under `MISSING_SURROGATE` or `CONTRACT_VIOLATION`. Named
+            # rather than assumed away so that a future layer which can drop a
+            # field reports it here instead of failing the next test.
+            actions.append(FieldAction(field=f"dicom_fields.{name}",
+                                       state=FIELD_EXCLUDED))
+        else:
+            carry(f"dicom_fields.{name}", before.dicom_fields.get(name), carried)
+    carry("study_ref", before.study_ref, after.study_ref)
+    carry("prior_study_refs", before.prior_study_refs, after.prior_study_refs)
+    carry("policy_version", before.policy_version, after.policy_version)
+    carry("input_hash", before.input_hash, after.input_hash)
+    # The pre-redaction hash component A wrote and the hash redaction layer 3
+    # wrote over it are never equal, so this is always `transformed` — which is
+    # what it is.
+    carry("payload_hash", before.payload_hash, after.payload_hash)
+
+    payload_fields = {f"dicom_fields.{name}" for name in after.dicom_fields}
+    for keyword in sorted(request.dicom_metadata):
+        field = ATTRIBUTE_TO_FIELD.get(keyword)
+        if field is None or f"dicom_fields.{field}" not in payload_fields:
+            actions.append(FieldAction(field=f"dicom_metadata.{keyword}",
+                                       state=FIELD_EXCLUDED))
+    for name in request.excluded_inputs:
+        actions.append(FieldAction(field=name, state=FIELD_EXCLUDED))
+    return tuple(actions)
 
 
 # -- The receipt, and the two paths to it ------------------------------------

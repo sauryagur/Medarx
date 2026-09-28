@@ -65,6 +65,12 @@ EXPECTED_EMISSION_SITES: frozenset[str] = frozenset(
         # sweep resolves a name to a module-level assignment and cannot follow a
         # value chosen at run time.
         "backend/src/medarx/api/surface.py",
+        # The composition root. `Pipeline.send_approved` raises two refusals
+        # of its own — a payload that is not the approved one, and a policy
+        # version that moved — and it names them as module constants precisely
+        # so this sweep holds them to the contract enum. It is not a component
+        # and it decides nothing; it refuses to hand a token to the gateway.
+        "backend/src/medarx/pipeline.py",
     }
 )
 

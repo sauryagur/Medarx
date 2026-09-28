@@ -57,6 +57,7 @@ from medarx.api import (
     routes_audit,
     routes_functions,
     routes_policy,
+    routes_preflight,
 )
 from medarx.api.middleware import Boundary
 from medarx.config import Settings, require_date_order
@@ -150,6 +151,7 @@ def create_app(settings: Settings, db_url: str, *,
 
     app.include_router(routes_functions.router)
     app.include_router(routes_approval.router)
+    app.include_router(routes_preflight.router)
     app.include_router(routes_policy.router)
     app.include_router(routes_audit.router)
 

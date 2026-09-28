@@ -23,13 +23,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from types import MappingProxyType
 
 from medarx.errors import ExtractionError
 from medarx.extraction.allowlists import ALLOWED_FIELDS
 from medarx.extraction.study_context import StudyContext
 from medarx.models import ExtractionRequest, StructuredPayload, canonical_hash
 
-__all__ = ["extract", "pipeline_for", "KNOWN_DICOM_ATTRIBUTES"]
+__all__ = ["ATTRIBUTE_TO_FIELD", "extract", "pipeline_for", "KNOWN_DICOM_ATTRIBUTES"]
 
 LAYER = "A"
 
@@ -51,14 +52,20 @@ KNOWN_DICOM_ATTRIBUTES: frozenset[str] = frozenset(
     }
 )
 
-#: DICOM keyword -> canonical snake_case payload field.
-_ATTRIBUTE_TO_FIELD: dict[str, str] = {
+#: DICOM keyword -> canonical snake_case payload field. Published rather than
+#: private because the field-action summary has to say which of a caller's
+#: attributes reached a payload field and which were dropped, and a private
+#: table read through a module attribute would be the same table with worse
+#: manners. A keyword absent from it is one this boundary never carries, which
+#: is a fact about the boundary and not an error: `PatientID` and
+#: `AccessionNumber` are accepted and dropped by design.
+ATTRIBUTE_TO_FIELD: Mapping[str, str] = MappingProxyType({
     "Modality": "modality",
     "StudyDate": "study_date",
     "PatientAge": "patient_age_band",
     "PriorReportText": "prior_report_text",
     "PriorStudyDate": "prior_study_date",
-}
+})
 
 #: Field names that make a function a "prior" function: only these functions
 #: carry `prior_study_refs` into the payload.
@@ -171,7 +178,7 @@ def pipeline_for(
                 action_codes=("UNKNOWN_DICOM_ATTRIBUTE",),
                 message=f"{key!r} is not a known DICOM attribute",
             )
-        field = _ATTRIBUTE_TO_FIELD.get(key)
+        field = ATTRIBUTE_TO_FIELD.get(key)
         if field is not None and field not in allowed:
             # A real field this function may not carry. Refusing is the point:
             # the caller asked for something outside the allowlist.
@@ -185,7 +192,7 @@ def pipeline_for(
 
     dicom_fields: dict[str, str] = {}
     for key, value in dicom_metadata.items():
-        field = _ATTRIBUTE_TO_FIELD.get(key)
+        field = ATTRIBUTE_TO_FIELD.get(key)
         if field is None or field not in allowed:
             continue
         dicom_fields[field] = _age_band(value) if key == "PatientAge" else value

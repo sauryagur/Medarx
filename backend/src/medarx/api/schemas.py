@@ -53,14 +53,18 @@ __all__ = [
     "ExecutionRequest",
     "ExecutionResponse",
     "FUNCTION_WIRE_TO_INTERNAL",
+    "FieldAction",
     "FinalDisposition",
     "FunctionName",
     "HumanApprovalRequest",
     "HumanApprovalResponse",
     "HumanApprovalState",
     "ModelResponse",
+    "ModelUsage",
+    "PayloadPreview",
     "PolicyConfiguration",
     "PolicyMode",
+    "PreflightResponse",
     "PriorStudyReference",
     "ProblemDetail",
     "ReportText",
@@ -243,6 +247,94 @@ class ExecutionResponse(_Closed):
     input_hash: str | None = None
     draft: ModelResponse
 
+
+
+class PayloadPreview(_Closed):
+    """The transformed payload — the object a send would put on the wire.
+
+    **Exactly the payload, field for field, and nothing added.** Every member of
+    `medarx.models.StructuredPayload` is here, including `input_hash` and
+    `payload_hash`, because omitting one would make this a *description* of the
+    payload rather than the payload, and the description is the thing a client
+    would then be tempted to reconstruct. The wire body the model actually
+    receives is built from these values by component F; nothing here is a
+    rendering of it, and a client must not build one.
+
+    Every value in here has been through extraction, pseudonymization, redaction
+    and the policy decision, which is what makes returning it safe: it is the
+    content the model was going to see, shown before it was sent. It is
+    nevertheless the payload itself, so a client must not persist it — the
+    contract's own rule about browser storage applies to it as much as to the
+    request that produced it.
+    """
+
+    function: str
+    report_text: str
+    dicom_fields: dict[str, str]
+    study_ref: str
+    prior_study_refs: list[str] = Field(default_factory=list)
+    policy_version: str
+    input_hash: str = ""
+    payload_hash: str | None = None
+
+
+class FieldAction(_Closed):
+    """One field of the caller's request, and what happened to it.
+
+    A three-state reading of the pipeline's own output: the value is in the
+    payload unchanged, it is in the payload transformed, or the caller supplied
+    it and no payload field carries it. No value, no count, no score — a
+    classifier, like an action code, because the answer to "what happened to my
+    MRN" is `excluded` and the answer to "what happened to my MRN" that quotes
+    the MRN is a leak in the answer.
+
+    `field` is either a member of the transformed payload
+    (`report_text`, `study_ref`, `dicom_fields.modality`) or a request property
+    the pipeline read and did not carry (`dicom_metadata.PatientID`,
+    `study_context.patient_reference`). One namespace, because a summary that
+    enumerated only the payload would leave a caller unable to see that a value
+    they supplied was dropped — which is the answer they most need.
+    """
+
+    field: str
+    state: Literal["included", "transformed", "excluded"]
+
+
+class PreflightResponse(_Closed):
+    """A validated payload awaiting a human's explicit decision to send it.
+
+    The third state. `ExecutionResponse.status` is `const approved` and
+    `BlockReceipt.status` is `const blocked`, so before this schema the API had
+    two states and a UI had nowhere to put "a human is looking at this right
+    now" — it would have had to assert the state itself, which is precisely the
+    failure this project exists to avoid in the one place a user looks for it.
+    Here the server produces it, from a pipeline that actually ran.
+
+    `stages` is the prefix this preflight reached, which is five stages and not
+    six: `Model request` is component F's, and a preflight stops before it. A
+    client that renders a six-stage timeline here would be claiming a provider
+    was called.
+
+    **What a client must not do with this.** It is not a draft and it is not a
+    response from a model; there is no model in it. It is an authorisation to
+    send, held by the server, and `sendApprovedExecution` is the only thing that
+    acts on it.
+    """
+
+    status: Literal["needs_review"] = "needs_review"
+    request_id: str
+    policy_version: str
+    payload: PayloadPreview
+    approved_payload_hash: str
+    stages: list[Literal[
+        "Fields selected", "Pseudonymized", "Text screened",
+        "Payload validated", "Policy decision",
+    ]]
+    field_actions: list[FieldAction] = Field(default_factory=list)
+    function: FunctionName | None = None
+    policy_mode: PolicyMode | None = None
+    selected_model: str | None = None
+    input_hash: str | None = None
 
 class HumanApprovalState(_Closed):
     """A recorded human sign-off. The contract closes this, so it holds no note."""

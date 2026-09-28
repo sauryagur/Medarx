@@ -33,10 +33,12 @@ from dataclasses import dataclass
 
 __all__ = [
     "CODE_TABLE",
+    "GATEWAY_LAYER",
     "LAYER_STAGE",
     "PIPELINE_STAGES",
     "STAGE_COMPONENTS",
     "CodeEntry",
+    "preflight_stages",
     "stages_reached",
 ]
 
@@ -81,6 +83,15 @@ STAGE_COMPONENTS: dict[str, tuple[str, ...]] = {
     "Policy decision": ("E",),
     "Model request": ("F",),
 }
+
+#: The one layer that is permitted to call a provider — the layer a stage must
+#: be attributed to before `preflight_stages` will leave it out. A literal,
+#: because reading it out of `STAGE_COMPONENTS["Model request"][0]` would make
+#: the constant depend on the order of a tuple; instead
+#: `tests/test_preflight.py::test_the_gateway_layer_is_the_one_that_owns_the_model_request_stage`
+#: holds the two to each other, and `medarx.models.LAYERS` is what says `F` is a
+#: layer at all.
+GATEWAY_LAYER = "F"
 
 
 def _layer_stage() -> dict[str, str]:
@@ -128,6 +139,25 @@ def stages_reached(layer: str | None) -> tuple[str, ...]:
     if stage is None:
         return ()
     return PIPELINE_STAGES[: PIPELINE_STAGES.index(stage) + 1]
+
+
+def preflight_stages() -> tuple[str, ...]:
+    """The stages a preflight reaches: every one component `GATEWAY_LAYER` does not own.
+
+    A preflight runs A, C, D and E and stops before F, so `Model request` is
+    not behind it. Derived from `STAGE_COMPONENTS` rather than written as
+    `PIPELINE_STAGES[:5]` so that a seventh stage owned by another component
+    joins the list and a new stage owned by `F` does not — a hand-written slice
+    would silently name a stage the preflight does not reach the day either of
+    those happens.
+
+    This is a different question from `stages_reached`, which answers "how far
+    did a request with this blocking layer get" and derives from the layer a
+    record was *filed under*. Nothing refused a preflight, so that function
+    would answer "all six", which would claim the model was called.
+    """
+    return tuple(stage for stage in PIPELINE_STAGES
+                 if GATEWAY_LAYER not in STAGE_COMPONENTS[stage])
 
 
 #: The table. Ordered by layer, then by code, so it reads the way the pipeline
