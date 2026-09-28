@@ -1,5 +1,9 @@
 .venv/
 *.whl
 *.pcap
-capture/
+# A capture *written* by a run. The committed capture readback lives at
+# `tests/fixtures/capture/` and is the evidence the agreement check is tested
+# against, so it must be tracked; this rule covers the directory a run writes
+# into, which is not it.
+/capture/
 __pycache__/

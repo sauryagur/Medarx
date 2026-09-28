@@ -578,6 +578,106 @@ consumed by no code path), `study_context.modality` (the modality travels in
 `dicom_metadata`), and `report_text.source` (audit provenance). The first is a
 real gap in the kernel, not in the harness, and it is unmeasured here by
 construction.
+## Component I — the two observers, and the agreement between them
+
+Components A–H and J make claims about egress. This one is the evidence, and
+the only thing it does is **be able to fail**.
+
+**Observer one: `infra/observers/observer.py`.** A stand-in provider that
+answers the OpenAI chat-completions shape with a fixed string and writes every
+request body it receives to disk before it replies. It is stdlib only, so there
+is no parser between the socket and the file — a re-encoding is exactly where
+evidence quietly changes, and nothing in the path would perform one. Each
+request becomes `<record-dir>/<uuid>.bin` plus one `index.jsonl` line carrying
+`{id, path, sha256, byte_length, received_at}`. The payload file is fsynced
+**before** the line that claims it exists, so an interrupted run leaves an
+orphan file rather than an index entry pointing at nothing.
+
+It reads its environment (`OBSERVER_RECORD_DIR`, `OBSERVER_PORT`,
+`OBSERVER_MODEL`, `OBSERVER_REPLY`) even though only `config.py` may do that in
+the kernel. It is not a `medarx` module and not in the import graph of anything
+that sends data; injecting the record directory through a process boundary is
+the same property, reached a different way. **It refuses to start if the record
+directory is not writable** — measured, not anticipated: a container running as
+uid 10001 against a bind mount owned by another user raised `PermissionError`
+on the first request and answered nothing at all, which from the gateway reads
+as a transport failure and from an observer index reads as "received nothing".
+It now fails at startup, and a write failure mid-run answers `500` rather than
+silently recording nothing.
+
+**"I received nothing" is a first-class answer.** `GET /v1/records` returns a
+`count` rather than 404-ing, `GET /v1/records/{id}` answers `404` with a body
+naming the id it has no record of, and `GET /healthz` answers at all. A `422`
+writes nothing — and the demo reads `/healthz` in the same run, because an
+observer that is *down* also reports nothing and would make the assertion
+vacuously true.
+
+**Observer two: `infra/capture/start_capture.sh`.** `tcpdump -w` in the **host
+network namespace**, `--cap-add=NET_RAW` only, against `br-<first 12 hex of the
+network id>` — discovered at run time, never hard-coded. A third container on
+the same bridge cannot see traffic between two other containers: a Linux bridge
+switches A's veth straight to B's, and that topology was measured on this host
+at 21 packets of mDNS/ARP and zero of the traffic while the observer was
+actively receiving requests. The pcap is always written with `-w` and read
+back with `-r`, never `tcpdump -A | tee` — under `timeout`, SIGTERM kills
+tcpdump before its block-buffered stdout flushes and the run reports "0 packets
+captured" having seen real traffic. `stop` counts the frames in the readback and
+**exits non-zero when the count is zero**, so a capture that saw nothing cannot
+pass quietly.
+
+**The check: `infra/capture/agreement.py`.** `check_agreement` agrees when
+either **(a)** both observers saw the request, the recorded bytes equal the
+bytes reassembled off the wire, and those bytes carry the approved payload's
+content; or **(b)** neither observer saw anything **and** a block receipt for
+that `request_id` exists. Everything else fails, and says why in `details`.
+
+Clause (b) is the whole reason `request_id` is a parameter. From the observers
+alone, "the gateway never fired" and "the request was refused before it could
+fire" are the same observation — nothing left — and scoring that as agreement
+certifies a gateway that silently stopped calling the provider. Only a third,
+independent statement about the same request id separates them. A receipt for
+another id, or one whose `status` is not `blocked`, does not count.
+
+**The approved-payload hash is reported, not compared to the wire.**
+`payload_hash_of` hashes the approved **payload object**; the wire body adds
+`model`, `messages`, `temperature` and `max_tokens` around the payload's own
+fields, so no digest of the transmitted bytes can equal it. The binding is
+made through the approved content instead — the report text, read by the caller
+from the object whose hash is reported. Both observers must carry it, so a
+substituted payload fails *even when the two observers agree perfectly with
+each other*, which is the case component F's `ApprovedSend` was built to make
+unreachable and which the tests construct anyway, on purpose.
+
+**Four things the check refuses, each a test.** A record whose bytes do not match
+its own index entry. A record whose path escapes the record directory. A
+capture readback with no frames at all, which is a broken sniffer rather than a
+blocked request — `pcap_frame_count` is in the report so the two are
+distinguishable. And an empty record directory beside `observer_live=False`: a
+block receipt plus an observer that was down is not evidence that nothing was
+sent. `observer_live` is keyword-only and defaults to `None` (the caller did
+not say); it can only ever make the result *less* agreeable.
+
+**Reading the capture.** Only `tcpdump -X -s 0 -r` is parsed — the one readback
+that carries packet bytes verbatim rather than tcpdump's rendering of them. The
+link-layer offset is **detected, not assumed**: on this host the frames on the
+Docker bridge arrive beginning at the IPv4 header with no Ethernet header in
+front, despite `link-type EN10MB`. A parser assuming 14 bytes of Ethernet would
+extract nothing and report "no request was seen" for every capture — a check
+that cannot fail. Reassembly is by TCP stream and sequence number, and **a
+stream with a gap contributes nothing**: a missing segment would otherwise yield
+a plausible reconstruction rather than the bytes that were transmitted.
+
+**Running it.** Build both images, start the observer on a bridge network with a
+named volume for its records (`docker cp` them out afterwards — the unprivileged
+container cannot write a host directory), start the capture, drive requests
+through `create_app`, stop the capture, then read the two artifacts with
+`check_agreement`. `tests/test_egress_e2e.py` does exactly that, live, marked
+`e2e` and skipped when Docker is unusable. `tests/test_egress_agreement.py` runs
+the rule against a **real recorded capture** committed under
+`tests/fixtures/capture/`, and asserts the capture and the observer record are
+genuinely the same bytes so the fixture cannot drift into two hand-written files
+that agree.
+
 ## Component J — application API and composition root
 
 Build the surface the way the tests build it, which is the way the server builds
