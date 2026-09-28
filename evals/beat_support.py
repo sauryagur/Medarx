@@ -64,6 +64,16 @@ AUDIT_KEY = "medarx-beat-demo-key-not-a-credential"  # noqa: S105
 #: machines. `MDY` is what the corpus was written in.
 DATE_ORDER = "MDY"
 
+#: The policy mode the beats run under, and they say so rather than inheriting
+#: it. `Settings.policy_mode` defaults to `"cloud"`, and the default is right for
+#: a deployment pointed at a real provider and **wrong for these beats**: every
+#: audit record a beat writes would then carry `policy_mode: "cloud"` for a run
+#: whose bytes never left the machine. The audit log is a permanent record an
+#: auditor reads, and a deployment mode recorded in it that the deployment is
+#: not in is a false fact in the one store the design names as an asset. The
+#: observer is on loopback on the same host, which is what `strict_local` says.
+POLICY_MODE = "strict_local"
+
 #: The observer's fixed reply and model, restated here **on purpose**. The
 #: observer computes them itself; if a beat imported the constants from its
 #: source, a change to that source would move the constant and the beat would
@@ -534,6 +544,7 @@ def drive(database: Path, gateway_base_url: str,
     settings = Settings(
         audit_key=AUDIT_KEY,
         date_order=DATE_ORDER,
+        policy_mode=POLICY_MODE,
         gateway_base_url=gateway_base_url,
     )
     app = create_app(settings, f"sqlite:///{database}")

@@ -146,6 +146,20 @@ def test_the_hash_the_api_reports_is_the_hash_of_the_payload_it_approved(beat: d
     assert beat["report"]["approved_payload_hash"] == payload["payload_hash"]
 
 
+def test_the_audit_record_names_the_deployment_mode_actually_in_force(beat: dict):
+    """The beats run with the gateway pointed at a local observer.
+
+    `Settings.policy_mode` defaults to `"cloud"`, and every audit record carries
+    it. Inheriting that default would put `policy_mode: "cloud"` in a permanent
+    record for a run whose bytes never left the host.
+    """
+    assert beat["report"]["policy_mode"] == "strict_local"
+    assert beat["report"]["audit_record"]["policy_mode"] == "strict_local"
+    assert beat["report"]["artefacts"]["model_response"]["provider"].startswith(
+        "the observer container"
+    )
+
+
 def test_the_observer_is_the_provider_and_no_model_is_contacted(beat: dict):
     """The reply is the observer's own constant, computed for itself.
 

@@ -287,6 +287,8 @@ def run(case_name: str, out_dir: Path) -> dict:
                 "pcap_hit_count": control_report.pcap_hit_count,
                 "agree": control_report.agree,
             },
+            "policy_mode": beat_support.POLICY_MODE,
+            "policy_mode_note": "the deployment mode the audit records in this report carry; the gateway is a local observer and nothing left the host",
             "vacuity_guard": guard,
             "vacuity_guard_holds": True,
             "observer_record_delta": 0,

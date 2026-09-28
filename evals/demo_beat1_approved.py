@@ -241,6 +241,8 @@ def run(out_dir: Path) -> dict:
                     "body": captured_text,
                 },
             },
+            "policy_mode": beat_support.POLICY_MODE,
+            "policy_mode_note": "the deployment mode the audit records in this report carry; the gateway is a local observer and nothing left the host",
             "artefact_sources": {
                 "input": "the request body this script posted",
                 "transformed_payload": "the kernel's own approved payload object",

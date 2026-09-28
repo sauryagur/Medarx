@@ -276,6 +276,13 @@ def test_the_request_id_is_traceable_in_the_audit_log(beat: dict):
         "a blocked request approved nothing, so there is no approved payload to "
         "record a hash of"
     )
+    # The deployment mode is written into every audit record, and
+    # `Settings.policy_mode` defaults to "cloud" — right for a real provider,
+    # wrong for a beat whose bytes never leave the host. A permanent record that
+    # says "cloud" for a local run is a false fact in the store the design names
+    # as an asset, so the beats declare the mode they are actually in.
+    assert event["policy_mode"] == beat_support.POLICY_MODE == "strict_local"
+    assert beat["report"]["policy_mode"] == "strict_local"
     assert beat["report"]["audit_request_id_traceable"] is True
 
 
