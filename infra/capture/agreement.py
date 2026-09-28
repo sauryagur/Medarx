@@ -501,8 +501,15 @@ def check_agreement(
     bytes the capture reassembled off the wire, and those bytes carry the
     approved payload's content; or
 
-    **(b)** neither observer saw anything **and** a block receipt for
-    `request_id` exists.
+    **(b)** neither observer saw anything, the capture demonstrably carried
+    TCP, **and** a block receipt for `request_id` exists.
+
+    The middle condition is not decoration. "Saw nothing" and "was not
+    watching" are the same bytes on disk, and the sniffer half of this component
+    was already got wrong once — a third container on the bridge captured 21
+    packets of mDNS and ARP and none of the traffic. An empty readback, or one
+    holding nothing but non-TCP chatter, is the absence of evidence, and a rule
+    that scores it as agreement is the defect this project exists to avoid.
 
     Everything else is a failure, and every failure names itself in `details`.
 
@@ -545,6 +552,11 @@ def check_agreement(
     needle = json.dumps(expected_content, ensure_ascii=False)[1:-1].encode("utf-8")
     capture_bodies = request_bodies(pcap_text)[bodies_before:]
     capture_hits = [body for body in capture_bodies if needle in body]
+    #: How many frames carried a TCP stream. The difference between "the sniffer
+    #: was attached" and "the sniffer was in the right place": bridge chatter is
+    #: ARP, mDNS and SSDP, and a sniffer watching the wrong interface captures
+    #: nothing else. The silence clause requires this to be non-zero.
+    tcp_frames = sum(1 for frame in frames if frame.stream is not None)
 
     records: list[bytes] = []
     for entry in observer_index(record_dir)[records_before:]:
@@ -654,12 +666,39 @@ def check_agreement(
         )
         agree = False
     else:
-        # Neither observer saw anything. On its own this is not agreement: a
-        # gateway that never fired and a request that was never sent are the
-        # same observation, and only a block receipt for this request id tells
-        # them apart.
+        # Neither observer saw anything, and the block receipt is the third
+        # statement that separates a refusal from a gateway that never fired.
+        #
+        # **The capture has to have been watching.** This is the third silent
+        # empty this component has had, and it is the rule's rather than the
+        # parser's: the clause below scored agreement on an empty readback, and
+        # on one holding nothing but ARP. Both are exactly what a sniffer that
+        # was never on the right interface produces, and both are
+        # indistinguishable from a request that genuinely sent nothing. The
+        # distinction cannot be a detail reported beside a green verdict — a
+        # dead sniffer is the absence of evidence, and separating the two is
+        # what this rule is for.
+        #
+        # The test is "did the capture carry any TCP", not "did it carry frames".
+        # Bridge chatter is ARP, mDNS and SSDP; a frame count alone is satisfied
+        # by precisely the tool this project already got wrong once.
         receipt = _block_receipt(record_dir, request_id)
-        if receipt is None:
+        if not frames:
+            details.append(
+                "neither observer saw anything, and the capture readback contains "
+                "no frames at all: a sniffer that saw nothing is not a sniffer "
+                "that watched and saw nothing, so this is not agreement"
+            )
+            agree = False
+        elif not tcp_frames:
+            details.append(
+                f"neither observer saw anything, and the capture's {len(frames)} "
+                f"frames carry no TCP at all: a sniffer watching the wrong "
+                f"interface captures the bridge's own chatter and none of the "
+                f"traffic, so this is not agreement"
+            )
+            agree = False
+        elif receipt is None:
             details.append(
                 f"neither observer saw anything and there is no block receipt for "
                 f"{request_id!r}: a gateway that never fired and a request that was "

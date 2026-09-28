@@ -512,22 +512,27 @@ def test_silence_does_not_become_agreement_because_the_observer_was_down(
     assert up.agree is True
 
 
-def test_a_capture_with_no_frames_is_reported_so_a_dead_sniffer_is_visible(
+def test_a_dead_sniffer_and_a_watching_one_are_different_verdicts(
     tmp_path: Path,
 ):
     """Zero frames and zero records is a different fact from zero records alone.
 
     A capture that was never attached to the right interface produces the same
-    empty text as a capture that watched and saw nothing, and the report has to
-    distinguish them — the first is a broken tool, the second is a blocked
-    request.
+    empty text as a capture that watched and saw nothing, and the difference has
+    to reach the **verdict**, not just the `details`. It did not, once: this test
+    used to assert `dead.agree is True` on the strength of the detail line
+    alone, which is a test that pins a dead sniffer as agreement. The two cases
+    are now separated at the end of `test_a_capture_with_no_frames_at_all_is_not_agreement`
+    and `test_a_capture_that_saw_no_tcp_is_not_agreement`; this one keeps the
+    arithmetic visible, because a frame count of zero beside a verdict that
+    depends on it is the thing a reader has to be able to check.
     """
     _write_index(tmp_path, [])
     _blocked_receipt(tmp_path, "req-1")
     dead = check_agreement(RECORDED_SHA, APPROVED_CONTENT, tmp_path, "", "req-1")
     live = check_agreement(RECORDED_SHA, APPROVED_CONTENT, tmp_path, BLOCKED_PCAP, "req-1")
     assert dead.pcap_frame_count == 0 and live.pcap_frame_count > 0
-    assert dead.agree is True and live.agree is True
+    assert dead.agree is False and live.agree is True
     assert any("no frames" in d for d in dead.details), dead.details
 
 
@@ -644,3 +649,77 @@ def test_a_cooked_readback_is_reassembled_across_several_frames():
     )
     assert len(frames_in(pcap_text)) == 2
     assert request_bodies(pcap_text) == [body]
+
+
+# -- The second observer has to have been watching ---------------------------
+#
+# Both bugs this component has produced in one afternoon were *silent empties*:
+# a parser that could not read a cooked capture and reported no request seen, and
+# a diagnostic that named an observer that was working. This is the third shape
+# of the same thing, and it is in the rule rather than the parser: the silence
+# clause — "neither observer saw anything, and a block receipt for this request
+# id exists" — never required the capture to have seen anything at all.
+#
+# A sniffer that was never on the right interface produces the same empty
+# readback as one that watched and saw nothing. The first is a broken tool; the
+# second is a blocked request. The rule reported the difference in `details` and
+# then returned the same verdict for both.
+
+#: One frame of bridge chatter that is not TCP at all. What a sniffer on the
+#: wrong interface looks like: it is attached, it is capturing, and every frame
+#: it holds is ARP.
+ARP_ONLY = (
+    "02:00:00.000000 lo    B   ARP, Request who-has 172.16.211.2 "
+    "tell 172.16.212.66, length 50\n"
+    "\t0x0000:  0001 0800 0604 0001 0000 0000 0000 0000 0000 0000 0000  .........\n"
+    "\t0x0010:  ac10 d302  ac10 d442                                      .....\n"
+)
+
+
+def test_a_capture_with_no_frames_at_all_is_not_agreement(tmp_path: Path):
+    """A sniffer that saw nothing cannot testify that nothing was sent.
+
+    This replaces an assertion that had it backwards. The old test pinned
+    `dead.agree is True` and called the difference "reported, not decided" — but
+    a report that says "the sniffer saw nothing, which is not the same as having
+    watched and saw nothing" and then returns agreement has decided, and decided
+    wrongly. The whole component exists so that silence is distinguishable from
+    absence of watching, and a dead sniffer is the absence.
+    """
+    _write_index(tmp_path, [])
+    _blocked_receipt(tmp_path, "req-1")
+    dead = check_agreement(RECORDED_SHA, APPROVED_CONTENT, tmp_path, "", "req-1")
+    assert dead.pcap_frame_count == 0
+    assert dead.agree is False, dead.as_dict()
+    assert any("no frames" in d for d in dead.details), dead.details
+
+
+def test_a_capture_that_saw_no_tcp_is_not_agreement(tmp_path: Path):
+    """The harder half: the capture *did* see frames, and none of them were TCP.
+
+    `pcap_frame_count > 0` is not evidence the sniffer was in the right place.
+    Bridge chatter is what a sniffer on the wrong interface captures, and it is
+    all non-TCP, so a rule satisfied by "there were frames" is satisfied by
+    exactly the tool this project already got wrong once.
+    """
+    _write_index(tmp_path, [])
+    _blocked_receipt(tmp_path, "req-1")
+    report = check_agreement(RECORDED_SHA, APPROVED_CONTENT, tmp_path,
+                             ARP_ONLY, "req-1")
+    assert report.pcap_frame_count > 0, "the fixture must really carry a frame"
+    assert report.agree is False, report.as_dict()
+    assert any("no TCP" in d for d in report.details), report.details
+
+
+def test_a_capture_that_saw_tcp_still_scores_the_silence_clause(tmp_path: Path):
+    """The other direction, so the fix is not "always fail on an empty capture".
+
+    A live capture that watched a request go past and saw no second one is the
+    case clause (b) exists for, and it must keep agreeing.
+    """
+    _write_index(tmp_path, [])
+    _blocked_receipt(tmp_path, "req-1")
+    report = check_agreement(RECORDED_SHA, APPROVED_CONTENT, tmp_path,
+                             BLOCKED_PCAP, "req-1")
+    assert report.pcap_frame_count > 0
+    assert report.agree is True, report.as_dict()
