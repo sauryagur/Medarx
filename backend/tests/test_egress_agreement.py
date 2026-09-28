@@ -197,14 +197,19 @@ def test_the_capture_alone_is_not_agreement(tmp_path: Path):
 
 
 def test_two_observers_that_agree_on_unapproved_bytes_do_not_agree(tmp_path: Path):
-    """The leak: both observers faithfully saw a payload nobody approved.
+    """One observer says a request nobody approved went out.
 
     Built by taking the real record, substituting the report text, writing the
     substituted bytes to disk **and** re-hashing the index entry over them — so
-    the observer's own record is internally consistent and the capture carries
-    the same substituted body. Every check that compares observer against
-    observer passes. Only the comparison against the approved content fails,
-    which is the entire argument for having one.
+    the observer's own record is internally consistent and cannot be dismissed
+    as a corrupt file. The capture is the real, unmodified fixture and still
+    carries the approved body, so the check can tell the two observers apart and
+    says which one carries the approved content and which does not.
+
+    The mirror image — both observers carrying the *same* unapproved bytes, so
+    they cannot be told apart at all — is
+    `test_both_observers_carrying_the_same_unapproved_bytes_are_named_as_such`
+    below. This one is the easy direction and that one is the one that matters.
     """
     substituted = OBSERVER_RECORD.replace(b"7 mm", b"12 mm")
     assert substituted != OBSERVER_RECORD
@@ -217,9 +222,46 @@ def test_two_observers_that_agree_on_unapproved_bytes_do_not_agree(tmp_path: Pat
     r = check_agreement(RECORDED_SHA, APPROVED_CONTENT, record_dir, APPROVED_PCAP, "req-1")
     assert r.agree is False
     assert r.observer_record_count == 1 and r.pcap_hit_count == EXPECTED_HITS, (
-        "both observers did see the request — that is not what failed"
+        "both observers did see a request — that is not what failed"
     )
-    assert any("approved" in d for d in r.details), r.details
+    assert any("the observer's records do not" in d for d in r.details), r.details
+
+
+def test_both_observers_carrying_the_same_unapproved_bytes_are_named_as_such(
+    recorded: Path,
+):
+    """The leak shape, with the corruption on the *approved* side.
+
+    The test above corrupts the observer's record and leaves the capture
+    carrying the approved body, so the check can tell the two observers apart
+    and does. This one corrupts the other end: `expected_content` — the
+    approved payload's own report text — is rewritten length-preservingly
+    before the check sees it, and **both** observers still hold exactly the
+    same real bytes. Every comparison between the two observers passes. The
+    only thing that fails is the binding to the approved payload, which is the
+    whole binding.
+
+    The failure has to be *named* correctly, not merely returned. An earlier
+    version of `check_agreement` reported this as an asymmetric observation —
+    "the capture carries no trace of it" — which is false: the capture carries
+    a request, it simply does not carry the approved one. A diagnostic that
+    points a reader at the wrong observer is worse than none, because it
+    survives being read.
+    """
+    corrupted = APPROVED_CONTENT.replace("7 mm", "9 mm")
+    assert corrupted != APPROVED_CONTENT, "the fixture must actually contain the text"
+    assert len(corrupted) == len(APPROVED_CONTENT)
+
+    r = check_agreement(RECORDED_SHA, corrupted, recorded, APPROVED_PCAP, "req-1")
+    assert r.agree is False, r.details
+    assert r.observer_record_count == 1 and r.pcap_hit_count == 0, (
+        "the observer still holds a request; what it does not hold is the "
+        "approved payload's content"
+    )
+    assert any("neither carried the approved payload" in d for d in r.details), (
+        f"the failure must name the approved content, not an asymmetry: {r.details}"
+    )
+    assert not any("carries no trace of it" in d for d in r.details), r.details
 
 
 def test_observers_that_disagree_byte_for_byte_are_refused(tmp_path: Path):
@@ -507,3 +549,98 @@ def test_the_report_names_the_approved_payload_it_was_asked_about(recorded: Path
     assert bare.as_dict() == prefixed.as_dict()
     assert bare.as_dict()["pcap_frame_count"] == len(frames_in(APPROVED_PCAP))
     assert bare.as_dict()["pcap_frame_count"] > 0
+
+
+# -- A readback the parser has to be able to read ----------------------------
+#
+# A capture taken with `-i any`, or through the compose `capture` service's
+# default, is a **cooked** capture: tcpdump reports the link type as
+# `LINUX_SLL2` and prefixes every frame summary with the interface and the
+# direction. The two beats capture on a named bridge, where the link type is
+# `EN10MB` and there is no such prefix, so this is the format the beats never
+# produce — and the format the infrastructure ships by default.
+#
+# It failed silently, which is the only way this class of defect is acceptable
+# to fix: the parser found no TCP frames, `request_bodies` returned an empty
+# list, and a blocked request's "neither observer saw anything" scored full
+# agreement over a capture that had in fact watched the request go past. The
+# vacuity guard in `evals/beat_support.py` is what caught it; the parser should
+# not have needed catching.
+
+COOKED_HEADER = "12:00:00.000000 lo    Out IP 127.0.0.1.51000 > 127.0.0.1.8080: "
+
+
+def _sll2_frame(request: bytes, *, out_interface: str = "lo",
+                direction: str = "Out") -> str:
+    """One `tcpdump -X` readback frame of `request` behind a Linux SLL2 header.
+
+    Built rather than recorded so the test states exactly what it is about: a
+    20-byte cooked header, an IPv4 header, a TCP header, and the payload. The
+    header is real, not a placeholder — `frames_in` is about to be asked to find
+    the IP header at an offset it has never been told in advance.
+    """
+    # IPv4: version 4, IHL 5 (20 bytes), total length, TTL 64, protocol 6 (TCP).
+    ip = (bytes([0x45, 0x00]) + (20 + 20 + len(request)).to_bytes(2, "big")
+          + b"\x00\x01\x00\x00\x40\x06\x00\x00"
+          + bytes([127, 0, 0, 1]) + bytes([127, 0, 0, 1]))
+    # TCP: the data-offset nibble is at byte 12 and has to say 5, or the parser
+    # reads a zero-length header and hands back the header as if it were the
+    # payload. That is the shape of bug this fixture exists to be immune to.
+    tcp = ((51000).to_bytes(2, "big") + (8080).to_bytes(2, "big")
+           + (1).to_bytes(4, "big") + (1).to_bytes(4, "big")
+           + bytes([0x50, 0x18]) + (512).to_bytes(2, "big")
+           + b"\x00\x00" + b"\x00\x00")
+    assert len(ip) == 20 and len(tcp) == 20
+    # Linux cooked capture v2: a 20-byte header whose ethertype field is 0x0800.
+    cooked = b"\x00" * 8 + b"\x08\x00" + b"\x00" * 10
+    assert len(cooked) == 20
+    packet = cooked + ip + tcp + request
+    lines = [f"12:00:00.000000 {out_interface:<5} {direction:<3} "
+             f"IP 127.0.0.1.51000 > 127.0.0.1.8080: Flags [P.], seq 1:"
+             f"{1 + len(request)}, ack 1, win 512, length {len(request)}:"]
+    for offset in range(0, len(packet), 16):
+        chunk = packet[offset:offset + 16]
+        hex_column = " ".join(f"{byte:02x}" for byte in chunk)
+        text_column = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        lines.append(f"\t0x{offset:04x}:  {hex_column:<47}  {text_column}")
+    return "\n".join(lines) + "\n"
+
+
+def _request(body: bytes) -> bytes:
+    """A whole HTTP request whose `Content-Length` is exactly `len(body)`."""
+    return (f"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n"
+            f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n"
+            ).encode() + body
+
+
+def test_a_cooked_readback_yields_the_request_body_it_carries():
+    """A capture the parser cannot read must not look like a capture with
+    nothing on it. This is the format the compose `capture` service produces
+    unless `MEDARX_BRIDGE_INTERFACE` is set, and it is the format a blocked beat
+    would otherwise be scored over."""
+    body = b'{"findings":"7mm nodule"}'
+    pcap_text = _sll2_frame(_request(body))
+    assert COOKED_HEADER.split("IP ")[0].strip() in pcap_text, (
+        "the fixture must really carry the interface prefix this test is about"
+    )
+    assert len(frames_in(pcap_text)) == 1
+    assert request_bodies(pcap_text) == [body]
+
+
+def test_a_cooked_readback_is_reassembled_across_several_frames():
+    """Two segments of one request, so this is reassembly and not a copy.
+
+    The second segment is placed by sequence number, which is what makes a body
+    that straddles a segment boundary findable at all. Concatenating in capture
+    order would put the needle out of reach and report a zero that is
+    indistinguishable from a zero because nothing was sent.
+    """
+    body = b'{"findings":"' + b"x" * 400 + b'"}'
+    request = _request(body)
+    split = len(request) // 2
+    pcap_text = (
+        _sll2_frame(request[:split])
+        + _sll2_frame(request[split:]).replace("seq 1:", f"seq {1 + split}:", 1)
+    )
+    assert len(frames_in(pcap_text)) == 2
+    assert request_bodies(pcap_text) == [body]

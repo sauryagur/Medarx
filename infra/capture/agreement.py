@@ -59,7 +59,7 @@ __all__ = [
     "check_agreement",
     "compare_bytes_to_payload",
     "frames_in",
-    "observer_index",
+    "record_bytes",
     "request_bodies",
 ]
 
@@ -199,14 +199,33 @@ _HEX_LINE = re.compile(r"^\s*0x[0-9a-fA-F]+:\s{2,}(.*)$")
 #: A TCP frame's summary, with `-n`: addresses are numeric and the sequence
 #: numbers are absolute, which is what makes placement rather than concatenation
 #: the correct way to reassemble.
+#:
+#: **Searched, not anchored.** A capture taken on a named interface is reported
+#: as `EN10MB` and its summary begins with the IP header, so anchoring at `^IP`
+#: works. A *cooked* capture — `LINUX_SLL`, `LINUX_SLL2`, which is what `-i any`
+#: and the compose `capture` service's default produce — prefixes every summary
+#: with the interface name and the direction:
+#:
+#:     12:00:00.000000 lo    Out IP 127.0.0.1.51000 > 127.0.0.1.8080: Flags ...
+#:
+#: and an anchored pattern matched none of them. The failure was silent and
+#: dangerous in the worst way available: `request_bodies` returned an empty
+#: list, so a **blocked** request's "neither observer saw anything" scored full
+#: agreement over a capture that had watched the request go past. A parser that
+#: cannot read a capture must say so, not report an absence.
 _TCP_LINE = re.compile(
-    r"^IP (\d+(?:\.\d+){3})\.(\d+) > (\d+(?:\.\d+){3})\.(\d+):"
+    r"\bIP (\d+(?:\.\d+){3})\.(\d+) > (\d+(?:\.\d+){3})\.(\d+):"
     r" Flags \[([^\]]*)\], seq (\d+):(\d+)"
 )
 
 _ETHERTYPE_IPV4 = 0x0800
 _IPPROTO_TCP = 6
 
+
+#: Where the IPv4 header can start, by link type. See `_tcp_payload`.
+_ETHERTYPE_OFFSET = 14
+_SLL_OFFSET = 16
+_SLL2_OFFSET = 20
 
 @dataclass
 class _Frame:
@@ -220,18 +239,21 @@ class _Frame:
 def frames_in(pcap_text: str) -> list[_Frame]:
     """Every frame in a `tcpdump -X` readback, as bytes.
 
-    The link-layer offset is **detected, not assumed**: each frame is tested at
-    offset 0 and, failing that, at offset 14 behind an IPv4 ethertype. The
-    alternative — assuming one of them — is a parser that reads an IP header as
-    a MAC address, extracts nothing, and reports "no request was seen" for
-    every capture it is ever given.
+    The frame summary and the packet's own bytes are taken from wherever they
+    are: the link type decides whether tcpdump prefixes the summary with an
+    interface name and a direction, and the packet bytes start at whatever
+    offset that link type's header occupies. Both are **detected, not assumed** —
+    see `_TCP_LINE` and `_tcp_payload` — because a parser that guesses wrong
+    reads an IP header as a MAC address, extracts nothing, and reports "no
+    request was seen" for every capture it is ever given, which is a check that
+    cannot fail and therefore cannot be believed.
     """
     frames: list[_Frame] = []
     current: _Frame | None = None
     for line in pcap_text.splitlines():
         header = _FRAME_LINE.match(line)
         if header:
-            tcp = _TCP_LINE.match(header.group(2))
+            tcp = _TCP_LINE.search(header.group(2))
             current = _Frame(
                 stream=(
                     (tcp.group(1), int(tcp.group(2)), tcp.group(3), int(tcp.group(4)))
@@ -261,21 +283,27 @@ def _tcp_payload(data: bytes) -> bytes | None:
     20 bytes a fixed offset would allow, and assuming would shift the payload —
     producing a body that is nearly right, which is the worst shape for a byte
     comparison to fail in.
+
+    **The link-layer offset is found, not assumed**, and the candidates are the
+    four this project can actually be handed: 0 for a capture that starts at
+    the IP header (which is what the Docker bridge produces even though tcpdump
+    calls the link type `EN10MB`), 14 for Ethernet, 16 for `LINUX_SLL` and 20
+    for `LINUX_SLL2`. Each candidate is accepted only if the version nibble
+    says IPv4 and the protocol byte says TCP, so a wrong guess is rejected
+    rather than silently read.
     """
-    if len(data) >= 20 and data[0] >> 4 == 4:
-        ip = 0
-    elif len(data) > 34 and struct.unpack("!H", data[12:14])[0] == _ETHERTYPE_IPV4:
-        ip = 14
-    else:
-        return None
-    if data[ip] >> 4 != 4 or data[ip + 9] != _IPPROTO_TCP:
-        return None
-    ip_header_length = (data[ip] & 0x0F) * 4
-    if ip_header_length < 20 or len(data) < ip + ip_header_length + 20:
-        return None
-    tcp = ip + ip_header_length
-    tcp_header_length = (data[tcp + 12] >> 4) * 4
-    return data[tcp + tcp_header_length:]
+    for ip in (0, _ETHERTYPE_OFFSET, _SLL_OFFSET, _SLL2_OFFSET):
+        if len(data) < ip + 20:
+            continue
+        if data[ip] >> 4 != 4 or data[ip + 9] != _IPPROTO_TCP:
+            continue
+        ip_header_length = (data[ip] & 0x0F) * 4
+        if ip_header_length < 20 or len(data) < ip + ip_header_length + 20:
+            continue
+        tcp = ip + ip_header_length
+        tcp_header_length = (data[tcp + 12] >> 4) * 4
+        return data[tcp + tcp_header_length:]
+    return None
 
 
 def _http_body(stream: bytes) -> bytes | None:
@@ -373,7 +401,7 @@ def observer_index(record_dir: Path) -> list[dict]:
     return entries
 
 
-def _record_bytes(record_dir: Path, entry: dict) -> bytes | None:
+def record_bytes(record_dir: Path, entry: dict) -> bytes | None:
     """The bytes an index entry claims, or `None` when the entry is not honest.
 
     Three refusals, all of them ways a record can look present and be nothing:
@@ -515,13 +543,12 @@ def check_agreement(
     # definition, shared with the encoder, rather than a second guess at how a
     # string is escaped.
     needle = json.dumps(expected_content, ensure_ascii=False)[1:-1].encode("utf-8")
-    capture_hits = [
-        body for body in request_bodies(pcap_text)[bodies_before:] if needle in body
-    ]
+    capture_bodies = request_bodies(pcap_text)[bodies_before:]
+    capture_hits = [body for body in capture_bodies if needle in body]
 
     records: list[bytes] = []
     for entry in observer_index(record_dir)[records_before:]:
-        body = _record_bytes(record_dir, entry)
+        body = record_bytes(record_dir, entry)
         if body is None:
             # Refused, and said so: the observer's index claims a record that
             # cannot be produced from the file on disk, so this entry
@@ -537,6 +564,13 @@ def check_agreement(
             continue
         records.append(body)
     record_hits = [body for body in records if needle in body]
+    # Whether *either* observer saw a request at all, as distinct from whether
+    # it saw the approved one. The distinction is the whole of the last branch
+    # below: "saw a request and it was not the approved payload" and "saw no
+    # request" are different failures, and reporting the first as the second
+    # sends a reader to an observer that was working perfectly.
+    observer_saw_a_request = bool(records)
+    capture_saw_a_request = bool(capture_bodies)
 
     if not frames:
         details.append(
@@ -596,9 +630,24 @@ def check_agreement(
                 f"carries no trace of it, so the two observers do not agree"
             )
         agree = False
-    elif records or capture_hits:
-        seen = "the observer's records" if records else "the captured request"
-        missing = "the capture" if records else "the observer"
+    elif observer_saw_a_request and capture_saw_a_request:
+        # The leak shape with the corruption on the approved side. Both
+        # observers hold a request and agree about it; neither holds the
+        # approved payload's content. Reporting this as an asymmetry would be
+        # false — both observers saw a request — and it would name an observer
+        # that was working, so the diagnostic is written from what was
+        # actually observed rather than from which list happened to be empty.
+        details.append(
+            "both observers saw a request and neither carried the approved "
+            "payload's content, so the two observers agree with each other "
+            "about bytes that are not the approved ones, and agreement about "
+            "unapproved bytes is not evidence that the approved payload was "
+            "the thing that was sent"
+        )
+        agree = False
+    elif observer_saw_a_request or capture_saw_a_request:
+        seen = "the observer's records" if observer_saw_a_request else "the captured request"
+        missing = "the capture" if observer_saw_a_request else "the observer"
         details.append(
             f"asymmetric observation: {seen} carry a request and {missing} carries "
             f"no trace of it, so the two observers do not agree"

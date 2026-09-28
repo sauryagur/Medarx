@@ -187,14 +187,33 @@ cmd_readback() {
     # them is the loss. Measured here: a run reported 48 received and 44
     # captured, and the four that went missing included the request the whole
     # check was about.
-    local received lost
+    #
+    # **The cause is named from tcpdump's own numbers, not assumed.** An earlier
+    # version of this block printed "kernel buffer overflow" unconditionally,
+    # and the beats hit it repeatedly against runs where tcpdump reported
+    # `0 packets dropped by kernel` — so the message was naming a cause the
+    # evidence contradicted, and a reader debugging a real overflow would have
+    # been sent to look at the wrong thing. There are two distinct losses and
+    # they need different fixes: a non-zero `dropped by kernel` really is a ring
+    # buffer too small for the offered load, while a zero there with a positive
+    # gap is the shutdown race — frames the filter had already matched and that
+    # had not been copied out when SIGINT ended the read loop.
+    local received lost dropped
     received="$(grep -oE '^[0-9]+ packets? received by filter' "$out_dir/tcpdump.log" 2>/dev/null \
         | grep -oE '^[0-9]+' | head -1)"
     received="${received:-0}"
+    dropped="$(grep -oE '^[0-9]+ packets? dropped by kernel' "$out_dir/tcpdump.log" 2>/dev/null \
+        | grep -oE '^[0-9]+' | head -1)"
+    dropped="${dropped:-0}"
     lost=$((received - packets))
     if [ "$received" -gt 0 ] && [ "$lost" -gt 0 ]; then
-        printf 'start_capture: the capture LOST %s of %s packets (kernel buffer overflow)\n' \
-            "$lost" "$received" >&2
+        if [ "$dropped" -gt 0 ]; then
+            printf 'start_capture: the capture LOST %s of %s packets (%s dropped by the kernel: the ring buffer is too small for the offered load)\n' \
+                "$lost" "$received" "$dropped" >&2
+        else
+            printf 'start_capture: the capture LOST %s of %s packets (0 dropped by the kernel: frames the filter matched and tcpdump had not copied out when it was stopped, which is a shutdown race rather than an overflow)\n' \
+                "$lost" "$received" >&2
+        fi
         return 1
     fi
 }
