@@ -1,8 +1,15 @@
 # Medarx — Handoff
 
-Written 2026-09-28 by inspecting the repository at `phase1-privacy-kernel`. Every
-factual claim below about the current state was verified by running a command or
-reading a file; anything I could not determine is marked **not verified**.
+> **Refreshed 2026-09-28, after Phase 1 completed.** This document was first
+> written while Phase 1 was parked at Task 12. Tasks 13–20, the final
+> whole-branch review and both review fixes have since been implemented,
+> committed and merged to `master`. Every claim below was re-verified by
+> running a command or reading a file on **2026-09-28**; anything that could not
+> be determined is marked **not verified**. Where the original text was wrong
+> about the current state, it has been corrected rather than left standing.
+
+Originally written 2026-09-28 by inspecting the repository, then at
+`phase1-privacy-kernel` and HEAD `47544a2`.
 
 ---
 
@@ -22,11 +29,18 @@ not around making it always pass.
 Phase 1 builds the **privacy kernel** and nothing else: components A through J
 below, an evaluation corpus, a normative API contract, and a two-observer
 egress-verification layer. It does **not** build the viewer (Phase 2 — the OHIF
-extension and the `viewer/` directory, which I confirmed does not exist), does
-not integrate DICOMweb or Orthanc into any request path (I confirmed zero
-`dicom-web`/`dicomweb` references in any `.py`, `.sh` or `.yaml` outside
-`.docs/`), and does not use any real patient data or downloaded dataset. Every
-value in the evaluation corpus is fabricated and `evals/synthetic_phi/identifiers.json`
+extension and the `viewer/` directory, which I re-confirmed does not exist), and
+it does **not** integrate DICOMweb or Orthanc into any request path. That second
+claim was originally justified by "zero `dicom-web`/`dicomweb` references in any
+`.py`, `.sh` or `.yaml` outside `.docs/`", which is **no longer true**: Task 20
+shipped an Orthanc image and a compose service, and the string now appears in
+`contracts/openapi.yaml:872`, `backend/src/medarx/api/schemas.py:124`,
+`infra/compose.yaml:19,101-102` and the orthanc config. Every one of those is
+**prose or a comment** — I grepped `.py`/`.sh`/`.yaml` for the string and read
+every hit. There is still no DICOMweb **client** in the tree and nothing on the
+Medarx request path talks to Orthanc. Phase 1 also does not use any real patient
+data or downloaded dataset. Every value in the evaluation corpus is
+fabricated and `evals/synthetic_phi/identifiers.json`
 carries a marker saying so.
 
 The regulatory positioning, which must be reproduced verbatim and never
@@ -34,21 +48,37 @@ paraphrased:
 
 > Medarx is intended for research and demonstration. It performs administrative report assistance using clinician-supplied findings and authorized report text. It does not independently interpret medical images, make diagnostic or treatment recommendations, or autonomously submit clinical reports. Its regulatory classification has not been established, and it is not validated for clinical use.
 
-I verified this paragraph appears **verbatim** in `contracts/openapi.yaml` at
-`info/description` (and duplicated at `info/license/name`), and in all three
-`.docs/` files. It is **not yet in `backend/README.md`** — I searched and found
-zero occurrences there. Plan Task 20 Step 7 requires it; that is outstanding work,
-not a completed step.
+Re-verified 2026-09-28. The paragraph appears **verbatim** in
+`contracts/openapi.yaml` at `info/description` — **once**, not duplicated: the
+`info/license` block carries only `name: Unlicensed — research and
+demonstration use only` and `identifier: "Proprietary"`, so the original
+"duplicated at `info/license/name`" claim was wrong. It appears in all three
+`.docs/` files, and it is now **in `backend/README.md`** as well, under
+"What this software is, and is not" — Plan Task 20 Step 7 is done, and the
+original "not yet in the README" note is withdrawn.
 
 ---
 
 ## 2. Current state
 
-**Branch:** `phase1-privacy-kernel`. **HEAD:** `47544a2`. **Working tree:** clean
-(`git status --porcelain` empty). **Commit count:** 64 total on the branch
-(`git rev-list --count HEAD`); the last 40, newest first:
+**Phase 1 status: COMPLETE, through Task 20, plus the final whole-branch
+review.** Re-verified 2026-09-28.
+
+**Branch:** `master` — **not** `phase1-privacy-kernel`, which is what this
+document originally said. **HEAD:** `433cf6a` (`docs: track the phase 1 handoff
+document`). **Working tree:** clean (`git status --porcelain` empty).
+**Commit count:** 72 (`git rev-list --count HEAD`), up from 64. The last 40,
+newest first:
 
 ```
+433cf6a docs: track the phase 1 handoff document
+0b42e49 chore: stop ignoring the root handoff document
+eb4070c feat(docs): correct the capture and parser claims in the component I section
+d8c89aa feat(demo): declare the policy mode the beats actually run in
+e2f20d5 feat(egress): refuse to score a dead sniffer as agreement
+1d84d55 feat(infra): add the compose stack, the orthanc image, and the preflight
+13f607e feat(demo): add the blocked-path beat and prove its zero is a measurement
+db7fea3 feat(demo): add the approved-path beat and a check that can fail
 47544a2 feat(egress): add host-network capture and two-observer agreement check
 de5804e feat(egress): add byte-recording mock observer endpoint
 2d01fb4 feat(api): add a patient reference to the contract and record every surface refusal
@@ -81,15 +111,31 @@ f786d92 docs(readme): make the setup sequence state the two-step sync and bootst
 f22d85d feat(deident): seed surrogate UIDs on the value and never pad an illegal one
 6a267ff feat(extraction): read the PatientAge unit and band sub-year ages in months
 732f078 feat(contract): make every response schema satisfiable and name the keywords layer A accepts
-9241c06 feat(redaction): correct the I4 alteration rate and the reasoning for deferring it
-c62d039 feat(redaction): pass relative intervals through and give each D.2 block its own code
-1b00760 feat(redaction): add three fail-closed redaction layers and the kernel entry point
-07e18ae feat(redaction): shift a detected date by the patient offset instead of substituting the surrogate
-ba0039a feat(redaction): protect unresolvable hits at every filter and preserve offsets through the anchor strip
-6a0de9a feat(redaction): add presidio NER scan with confidence threshold and non-guessing replacers
-2fe734e feat(redaction): correct enhancer mechanism note and harden pattern pin
-6272573 feat(redaction): hold ambiguous reference below threshold and case-fold patient id label
 ```
+
+### What changed since this document was written
+
+Eight commits landed after the `47544a2` this document recorded. Six of them
+closed Phase 1; two track this file.
+
+| Commit | What it did |
+|---|---|
+| `db7fea3` | **Task 18** — beat 1, the approved-path end-to-end demonstration: `evals/demo_beat1_approved.py`, `backend/tests/test_e2e_approved.py`, shared machinery in `evals/beat_support.py`, two fixes to component I |
+| `13f607e` | **Task 19** — beat 2, the blocked-path demonstration: `evals/demo_beat2_blocked.py`, `backend/tests/test_e2e_blocked.py` |
+| `1d84d55` | **Task 20** — `infra/compose.yaml`, `infra/orthanc/Dockerfile.orthanc`, `infra/orthanc/orthanc.json`, `infra/verify_env.sh`, `backend/README.md` |
+| `e2f20d5` | Fix from the final whole-branch review — a dead sniffer scored as agreement (`infra/capture/agreement.py`, `backend/tests/test_egress_agreement.py`) |
+| `d8c89aa` | Fix from the final whole-branch review — the audit records named a deployment mode that was not in force (`evals/beat_support.py`, both demo scripts, both beat test modules) |
+| `eb4070c` | Fix from the final whole-branch review — the Component I section of `backend/README.md` |
+| `0b42e49` | Stop gitignoring the root handoff document |
+| `433cf6a` | Track `HANDOFF.md` (it had previously been gitignored) |
+
+**The final whole-branch review was run**, across `efe567d..HEAD` — which is 71
+commits — at the standing `Ruling PROCESS-PHASE-2`. It found **1 Critical/High
+and 1 Medium**; both are fixed and committed (`e2f20d5`, `d8c89aa`), and the
+doc-accuracy fix followed (`eb4070c`). It also verified, and found clean, the
+seam no test had ever covered: the whole kernel against the compose stack's real
+PostgreSQL 18. Full account in
+`.superpowers/sdd/phase1-privacy-kernel/task-18-20-report.md` §6.
 
 ### Verified test counts
 
@@ -100,28 +146,41 @@ measured are:
 
 | Suite | Command | Count |
 |---|---|---|
-| Backend | `cd backend && uv run pytest --junit-xml=...` | **845 tests, 0 failures, 0 errors, 0 skipped** |
+| Backend | `cd backend && uv run pytest --junit-xml=...` | **877 tests, 0 failures, 0 errors, 0 skipped** |
 | Evaluation harness | `cd backend && uv run pytest ../evals --junit-xml=...` | **37 tests, 0 failures, 0 errors, 0 skipped** |
+
+Both numbers were **re-measured on 2026-09-28** and are unchanged from what
+`task-18-20-report.md` §4 records. The backend figure is **877, not the 845
+this document originally carried**; the branch adds 32 over that baseline — 11
+in `test_e2e_approved.py`, 15 in `test_e2e_blocked.py`, 2 cooked-capture cases
+and 3 dead-sniffer cases in `test_egress_agreement.py`, plus 1 policy-mode test
+per beat module.
 
 Counts are read from the JUnit XML, not from pytest's summary line, which is
 lost when stdout is a pipe in this environment.
 
-**One caveat on the backend number, and it matters for how you read it.** My
-first full run reported 845 tests with **6 errors**, all six in
-`tests/test_egress_e2e.py`, all with the same cause: `docker run ... --network
-medarx-e2e` failing with exit 125. I reproduced it by hand and the daemon's
+**One caveat on the backend number, and it matters for how you read it.** The
+first full run during the original Phase 1 build reported 845 tests with **6
+errors**, all six in `tests/test_egress_e2e.py`, all with the same cause:
+`docker run ... --network medarx-e2e` failing with exit 125. The daemon's
 message was `failed to set up container networking: network medarx-e2e not
 found`. The network was genuinely absent. The cause is a **race in the test
 fixture, not a defect in the component**: `tests/test_egress_e2e.py:154` creates
 the network with `check=False` (so a create failure is silent), and the
-module-scoped teardown at line 200 does `docker network rm medarx-e2e`. Two
-concurrent runs of that module — one teardown removing the network while the
-other is between create and run — reproduce it exactly. I re-ran the module
-alone and it was **6 passed, 0 errors in 21s**; the second full-suite run with
-no concurrent run was clean. **So: the 6 errors are a concurrency artefact of
-running `test_egress_e2e.py` twice at once, and the 845/0/0/0 above is the
-clean number.** Do not run two copies of that module concurrently; run seed
-matrices sequentially.
+module-scoped teardown at **line 202** (line 200 in the original text — the
+block has grown) does `docker network rm medarx-e2e`. Two concurrent runs of
+that module — one teardown removing the network while the other is between
+create and run — reproduce it exactly. Do not run two copies of that module
+concurrently; run seed matrices sequentially.
+
+**The 6 errors were seen again once during Tasks 18–20 and never reproduced.**
+`task-18-20-report.md` §4 records one full-suite run with 6 `test_egress_e2e.py`
+errors, all `docker run … exit 125` with `network medarx-e2e not found`, and
+that it did not reproduce in two paired runs, in a solo run, or in any of the
+four seed-matrix runs. Leftover containers from the interrupted handoff session
+were present at the time; that explanation is a **hypothesis, not a diagnosed
+cause**. My own 2026-09-28 run of the full suite was clean: **877 passed, 0
+failures, 0 errors, 0 skipped**, 135 s.
 
 `en_core_web_sm` 3.8.0 is currently installed and importable, so the NER model
 is present right now.
@@ -134,11 +193,12 @@ is present right now.
   `ActionCode` has 24 members; `Layer` has exactly 8
   (`J, A, D.1, D.2, D.3, E, F, C` — no bare `"D"`); `FunctionName` is
   `[Draft, Prior Summary, Ask]`.
-- `backend/src/medarx/` — 47 Python modules across `api/`, `audit/`,
+- `backend/src/medarx/` — **48** Python modules (was 47 when this was written)
+  across `api/`, `audit/`,
   `deident/`, `extraction/`, `gateway/`, `policy/`, `pseudonym/`, `redaction/`
   plus top-level `config.py`, `errors.py`, `models.py`, `pipeline.py`,
   `logging_filter.py`, and `scripts/bootstrap_ner_model.sh` (executable).
-- `backend/tests/` — 25 test modules, including four new egress ones
+- `backend/tests/` — **26** test modules, including four new egress ones
   (`test_observer_agreement_unit.py`, `test_observer_service.py`,
   `test_egress_agreement.py`, `test_egress_e2e.py`) and a committed
   `fixtures/capture/` holding four **real** capture artifacts (a 58 KB
@@ -146,7 +206,9 @@ is present right now.
   observer `.bin` record plus its `index.jsonl` line from the same run). All
   four are tracked in git.
 - `evals/` — `runner.py`, `metrics.py`, `run_eval.py`, `conftest.py`,
-  `test_eval_harness.py`, and `synthetic_phi/` with 6 corpus cases across three
+  `test_eval_harness.py`, `__init__.py`, **`beat_support.py`** and the **two
+  demo scripts `demo_beat1_approved.py` and `demo_beat2_blocked.py`** (all from
+  Tasks 18–19), and `synthetic_phi/` with 6 corpus cases across three
   groups (`CASES`: `known_positive`, `unresolved`, `all_phi`;
   `DICOM_HEADER_CASES`: `dicom_header_identifiers`, `dicom_header_prose`;
   `SPELLING_CASES`: `patient_id_label_spelling`), plus `identifiers.json`
@@ -154,37 +216,51 @@ is present right now.
   (28 `ORDINARY_SENTENCES`), `report_template.txt`, `gen_dcm.py`,
   `seed_corpus.py`, `baseline.json`, `eval_results.json`.
 - `infra/` — `__init__.py`, `observers/` (`observer.py` 425 lines,
-  `Dockerfile`, `requirements.txt`), `capture/` (`agreement.py` 644 lines,
-  `start_capture.sh` 214 lines, `Dockerfile`). **All nine files are committed**
-  (`git ls-files infra/` lists them all).
-- `backend/README.md` — 804 lines, tracked, the only tracked document. Has
-  per-component sections for B, C, E, F, G, H, I, J.
+  `Dockerfile`, `requirements.txt`), `capture/` (`agreement.py` **732** lines,
+  `start_capture.sh` **233** lines, `Dockerfile`), plus **`compose.yaml`,
+  `verify_env.sh` and `orthanc/` (`Dockerfile.orthanc`, `orthanc.json`)** from
+  Task 20. **All thirteen files are committed** — `git ls-files infra/` lists
+  every one, including the four Task 20 additions.
+- `backend/README.md` — **1072** lines (was 804), tracked. Per-component sections
+  for B, C, E, F, G, H, I, J, plus "Phase 1 — running it" and "Known and
+  accepted limitations". Still **missing** sections for A and D. It now carries
+  the regulatory paragraph verbatim.
+- `HANDOFF.md` — this file, now **tracked** (commit `433cf6a`). It was
+  gitignored until `0b42e49` stopped that, so there are now **two** tracked
+  documents, not one. Nothing under `.docs/` or `.superpowers/` is tracked.
 
-**Not present** (I checked each by path): `infra/compose.yaml`,
-`infra/verify_env.sh`, `infra/orthanc/Dockerfile.orthanc`,
-`infra/orthanc/orthanc.json`, `evals/demo_beat1_approved.py`,
-`evals/demo_beat2_blocked.py`, `backend/tests/test_e2e_approved.py`,
-`backend/tests/test_e2e_blocked.py`. There is no `viewer/` directory. These are
-exactly Tasks 18, 19 and 20.
+**The eight files this document listed as "Not present" all exist.** I checked
+each by path on 2026-09-28: `infra/compose.yaml`, `infra/verify_env.sh`,
+`infra/orthanc/Dockerfile.orthanc`, `infra/orthanc/orthanc.json`,
+`evals/demo_beat1_approved.py`, `evals/demo_beat2_blocked.py`,
+`backend/tests/test_e2e_approved.py`, `backend/tests/test_e2e_blocked.py`. The
+"Not present" list is **withdrawn**; those were Tasks 18, 19 and 20, and all
+three are done. The only one of the original "not present" claims that still
+holds is the one about `viewer/`: **there is still no `viewer/` directory**,
+which is correct — that is Phase 2.
 
-### Ledger state — a real gap
+### Ledger state — the original gap is closed
 
-`.superpowers/sdd/phase1-privacy-kernel/progress.md` is 139 lines and **its last
-entry is Task 12's completion plus `Ruling PROCESS-PHASE-2`.** There are **zero
-entries for Tasks 13, 14, 15, 16 or 17** (I grepped for `^Task 1[3-7]:` — count
-0). Those five tasks are implemented, reviewed, reported and committed, but the
-chronological ledger that section 10 calls the record of "every task, fix round
-and ruling" **does not cover them**. The next agent should treat the ledger as
-current through Task 12 only, and use the per-task reports (which exist for
-13, 14, 15 and a combined 16-17) instead.
+This section originally recorded a real defect: `progress.md` stopped at Task
+12, with **zero** entries for Tasks 13–17, so the chronological record of "every
+task, fix round and ruling" did not cover the work that had actually been done.
 
-Also: `.superpowers/sdd/` is **gitignored** (`.superpowers/sdd/.gitignore`
-contains `*`), so none of this is in git. `progress.md` was last modified
-06:08; `task-16-17-report.md` at 06:56 and **was still being edited while I
-inspected it** — its test counts changed from 46/22 to 47/23 mid-inspection, and
-its seed-matrix table is an **unfilled `<!-- SEED_MATRIX -->` placeholder** at
-line 343. Read that report as in-flight, and re-check its numbers before
-quoting them.
+**Re-verified 2026-09-28: that gap has been closed.**
+`.superpowers/sdd/phase1-privacy-kernel/progress.md` is now **250 lines** (was
+139) and `grep -c '^Task 1[3-7]:'` returns **5** (was 0). The append was made
+under `Ruling LEDGER-APPEND`, which states the reasoning: *the chronological
+ledger is the recovery map after context loss, so a gap in it is a defect in the
+record rather than a missing nicety.* The five entries were written from `git
+log` SHAs rather than from recollection, and the per-task reports were treated
+as claims to re-verify — that is how the append had to reconcile §3's "one
+measurement said 7/28 where the measurement is 5/28". The ledger now also
+records both final-review findings (`e2f20d5`, `d8c89aa`).
+
+Still true: `.superpowers/sdd/` is **gitignored** (`.superpowers/sdd/.gitignore`
+contains `*`), so none of this is in git. `task-16-17-report.md` remains the
+one report with an **unfilled `<!-- SEED_MATRIX -->` placeholder** at line 343 —
+I confirmed the placeholder is still there. Treat that report's numbers as
+unverified; the ledger and the code supersede it.
 
 ### Components A through J
 
@@ -264,8 +340,8 @@ These are settled decisions with reasoning recorded in
    implemented default is `gateway_base_url = "http://127.0.0.1:8080/v1"` — the
    **local observer**. There is no OpenRouter demo in Phase 1. The gateway is
    provider-agnostic and the OpenRouter path is untested here.
-6. **The whole per-task review process was judged a misjudgement.** The ledger's
-   final entry, `Ruling PROCESS-PHASE-2`, says so in terms: roughly fifteen
+6. **The whole per-task review process was judged a misjudgement.** The ruling
+   `Ruling PROCESS-PHASE-2` (ledger line 139) says so in terms: roughly fifteen
    tasks each costing an implement, a review and 0–5 fix rounds, with the
    largest single defect found late because the queue serialised behind review
    overhead. The rule going forward is: implement in dependency order, review
@@ -274,6 +350,12 @@ These are settled decisions with reasoning recorded in
    a security boundary, and anything another task consumes before it can be
    reviewed end to end.
 
+   **The ruling has now been carried out, and it earned its keep.** The final
+   whole-branch review was run across `efe567d..HEAD` and found **1
+   Critical/High and 1 Medium**, the High being a dead sniffer scoring as
+   agreement. Both are fixed. The review is what caught it — per-task review
+   had not.
+
 ---
 
 ## 4. Invariants that must not be broken
@@ -281,6 +363,19 @@ These are settled decisions with reasoning recorded in
 Each of these was violated at least once during the build. Each is now enforced
 by a named test. **If you change any of these mechanisms, the named test is the
 one that must go red — check that it does.**
+
+**Re-verified 2026-09-28, and this section is unchanged.** I checked all 30
+named tests in items 1–10 still exist in `backend/tests/` by name, one by one:
+all 30 present. `task-18-20-report.md` §6a also re-ran them **by name** against
+the final tree — 73 collected after parameterisation, 0 failures, 0 errors, 0
+skipped — and notes that the agreement fix and the cooked-capture fix touched
+component I only, so **none of the ten went red**, which is the check this
+section asks for rather than a claim that nothing was affected. Invariants 4
+and 5's per-declaration-site sweeps and invariant 8's `ALLOWED_AUDIT_FIELDS`
+literal are unchanged: I re-read `audit_log.py:112` and it is still a
+hand-written `frozenset`, and `errors.py:138` is still
+`class AuthzError(Exception)`, declared outside `MedarxError`, as invariant 6
+requires.
 
 **1. A block comes from the absence of a registered replacer for a detected
 entity — never from a score being below a threshold.**
@@ -387,129 +482,219 @@ and `::test_a_function_outside_the_contract_enum_is_refused`.
 
 ## 5. What remains
 
-Tasks 18, 19, 20, plus the final whole-branch review. Acceptance criteria below
-are quoted from `.docs/medarx-phase1-plan.md`, not guessed. All 20 task headings
-exist in that file (I confirmed the heading list).
+**Nothing remains from Phase 1.** All 20 tasks are implemented, committed and
+merged; the final whole-branch review ran across `efe567d..HEAD` and both its
+findings are fixed. The old text of this section listed Tasks 16–20 and the
+review as outstanding — all of that is done, and that list is withdrawn.
 
-### Tasks 16 and 17 — already done (verified)
+**What remains is Phase 2**, and it is already planned. The plan is
+`.docs/phase2-plan.md` (47 KB, written 2026-09-28, **not tracked** — `.docs/`
+is gitignored). The summary below is drawn from that document; quote it rather
+than paraphrasing it, and read it before planning anything.
 
-**Do not re-do these.** I verified empirically, not from the brief:
+### Phase 2 scope, in the plan's own words
 
-- Both `infra/observers/` and `infra/capture/` **exist**, and all nine files are
-  **committed** to git (`git ls-files infra/` lists every one).
-- Commits `de5804e` (Task 16) and `47544a2` (Task 17) are the two most recent on
-  the branch, and the working tree is clean.
-- Their tests exist and pass: `test_observer_agreement_unit.py`,
-  `test_observer_service.py`, `test_egress_agreement.py`, `test_egress_e2e.py`
-  (6 tests, verified passing on a clean re-run), plus four committed real capture
-  fixtures.
-- A combined report exists at
-  `.superpowers/sdd/phase1-privacy-kernel/task-16-17-report.md`.
+The acceptance criterion, from `medarx-product-spec.md` §14, quoted verbatim in
+the plan:
 
-Three caveats a successor must know: the report is **still being edited** (its
-counts changed under me), its **seed-matrix table is an unfilled placeholder**
-at line 343, and it is **not reflected in `progress.md` at all** (see section 2).
+> **Clinician-supplied text becomes a reviewable draft with no pixel
+> interpretation.**
 
-### Task 18 — Beat 1, the approved-path end-to-end demonstration
+Phase 2 includes, and is limited to: an OHIF **extension** (not a fork)
+registering a right-hand copilot panel; Orthanc as the DICOM archive reachable
+over DICOMweb; the **Draft** function end to end against a locally served
+model; and the privacy drawer, made honest against what the contract actually
+returns.
 
-- **Files:** create `backend/tests/test_e2e_approved.py`, `evals/demo_beat1_approved.py`.
-- **Delivers:** a self-contained test that starts the observer, runs the
-  `known_positive` case through `Pipeline.run`, and asserts agreement against
-  the approved hash; plus a runnable script printing the four artefacts — input,
-  transformed payload, model response, independently captured outbound request.
-- **Acceptance criterion (plan):** the test asserts
-  `out["approved_payload_hash"] == result.approved_payload_hash`,
-  `out["request_id"] == result_request_id`, `out["observer_record_count"] == 1`,
-  `out["pcap_hit_count"] >= 1`, `out["agree"] is True`, and
-  `"4452819" not in out["captured_bytes"]`. Run with
-  `cd backend && uv run pytest tests/test_e2e_approved.py -v -m e2e`; expected
-  **PASS, 1 passed**. The plan adds a diagnostic: if `pcap_hit_count` is 0 while
-  the observer recorded a request, the capture is on the wrong interface —
-  re-check the runtime-discovered `br-` id, and **do not add a third container to
-  the bridge**.
-- **Dependencies:** `build_pipeline` (Task 15), `seed_corpus.CASES` (Task 14),
-  the observer (Task 16 — **done**), `start_capture.sh` and `check_agreement`
-  (Task 17 — **done**). Needs the observer reachable at
-  `http://127.0.0.1:8080/v1`. The plan is explicit that these tests must **fail
-  loudly, never skip**, when the observer is unreachable — a skipped egress test
-  is indistinguishable from a passing one.
-- **Note:** the script must not print raw synthetic identifiers to stdout in
-  `--json` mode; print mode may show the full redaction diff, because the data
-  is fabricated — that is exactly the distinction the product spec draws.
+Phase 2 explicitly does **not** include: `Prior Summary` or `Ask` behaviour
+(Phase 5); Draft's automated output validation (Phase 4); cloud inference and
+independent egress capture (Phase 3); `Authorized local` mode (the contract
+documents it as an architectural extension only, `implemented: false`, and no
+request can select it); TCIA or MIMIC-CXR data (Phase 6, and the data policy
+forbids identifiable records anyway); and anything that would put component B,
+the de-identifier, onto the request path — it is off it and stays off it.
 
-### Task 19 — Beat 2, the blocked-path end-to-end demonstration
+### The five workstreams
 
-- **Files:** create `backend/tests/test_e2e_blocked.py`, `evals/demo_beat2_blocked.py`.
-- **Delivers:** a script whose `--json` output carries the 422 block receipt, the
-  audit block event, and the observer/packet counts (**both expected zero**).
-  Plan's words: "This is the load-bearing beat: it proves the boundary refuses,
-  not merely that it logged."
-- **Acceptance criterion (plan):** `out["status"] == "blocked"`,
-  `out["http_status"] == 422`, `out["layer"]` in `{D.1, D.2, D.3, E, F}`,
-  `out["observer_record_count"] == 0`, `out["pcap_hit_count"] == 0`,
-  `out["agree"] is True`,
-  `out["audit_block_event"]["final_disposition"] == "blocked"`, and
-  `"4452819" not in json.dumps(out["audit_block_event"])`. Expected:
-  **PASS, 4 passed**, via `cd backend && uv run pytest tests/test_e2e_blocked.py -v -m e2e`.
-- **Dependencies:** `build_pipeline` (Task 15), the `unresolved` and `all_phi`
-  cases (Task 14), `check_agreement` (Task 17 — **done**), `ModelGateway.send`
-  (Task 11 — **done**).
-- **Note:** the script must exit non-zero if either observer count is non-zero,
-  and say so loudly — "a blocked beat that shows outbound bytes is a failed
-  demo".
+The Phase 1 lesson — `Ruling PROCESS-PHASE-2`, that per-task review was a
+misjudgement — is the reason there are five and not twenty. Each is sized to be
+independently meaningful and reviewable as a whole.
 
-### Task 20 — Compose, the Orthanc image, the preflight, and the README
+**WS1 — Contract and API surface for the viewer.** The minimum contract and API
+change that makes the three-state UI and the privacy drawer truthful, and
+nothing else. Five deliverables: (1) a **preflight / send split** — an
+operation that runs A → C → D → E, stops before F, and returns the
+field-action summary, payload hash, stage list and policy version with a
+`needs_review` disposition, plus a send operation bound to that exact hash,
+using component F's existing `ApprovedSend` rather than inventing a second
+authorisation path; (2) `X-Scope` declared as a header parameter on every
+operation needing it, because a client generated from the current contract
+sends no scope and gets 403 on everything; (3) `stages` (or `layer` + derived
+stages) surfaced on the execution path, **or** the contract documenting
+explicitly that it is not — silence is not acceptable; (4) a documented
+`surface_refused` rendering, so the drawer does not invent one for
+`layer: "J"`; (5) the change stays **additive and closed** as in Phase 1, under
+the standing `Ruling CONTRACT-VOCABULARY-WINS`. It changes what the surface
+*says* and *when a human is asked*, not what the kernel *decides*. It blocks
+WS5 and constrains WS2.
 
-- **Files:** create `infra/compose.yaml`, `infra/orthanc/Dockerfile.orthanc`,
-  `infra/orthanc/orthanc.json`, `infra/verify_env.sh`; modify
-  `backend/README.md`. **The preflight script is the test** — there is no pytest
-  for this task.
-- **Delivers:** a Compose project named `medarx` with `postgres` (on the locally
-  present `postgres:18-alpine` — do not pin 16 or 17, neither is present locally
-  and a pull costs disk), `observer` (from `infra/observers/Dockerfile`, with
-  `MEDARX_AUDIT_KEY` passed through from the host environment), `orthanc` on
-  `profiles: ["orthanc"]` so it never starts in a Phase 1 run, and `capture` on
-  `profiles: ["capture"]`. **No `viewer/` service and no DICOMweb client anywhere
-  in the tree** (I verified the current tree has neither).
-- **Acceptance criterion (plan):** `bash infra/verify_env.sh` passes — `docker
-  version` reachable, the `medarx` network resolvable so a `br-` id can be
-  derived, free disk printed, the remembered `15.3 GiB total / ~4.8 GiB available
-  / zero swap / 12 cores` budget printed against a measured `MemAvailable`, the
-  venv not under `/tmp`, and `docker compose -f infra/compose.yaml config`
-  valid. "Three booleans, all true", a 12-character `br-` id printed.
-  Then `docker compose -f infra/compose.yaml up -d` must start **only**
-  `postgres` and `observer`.
-- **Dependencies:** `infra/observers` and `infra/capture` (Tasks 16–17 — both
-  **done**), the verified Orthanc image recipe. Blocked on nothing outstanding;
-  this task can start immediately.
-- **Three Orthanc facts the plan pins, all worth keeping:** `orthanc/orthanc` is
-  a 404 on Docker Hub (not rate limiting) and `jodogne/orthanc:latest` ships no
-  DICOMweb plugin (`POST /dicom-web/studies` returns 404), so neither may be
-  pinned. The binary is `/usr/sbin/Orthanc`, not `/usr/local/sbin/Orthanc`, and
-  `orthanc-tools` is not a Debian package. In `orthanc.json` the key is
-  `RemoteAccessAllowed`, **not** `AllowRemoteAccess` — the wrong key is silently
-  ignored and presents as a 401, and in 1.10.1 remote access cannot be enabled
-  without authentication.
-- **Note the plan also expects the README to gain the regulatory paragraph
-  verbatim** (Step 7). I verified it is **not currently in the README** — this
-  is part of the outstanding work for this task.
+**WS2 — Design system and the viewer shell.** `viewer/design/tokens.json`
+holding exactly the YAML front-matter of `.docs/medarx-ui-design.md` as
+structured data — the 14 colours, 6 type roles, 3 radii, 5 spacing steps and 4
+component specs, kept as **token references rather than copies**, because that
+front-matter already describes a token graph (its component specs use
+`backgroundColor: "{colors.accent}"`). Plus a ~30-line Bun build emitting
+`tokens.css` and `tokens.ts`. Kept honest by three things, in increasing order
+of how much they hurt when missing: an ESLint `no-restricted-patterns` rule
+banning raw hex, `rgb(`, `hsl(` and bare `px`/`rem` in `viewer/src/**` (the
+only one that runs on every save); a build-time failure on an unresolved token
+reference or an unreferenced token; and a test asserting computed WCAG contrast
+ratios for the text/background pairs the design names, because that is what
+catches a *token change* breaking the design. Then the OHIF extension module
+(`getPanelModule`, consumed through the mode's `layoutTemplate` `rightPanels`),
+the panel shell, and the state chip.
 
-### The final whole-branch review
+**WS3 — Local inference and the Draft function.** Point the gateway at Ollama
+and make `Draft` produce a reviewable draft from clinician-supplied text.
+Verified end to end by the plan: a real `POST` to
+`http://127.0.0.1:11434/v1/chat/completions` with the gateway's own wire shape
+returned a normal OpenAI envelope, so this is a **configuration change only**
+(`MEDARX_GATEWAY_BASE_URL`) plus one `ALLOWED_MODELS` registry entry — and the
+registry is a closed `frozenset` on purpose, so "unknown model" keeps meaning
+"not known yet". Add the name; do not make the registry dynamic. Then the Draft
+system prompt and function allowlist (both built **only** from the approved
+payload), and a measured co-residency profile.
 
-Not a plan task; it is the standing `Ruling PROCESS-PHASE-2` instruction —
-**one review across the whole branch, at the end**, not one per task. Run it
-after 18–20, and treat section 4's named tests as the regression net.
+**WS4 — Orthanc and the DICOMweb data source.** Bring up the shipped
+`infra/orthanc/` image — the plan reads `Dockerfile.orthanc` and expects no
+change to it, and reads `orthanc.json` rather than trusting memory — then make
+the **authentication and CORS decisions the config file explicitly defers to
+Phase 2**, with `Authentication` set **from the environment, not from a tracked
+file**, and CORS decided and verified from a browser at the real dev origin,
+not assumed. Then the OHIF data source and a DICOMweb adapter that pulls
+**only** allowlisted metadata into the copilot's scope. **No pixel data crosses
+into any Medarx path** — that is the no-pixel-interpretation rule at the
+transport level, and it is checkable because the adapter reads `/metadata` and
+never `*/frames` or `*/rendered`. Plus a synthetic study, so the demo uses
+fabricated data only. This is the **first DICOMweb client in the tree**.
 
-### Two known contract exceptions
+**WS5 — Privacy drawer, draft review, and screen verification.** The two
+screens that carry the product's claim, and the evidence that the claim holds
+in a browser: the privacy details drawer rendering exactly what the API returns
+and nothing more — including the **second** audit call the timeline requires
+(`stages` is on the audit readback, not on the execution path, and Medarx
+attesting to itself is what that avoids), the `J` empty-timeline case, the
+prefix-not-results limitation, and `selected_model` legitimately absent on a
+blocked request; the payload preview from WS1's preflight, with field-action
+categories and hashes, masked values, no mapping store and no raw PHI; Draft
+review with source findings beside an editable draft and a restrained text diff
+that is never red/green alone, whose disposition line is `Draft accepted for
+review`, not `Report completed`; both demo beats **in a browser**; and the
+`Independent egress capture` section, which on a local route with no external
+observer **does not render at all**.
 
-The plan's task list names the current contract's exceptions. I verified the
-contract's shape but did **not** independently re-derive both exception names
-from the plan text; treat the following as reported, not re-verified: the
-contract publishes examples that are satisfiable in schema but that no component
-can currently produce in the two cases the plan calls out. Check
-`backend/tests/test_openapi_contract.py` (it contains both a static
-reachability sweep and an executed check) before assuming the list is still
-accurate.
+### Sequencing and review
+
+WS1, WS2, WS3 and WS4 all start immediately and run in parallel — none blocks
+another. The only soft coupling is WS2's state chip, which can be built on two
+states and take the third when WS1 lands. **WS5 starts when all four are
+done**; it is the integration point and the whole-phase review runs across it.
+
+Per-workstream review is earned in exactly two places, under the
+`PROCESS-PHASE-2` exception: **WS1** (it establishes a security boundary — it
+decides what a client can see, when a human's approval is required, and what is
+transmitted) and **WS2** (its tokens and components are consumed by WS5 before
+WS5 can be reviewed end to end; its acceptance gate is the contract between
+tokens and components). **WS3, WS4 and WS5 get one review, together, at the
+end**, with section 4's ten named invariant tests as the regression net.
+
+**The one thing that must not slip:** WS1's preflight/send split is a contract
+decision, and every day WS2's chip is built without it is a day of work that
+will be redone. If it is to be cut, cut it **before** WS2 starts.
+
+### Decisions Phase 2 needs from the owner, not from an agent
+
+These are the plan's open questions. An agent should not silently pick a side.
+
+1. **Does the preflight/send contract change get approved?** If it does not, the
+   plan's stated fallback is that the UI ships **two** states and
+   `.docs/medarx-ui-design.md` is amended to record that the third is deferred
+   with a named owner and a phase. What is *not* acceptable is shipping a third
+   state no API value can produce: a `Needs review` chip the system never
+   evaluated is the exact failure mode this project exists to avoid, in the one
+   place a user will look for it. The `POST .../executions` call is currently
+   atomic — validate, transform, decide, call the provider, respond — so
+   `approved` and `sent` are the same instant and there is no moment at which a
+   human is being asked to review anything.
+2. **The UI design contradicts the contract on the route control, and the
+   contract wins.** `.docs/medarx-ui-design.md` says `Cloud` is "selectable";
+   `contracts/openapi.yaml:238-241` says the policy mode is a **deployment
+   configuration, not a per-request parameter**, and lines 1031-1032 say there
+   is deliberately no `policy_mode` property. Implemented literally,
+   "selectable" makes the UI an unauthenticated policy-mode selector —
+   precisely what the contract exists to prevent. The route control must be
+   **display-only**, reflecting `GET /v1/policy`. This is a security
+   correction, not a wording one.
+3. **The design's v1 screen list includes a Phase 3 deliverable.** It requires
+   demonstrating that an *approved cloud request*'s independently captured
+   bytes agree with the approved payload; the phasing table puts cloud and
+   verifiable egress in **Phase 3**. Either Phase 2 builds a cloud route early
+   (scope creep into a security-sensitive area) or that screen moves. Decide
+   before WS5 starts, not during it.
+4. **Orthanc remote-access authentication.** The shipped `orthanc.json` says so
+   itself: in 1.10.1 remote access cannot be enabled without authentication,
+   and an in-file plain-text user list is "a credential in a tracked file". Set
+   it from the environment. (The three Orthanc traps the plan pins are now
+   recorded in `infra/compose.yaml` and `infra/orthanc/orthanc.json` and do not
+   need repeating here: `orthanc/orthanc` is a 404 on Docker Hub and
+   `jodogne/orthanc:latest` ships no DICOMweb plugin, so neither may be pinned;
+   the binary is `/usr/sbin/Orthanc`; and the config key is
+   `RemoteAccessAllowed`, not `AllowRemoteAccess` — the wrong key is silently
+   ignored and presents as a 401.)
+
+### The other risks the plan raises, restated
+
+- **The browser reaches Ollama and the boundary is gone.** The most severe risk
+  and the least likely to be caught, because no test fails. Ollama is on the
+  same host the viewer is served from. *Visible early:* WS3's first act is to
+  check the listener's bind address and the viewer's dev origin and record both.
+  If Ollama listens on `0.0.0.0`, that is a blocker, not a note.
+- **Disk.** 13 GB free at 95% (section 9). A Bun/OHIF install is the single
+  largest disk item in Phase 2 and **has not been measured**. Measure before
+  `bun install`, not after.
+- **RAM co-residency.** 15 GB total, ~5 GB available, a 2.5 GB resident model
+  (not the ~3.4 GB the phase-1 design guessed — measured at `2497283049` bytes),
+  plus FastAPI, Presidio, spaCy, PostgreSQL, Orthanc, the OHIF dev server and
+  the test suite. WS3's gate is a measured `MemAvailable` during a full
+  end-to-end run, not a design note.
+- **The model cannot see pixels**, and that is mechanical rather than policy:
+  `GET /api/tags` reports `capabilities: ["completion","tools"]` with no
+  `vision`. Worth stating in the About panel.
+- **Cold start mistaken for a hang** (14.6 s cold, ~1.1 s warm, against a 120 s
+  default gateway timeout). The progress state belongs in WS2's shell, built
+  against the real latency.
+
+### Two Phase 1 loose ends carried forward
+
+**The two known contract exceptions. Not verified.** The plan's task list names
+the current contract's exceptions as examples that are satisfiable in schema but
+that no component can currently produce. I did **not** re-derive either
+exception name from the plan text, and the test file the original note pointed
+at — `backend/tests/test_openapi_contract.py` — does hold a static sweep and
+several executed checks, but when I listed its test names on 2026-09-28 I found
+**no test matching that description**. Treat the list as reported, not verified,
+and re-derive it from the plan before quoting it.
+
+**Section 8's deferred items are all still deferred.** They were deliberately
+not fixed by Tasks 18–20 (`task-18-20-report.md` §5, "Known and accepted, cited
+not fixed"), and four of them have no owner. They are Phase 1's, not Phase 2's
+scope, but they are not closed.
+
+**The handoff-drift risk this very edit answers.** The Phase 2 plan's risk 9
+says: *update `HANDOFF.md` as part of the first WS1 commit, and extend the
+ledger, which this document's §8 item 8 records as stopping at Task 12 with no
+owner.* The ledger is now extended (section 2) and this file is now refreshed.
+Risk 9 is closed.
 
 ---
 
@@ -548,39 +733,104 @@ request and agreed with each other about a payload that was not the approved
 one. That is the leak shape, and it is the one that matters.
 
 **How to run them:** `evals/demo_beat1_approved.py --json` and
-`evals/demo_beat2_blocked.py --case {unresolved,all_phi} --json`. **Neither
-script exists yet** — they are Task 18 and Task 19. What exists today is
-`backend/tests/test_egress_e2e.py`, which drives the real composition root
-through both directions in containers and asserts exactly these properties. It is
-the closest thing to a runnable demo that Phase 1 currently has.
+`evals/demo_beat2_blocked.py --case {unresolved,all_phi} --json`. **Both scripts
+now exist** — Tasks 18 and 19 shipped them — and the original "neither script
+exists yet" note is withdrawn. Both drive the **real composition root over the
+real HTTP surface**, with the observer started seconds earlier on a real Docker
+bridge and the second observer a `tcpdump` in the host network namespace; the
+committed fixtures under `backend/tests/fixtures/capture/` are a *recorded* run
+and neither beat touches them. `backend/README.md` §"The two demo beats" has
+the runnable invocations.
+
+**What the beats actually proved when they ran** (from
+`task-18-20-report.md` §2, which I did not re-run — the two beats need Docker,
+a bridge and a capture, and the numbers below are the report's, not a
+measurement I took today):
+- **Beat 1** — `PatientID: 774123` and a header carrying an MRN, accession
+  number, institution name, study date and age in; a payload carrying
+  `[REDACTED:PATIENT_ID]`, the header identifiers dropped, dates shifted to
+  `20251014`, ages banded to `040-049`; the model replied
+  `Findings: 7mm nodule.`; the captured outbound request was byte-identical at
+  both observers; `agree = true`, 57 frames, 1 observer record, 1 captured
+  request hit.
+- **Beat 2** — `ZX-99-ALPHA` was refused with **422 at layer D.2**
+  (`NER_UNRESOLVED`, `LEFTOVER_PATTERN_MATCH`); zero bytes at both observers
+  (0 records, 0 captured bodies, 64 frames, `agree = true`); the receipt is the
+  API's own 422 body, and `GET /v1/audit/records/req-beat2-blocked-0002` returns
+  `final_disposition: blocked` for the same request id. `all_phi` is also
+  blocked.
+
+**The vacuity guard got stronger than this section describes.** Beat 2 sends a
+**control** request first — the beat-1 input, approved, on the same observer,
+bridge and capture — and four independent statements must hold before the
+blocked request's silence counts. The blocking one is `records_complete`: the
+observer's own `/healthz` count against the number of index entries on disk.
+Delete the record and the index line and the two disagree, the guard falls, and
+`test_deleting_the_observers_records_fails_the_vacuity_guard` says so. The
+final review then closed a third silent empty: the silence clause now requires
+the capture to have carried **TCP**, because a frame count alone is satisfied
+by exactly the bridge chatter (ARP, mDNS, SSDP) a sniffer on the wrong
+interface would produce. A capture with no frames, or one holding a single ARP
+frame, is now **reported, not agreed** — see §2 and
+`test_a_capture_with_no_frames_is_reported_so_a_dead_sniffer_is_visible`.
 
 ---
 
 ## 7. The final state expected
 
-Concrete and checkable:
+**This section used to describe the Phase 1 target. Phase 1 reached it.** Every
+bullet below is now a statement about what is true, checked on 2026-09-28
+rather than a thing still to do:
 
-- All 20 tasks implemented, with Tasks 18–20 and the final whole-branch review done.
-- A clean working tree, every change committed as `feat(<scope>): <changes>`.
-  This is the established convention in all 64 commits and should continue.
-- The full suite green across `PYTHONHASHSEED` 0, 1, 5 and 42, run
-  **sequentially** — never concurrently, for the `test_egress_e2e.py` Docker
-  network race documented in section 2, and because of the `.pyc` hazard in
-  section 9. Clear `__pycache__` before each run. Both suites count: backend
-  (845 today) and the separate eval harness (37 today), since `testpaths`
-  excludes `evals/`.
-- `contracts/openapi.yaml` satisfiable: every published example a component can
-  actually produce, with the current contract's two known exceptions named in
-  section 5's task list.
-- Both demo beats runnable end to end, with the blocked path **provably
-  transmitting zero bytes** — measured from outside the Medarx process, not
-  asserted by Medarx's own log.
-- The deferred items in section 8 either closed or still tracked with a named
-  owner. Two of them already have owners recorded in the plan: the Phase 2
+- **All 20 tasks implemented, with Tasks 18–20 and the final whole-branch review
+  done.** ✔ Complete. The review ran across `efe567d..HEAD`; its 1 Critical/High
+  and 1 Medium findings are both fixed and committed.
+- **A clean working tree, every change committed as
+  `feat(<scope>): <changes>`.** ✔ True. `git status --porcelain` is empty. The
+  convention is `feat(<scope>): <changes>` for feature work; the two most recent
+  commits are `chore:` and `docs:`, which is the right subject for what they
+  were.
+- **The full suite green across `PYTHONHASHSEED` 0, 1 and 42, run
+  sequentially.** ✔ `task-18-20-report.md` §4 records **877 tests, 0 failures,
+  0 errors, 0 skipped** at each of seeds 0, 1, 5 and 42, with `__pycache__`
+  cleared before each. I re-ran the suite once on 2026-09-28 and read **877,
+  0, 0, 0** from the JUnit XML myself. The evaluation harness is **37, 0, 0,
+  0**, which I also re-measured today; `testpaths` excludes `evals/`, so it does
+  not appear in the backend number. Keep running seed matrices **sequentially**,
+  for the two reasons in sections 2 and 9.
+- **`contracts/openapi.yaml` satisfiable.** **Not verified.** The two known
+  exceptions are still named only in the plan, and the test the original note
+  pointed at does not contain the check that note described — see section 5.
+- **Both demo beats runnable end to end, with the blocked path provably
+  transmitting zero bytes — measured from outside the Medarx process.** ✔ Both
+  beats shipped and both ran live. See section 6.
+- **The deferred items in section 8 either closed or still tracked with a named
+  owner.** **Partly.** Two still have owners recorded in the plan: the Phase 2
   metadata question (`study_description`, `body_part_examined`,
   `referring_service`) is owned by Saurya Gur with a stated Phase 2 entry
   condition, and the "what does E record when it refuses" question is owned by
-  Saurya Gur.
+  Saurya Gur. The other four remain **unassigned**.
+
+### The target from here is Phase 2
+
+The acceptance criterion, from `medarx-product-spec.md` §14:
+
+> **Clinician-supplied text becomes a reviewable draft with no pixel
+> interpretation.**
+
+Concretely and checkably, at the end of Phase 2: the OHIF extension panel is
+built and the panel contract is enforced; the preflight/send split has landed in
+the contract and the API; `Draft` runs against a local model and preserves
+laterality, units, negation and uncertainty; a browser at the real dev origin
+can read a synthetic study from Orthanc over DICOMweb; the privacy drawer
+renders only what the API returns; the blocked path shows **zero observer
+records and zero packets** in the browser, with the demo script exiting non-zero
+if either is non-zero; and no pixel data has entered any Medarx request.
+
+**Everything else the current target carries forward unchanged:** a clean working
+tree, the seed matrix run sequentially, the contract-vocabulary-wins ruling,
+and section 4's ten invariants as the regression net for the whole-phase
+review. Full workstream detail is in section 5 and in `.docs/phase2-plan.md`.
 
 ---
 
@@ -588,6 +838,13 @@ Concrete and checkable:
 
 Each of these was decided deliberately, not overlooked. All are recorded with
 reasoning in `progress.md` or the per-task reports.
+
+**Re-verified 2026-09-28: this section is still accurate, and none of these was
+closed by Tasks 18–20.** `task-18-20-report.md` §5 lists them as "Known and
+accepted, cited not fixed" and says so by instruction. I re-checked the named
+test for every item that has one — items 1, 2, 3 and 4 — and each is still
+present under the name given here. **No item has changed.** Only the two line
+references below moved, and both are noted in place.
 
 **1. `PATIENT_ID` is unreachable on the spelling a report actually uses.**
 Anchor-label stripping blanks labels to equal-length spaces *before* analysis,
@@ -659,12 +916,16 @@ rows**, a correction the Task 15 review made to its own first round:
 
 **5. The mapping store creates its tables and never migrates them.**
 `MappingStore.__init__` calls `METADATA.create_all(engine)`; the docstring at
-`mapping_store.py:129` says so and calls it "a convenience for a single process,
-not a schema migration". `medarx.audit.schema_init` says the same of itself
+`mapping_store.py:134` (line 129 when this was written) says so and calls it
+"a convenience for a single process, not a schema migration".
+`medarx.audit.schema_init` says the same of itself
 ("Idempotent; not a migration"). `create_all` check-then-create is a TOCTOU race
 on multi-worker startup — already mitigated by tolerating a concurrent creator.
-*Owner:* the plan assigns the DDL ownership to the infrastructure task (Task 20):
-compose must own that DDL in one step started before the app.
+*Owner:* the plan assigned the DDL ownership to the infrastructure task, and
+Task 20 has now run — but the item is **not closed**. `infra/compose.yaml` says
+so in its own comments rather than implying otherwise: `MappingStore` and
+`schema_init` each still call `create_all`, and nothing migrates. *Owner:*
+still unassigned.
 
 **6. An audit readback returns every record to any caller presenting any scope,
 because the storage policy forbids the field that would filter it.**
@@ -684,35 +945,50 @@ Asserted by a test rather than left implied, and **external time-stamping is
 Phase 6**.
 *Owner:* Phase 6.
 
-**8. The ledger does not cover Tasks 13–17** (section 2). The commits, reports
-and tests exist; the chronological record does not. *Owner:* whoever picks up
-Task 18 should extend `progress.md` before it stops being useful.
+**8. The ledger did not cover Tasks 13–17** (section 2). **CLOSED 2026-09-28.**
+The commits, reports and tests existed all along; the chronological record did
+not. It now does: `Ruling LEDGER-APPEND` backfilled all five entries from `git
+log`, taking SHAs from the log rather than from recollection and treating the
+per-task reports as claims to re-verify. `progress.md` is 250 lines and
+`grep -c '^Task 1[3-7]:'` returns 5. *Owner:* discharged. The residual gap is
+that `.superpowers/sdd/` is still gitignored, so none of it is in git.
 
 ---
 
 ## 9. Environment
 
-All of the following was measured on this host today.
+All of the following was measured on this host. Re-measured 2026-09-28; figures
+that moved are given as **was → now**.
 
 - **Python 3.13.5**, **uv 0.11.17**, **Node v26.2.0**, **Docker 29.8.1** with
-  **Compose v5.5.1**.
+  **Compose v5.5.1**, **Bun 1.4.0**, **12 cores**. All unchanged. (Bun is new
+  to this list and matters: Phase 2's design-token build step needs it, and the
+  repo has no JS toolchain at all — `find . -name package.json` returns nothing.)
 - **There is no `pip` on PATH** — `command -v pip` and `command -v pip3` both
   return nothing. This is why `bootstrap_ner_model.sh` deliberately does not use
   `python -m spacy download`: spaCy shells out to `pip`, and the `uv` shim
   intercepts it with "No virtual environment found". The script downloads the
   wheel and installs it with `uv pip install`.
 - **No GPU** — no `nvidia-smi` on PATH.
-- **RAM: 15 GiB total, ~3.1 GiB available at measurement time** (12 GiB used,
-  5.1 GiB in buff/cache). The plan's remembered budget was "15.3 GiB total /
-  ~4.8 GiB available / zero swap / 12 cores".
-- **Disk: 3.9 GiB free on `/` (218G total, 203G used) — the filesystem is 99%
-  full.** This is materially tighter than the ~7 GiB the project has been
-  planning against, and it is the reason the plan forbids pulling `postgres:16`
-  or `:17` and pins `postgres:18-alpine` instead. Docker's own accounting:
-  24 images totalling 10.81 GB, **10.02 GB reclaimable (92%)**, plus 487 MB of
-  build cache (175 MB reclaimable). **Reclaiming Docker space is probably the
-  first thing to do before Task 20**, which needs to build images and start a
-  database.
+- **RAM: 15 GiB total, ~4.3 GiB available at measurement time** (11 GiB used,
+  6.0 GiB in buff/cache, 782 MiB free) — **was ~3.1 GiB available**. The
+  plan's remembered budget is "15.3 GiB total / ~4.8 GiB available / zero swap
+  / 12 cores". Availability moves with what is running, so treat it as a range;
+  what matters for Phase 2 is that a 2.5 GB resident model plus Orthanc, the
+  OHIF dev server and the test suite is tight, not that the number is exact.
+- **Disk: 13 GB available on `/` (218G total, 194G used) — the filesystem is
+  95% full. This is a large improvement: it was 3.9 GiB free at 99% full.**
+  `docker image prune -a -f` during Task 20 reclaimed **10.01 GB**. Docker's
+  accounting is now much healthier: 11 images totalling 1.236 GB with **438.3 MB
+  reclaimable (35%)**, 16 local volumes (120.3 MB reclaimable), 487.4 MB of
+  build cache with **201.8 MB reclaimable**. The reason Phase 1 pinned
+  `postgres:18-alpine` and forbade pulling `:16`/`:17` still holds — a pull
+  costs disk — but "reclaim Docker space first" is no longer the urgent
+  pre-Task-20 action this section used to call for. The prune did remove
+  `medarx-observer:latest`, `debian:bookworm-slim` and `postgres:18-alpine`,
+  which were re-pulled afterwards; **build cache was left alone deliberately**,
+  because rebuilding the observer image needs `python:3.13-slim-bookworm` and a
+  network pull on a tight disk is where confusing failures come from.
 - **`uv sync` prunes the manually-installed `en_core_web_sm` model**, which is
   not a declared dependency (only `presidio-analyzer`, `presidio-anonymizer`
   and `spacy==3.8.16` are). After **any** `uv sync`, immediately run
@@ -750,10 +1026,17 @@ All of the following was measured on this host today.
   received by filter, 44 packets captured` — tcpdump *lost* the very request the
   check was about, so `stop` now also exits non-zero when packets were dropped.
 - **Process restarts have interrupted work five times.** Commit early; make each
-  commit a clean stopping point. Every one of the 64 commits is a single logical
-  change with a `feat(<scope>)` subject, which is what makes that possible.
+  commit a clean stopping point. All **72** commits are a single logical change
+  each; **67** carry a `feat(<scope>)` subject, three `docs(...)`/`docs:` and
+  one `chore:`. The convention holds.
 - **The venv must not live under `/tmp`** — `/tmp` is a tmpfs, so a venv there
   consumes RAM rather than disk. It belongs at `backend/.venv`.
+- **`bash infra/verify_env.sh` is the preflight** (Task 20). It checks `docker
+  version` is reachable, the `medarx` network resolves so a `br-` id can be
+  derived, prints free disk, prints the remembered budget against a measured
+  `MemAvailable`, checks the venv is not under `/tmp`, and validates
+  `docker compose -f infra/compose.yaml config`. It is a script, not a pytest —
+  **there is no test for it**, so it must be run by hand.
 - **Only `config.py` may read the environment** in the kernel. The observer
   process is the deliberate exception and says why in its own docstring: it is
   not a `medarx` module and is not in the import graph of anything that sends
@@ -770,44 +1053,66 @@ All of the following was measured on this host today.
   *contract-vocabulary-wins*: where the contract and the implementation disagree
   about the same field, the contract is right and the code is wrong. The
   regulatory paragraph is in `info/description`.
-- **`backend/README.md`** — the only tracked document (804 lines). Setup and the
-  two-step sync, then per-component sections for B, C, E, F, G, H, I, J. The
-  Component I section is the best plain-language account of the two observers.
-  Note it is **missing** the sections for A and D, and the regulatory paragraph.
+- **`backend/README.md`** — a tracked document (**1072 lines**, was 804).
+  Setup and the two-step sync, then per-component sections for B, C, E, F, G,
+  H, I, J, then "Phase 1 — running it" and "Known and accepted limitations".
+  The Component I section is the best plain-language account of the two
+  observers, and it was corrected in `eb4070c`. Note it is still **missing** the
+  sections for A and D. The regulatory paragraph is now **in** it, under
+  "What this software is, and is not".
 - **`.docs/medarx-phase1-design.md`** — the approved design. **§3** is the
   component decomposition (A–J with responsibilities and what each
   communicates with); **§6 is the enforcement table** — seven rows, one per
   layer, transcribed rule-for-rule into `policy/decision_table.py`; §7 is the
   threat model; §9 holds the questions deferred to later phases.
-- **`.docs/medarx-phase1-plan.md`** — the 20-task plan. 152 KB. Every task has
-  files, interfaces, numbered steps with the literal test code, the exact run
-  command, and the expected pass/failure. §9 holds the open questions with named
-  owners and Phase 2 entry conditions. This is the specification for the
-  remaining work; quote it rather than paraphrasing it.
+- **`.docs/medarx-phase1-plan.md`** — the 20-task plan. 152 KB; all 20 task
+  headings verified present. Every task has files, interfaces, numbered steps
+  with the literal test code, the exact run command, and the expected
+  pass/failure. §9 holds the open questions with named owners and Phase 2 entry
+  conditions. **This is now the specification for work that is done, not for
+  remaining work** — quote it for history, not for instructions.
 - **`.docs/medarx-product-spec.md`** — the product spec. Source of the field
   storage policy, the contract's function vocabulary, and the relative-interval
   allowance.
 - **`.docs/medarx-ui-design.md`** — the Phase 2 viewer design. **Out of scope for
   Phase 1.**
+- **`.docs/phase2-plan.md`** — **the Phase 2 plan, and the thing to read before
+  planning anything next.** 47 KB, written 2026-09-28, untracked. §0 records the
+  corrections its author found in this handoff (it is where the "HANDOFF.md is
+  stale" finding was first written down); then Scope, five Answers, the five
+  workstreams, Sequencing, and ten Risks ordered by expected damage. Section 5
+  above summarises it; **read the plan itself for the detail** — in particular
+  Answer 2 (the preflight/send contract decision) and Answer 5 (what the
+  frontend must never do).
 - **`.superpowers/sdd/phase1-privacy-kernel/progress.md`** — a chronological
   ledger of every task, fix round and ruling, including several that correct
-  earlier decisions. **139 lines, current through Task 12 only; nothing for
-  Tasks 13–17.** Read the `Ruling *` lines especially — they record the reasoning
-  that the code alone will not tell you.
+  earlier decisions. **250 lines (was 139), now current through Task 20 and the
+  final review** — `Ruling LEDGER-APPEND` backfilled Tasks 13–17. Read the
+  `Ruling *` lines especially — they record the reasoning that the code alone
+  will not tell you.
 - **`.superpowers/sdd/phase1-privacy-kernel/task-N-report.md`** — per-task
   implementation reports, including claims later corrected. Reports exist for
-  Tasks 1, 2, 10, 11, 12, 13, 14, 15 and a combined 16–17 (briefs exist for
-  1–20). **Some earlier sections in those reports were left standing when they
-  should have been corrected**; the ledger records the corrections where it has
-  them, and where it does not, the report is wrong. Specific known cases: the
+  Tasks 1, 2, 10, 11, 12, 13, 14, 15, a combined 16–17, and a combined **18–20**
+  (briefs exist for 1–20). **Some earlier sections in those reports were left
+  standing when they should have been corrected**; the ledger records the
+  corrections where it has them, and where it does not, the report is wrong.
+  Specific known cases: the
   Task 15 report's first round said "two unreachable rows" when the honest
   framing is three conditions across two rows (§8 item 4); the Task 9 report
   quoted 7/28 where the measurement is 5/28; and an earlier Task 10 claim that
   a specific policy reason "reaches the audit log" is false — `run_redaction`
   takes `Decision.wire_code` and drops the decision, so a receipt for an unknown
   policy version and one for an unimplemented mode are byte-identical.
-  `task-16-17-report.md` is **in flight** and its seed matrix is an unfilled
-  placeholder. Treat every report as a claim to be re-verified against the code,
-  not as a source of truth.
+  `task-16-17-report.md` still carries an **unfilled `<!-- SEED_MATRIX -->`
+  placeholder** at line 343 (re-confirmed 2026-09-28), so its numbers are not
+  usable. Treat every report as a claim to be re-verified against the code, not
+  as a source of truth — the ledger and `task-18-20-report.md` supersede the
+  earlier ones.
 - **`.superpowers/sdd/` is gitignored.** None of the above is in git; if it
   matters, it needs to be copied somewhere that is not.
+
+---
+
+*Refreshed 2026-09-28 against `master` at `433cf6a`. Originally written
+2026-09-28 against `phase1-privacy-kernel` at `47544a2`. Nothing in this file is
+a substitute for running the command it describes.*
