@@ -8,15 +8,15 @@
  * cannot pass by accident, because no OHIF file is tracked in this repository
  * at all.
  *
- * `getPanelModule` takes the three manager arguments OHIF passes every panel
- * module. This panel needs none of them: it renders state it is given and owns
- * no data fetching, because the boundary says the panel never computes
- * redaction, pseudonymisation, a date shift or a policy decision, and the
- * wire-up to the API belongs to the workstream that reads it.
+ * The extension has no manager dependency. DraftReview reads only the
+ * same-origin /v1 API and sends clinician-supplied report_text only after an
+ * explicit preflight action; it performs no local redaction or policy work.
  */
+import { useEffect, useState } from 'react';
 import type { Panel } from './ohif/types';
 import { MedarxPanel } from './panels/MedarxPanel';
 import type { MedarxPanelProps } from './panels/MedarxPanel';
+import { DraftReview } from './panels/DraftReview';
 import { panelStore } from './state/panelStore';
 import type { RequestState, RouteState } from './state/panelState';
 
@@ -42,6 +42,29 @@ type ManagerBag = {
 export const UNREAD_ROUTE: RouteState = { kind: 'unknown' };
 export const NO_REQUEST: RequestState = { kind: 'idle' };
 
+function DraftPanel(props: Partial<MedarxPanelProps>) {
+  const [requestState, setRequestState] = useState(props.requestState ?? NO_REQUEST);
+  useEffect(() => {
+    setRequestState(props.requestState ?? NO_REQUEST);
+  }, [props.requestState]);
+
+  return (
+    <MedarxPanel
+      {...props}
+      studyLabel={props.studyLabel ?? 'No study association'}
+      route={props.route ?? UNREAD_ROUTE}
+      requestState={requestState}
+    >
+      <DraftReview
+        studyContext={props.studyContext}
+        scope={props.scope}
+        apiBase={props.apiBase}
+        onRequestState={setRequestState}
+      />
+    </MedarxPanel>
+  );
+}
+
 export function getPanelModule(_managers: ManagerBag = {}): Panel[] {
   return [
     {
@@ -49,14 +72,7 @@ export function getPanelModule(_managers: ManagerBag = {}): Panel[] {
       iconName: 'chat',
       iconLabel: 'Medarx',
       label: 'Medarx',
-      component: (props: Partial<MedarxPanelProps>) => (
-        <MedarxPanel
-          {...props}
-          studyLabel={props.studyLabel ?? 'No study association'}
-          route={props.route ?? UNREAD_ROUTE}
-          requestState={props.requestState ?? NO_REQUEST}
-        />
-      ),
+      component: DraftPanel,
     },
   ];
 }
@@ -85,3 +101,29 @@ export function getCommands(): { definitions: Record<string, CommandHandler> } {
     },
   };
 }
+
+/**
+ * The default export is what the host actually consumes.
+ *
+ * OHIF's plugin loader (`platform/app/src/pluginImports.js`, generated from
+ * `pluginConfig.json` at build time) does `imported.default` and nothing else,
+ * so an extension module that only has named exports registers as `undefined`
+ * and every panel reference to it fails with "is not a valid entry for an
+ * extension module". `id` is the other half: `ExtensionManager` builds panel
+ * ids as `${id}.panelModule.${name}`, so this value and the mode's
+ * `rightPanels` entry are one string that has to agree.
+ *
+ * `MEDARX_EXTENSION_NAME` ('medarx') is what the mode config writes into that
+ * id, and `panelId()` in `src/ohif/types.ts` builds it. They are checked
+ * against each other rather than kept honest by hand — see
+ * `viewer/ohif/verify_mount.mjs`.
+ */
+export const MEDARX_EXTENSION_ID = `@ohif/extension-${MEDARX_EXTENSION_NAME}`;
+
+const medarxExtension = {
+  id: MEDARX_EXTENSION_ID,
+  getPanelModule,
+  getCommands,
+};
+
+export default medarxExtension;

@@ -40,7 +40,8 @@ export function ViewerHarness({ children }: { children: ReactNode }) {
   return (
     <div style={ROOT}>
       <StudyHeader />
-      <div style={BODY}>
+      <main style={BODY}>
+        <h1 className="medarx-sr-only">Medarx viewer harness</h1>
         <div
           ref={viewport}
           tabIndex={0}
@@ -72,7 +73,7 @@ export function ViewerHarness({ children }: { children: ReactNode }) {
           </div>
         </div>
         {children}
-      </div>
+      </main>
     </div>
   );
 }

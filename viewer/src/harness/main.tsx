@@ -15,6 +15,7 @@ import '../../design/tokens.css';
 import { Button, Divider } from '../design/primitives';
 import { color, space, typeStyles } from '../design/tokens';
 import { MedarxPanel } from '../panels/MedarxPanel';
+import { DraftReview } from '../panels/DraftReview';
 import { routeFromPolicy, stateFromResponse } from '../state/panelState';
 import { ViewerHarness } from './ViewerHarness';
 
@@ -60,17 +61,6 @@ const FIXTURES: { label: string; body: unknown }[] = [
   { label: 'Unrecognised', body: { status: 'queued', request_id: 'req-0005-e' } },
 ];
 
-const ROUTES: { label: string; body: unknown }[] = [
-  { label: 'Route not read', body: undefined },
-  {
-    label: 'strict_local',
-    body: { policy_mode: 'strict_local', policy_version: 'v1.2', implemented_modes: ['strict_local'], fail_closed: true },
-  },
-  {
-    label: 'cloud',
-    body: { policy_mode: 'cloud', policy_version: 'v1.2', implemented_modes: ['cloud', 'strict_local'], fail_closed: true },
-  },
-];
 
 function Picker({ title, items, selected, onSelect }: {
   title: string;
@@ -94,14 +84,18 @@ function Picker({ title, items, selected, onSelect }: {
 
 function Harness() {
   const [fixture, setFixture] = useState(0);
-  const [routeIndex, setRouteIndex] = useState(1);
 
+  const [requestState, setRequestState] = useState(() => stateFromResponse(FIXTURES[0]?.body));
+  const selectFixture = (index: number) => {
+    setFixture(index);
+    setRequestState(stateFromResponse(FIXTURES[index]?.body));
+  };
   return (
     <ViewerHarness>
       <MedarxPanel
         studyLabel="Study (harness stand-in)"
-        route={routeFromPolicy(ROUTES[routeIndex]?.body)}
-        requestState={stateFromResponse(FIXTURES[fixture]?.body)}
+        route={routeFromPolicy(undefined)}
+        requestState={requestState}
       >
         <p style={{ ...typeStyles.report, color: color.muted, margin: 0 }}>
           Draft is the only function in this version. The pickers below are harness furniture, not
@@ -109,8 +103,8 @@ function Harness() {
           seen without a server.
         </p>
         <Divider />
-        <Picker title="Response fixture" items={FIXTURES} selected={fixture} onSelect={setFixture} />
-        <Picker title="Policy configuration" items={ROUTES} selected={routeIndex} onSelect={setRouteIndex} />
+        <Picker title="Response fixture" items={FIXTURES} selected={fixture} onSelect={selectFixture} />
+        <DraftReview studyContext={{ study_reference: 'STUDY-SYN-000041' }} scope="scope:study:STUDY-SYN-000041,scope:function:Draft" onRequestState={setRequestState} />
       </MedarxPanel>
     </ViewerHarness>
   );

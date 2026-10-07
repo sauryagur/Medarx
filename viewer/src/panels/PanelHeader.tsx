@@ -32,6 +32,7 @@ export const ROUTE_NOTE_ID = 'medarx-route-note';
 export const PRIVACY_DRAWER_ID = 'medarx-privacy-details';
 
 function RouteBlock({ route }: { route: RouteState }) {
+  if (route.kind === 'unknown') return null;
   return (
     <div style={{ minWidth: 0 }}>
       <div
@@ -99,7 +100,7 @@ export function PanelHeader({
         <StateChip state={requestState} />
       </div>
 
-      <div style={{ ...typeStyles.metadata, color: color.subtle }}>{studyLabel}</div>
+      <div style={{ ...typeStyles.metadata, color: color.muted }}>{studyLabel}</div>
 
       <RouteBlock route={route} />
 

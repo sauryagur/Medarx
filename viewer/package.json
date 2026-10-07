@@ -4,15 +4,16 @@
   "private": true,
   "type": "module",
   "description": "Medarx OHIF extension panel: design tokens, the panel shell and the privacy-details container.",
+  "main": "src/extension.tsx",
   "scripts": {
     "tokens": "bun run design/build.ts",
     "check:generated": "git diff --exit-code -- design/tokens.css design/tokens.ts",
     "lint": "eslint .",
-    "test": "bun test design",
+    "test": "bun test design src/api",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tools.json --noEmit",
     "dev": "vite",
     "build": "bun run tokens && tsc -p tsconfig.json --noEmit && vite build",
-    "verify": "bun run tokens && bun run lint && bun test design && bun run typecheck && bun run check:generated"
+    "verify": "bun run tokens && bun run lint && bun test design src/api && bun run typecheck && bun run check:generated"
   },
   "dependencies": {
     "react": "19.3.0",

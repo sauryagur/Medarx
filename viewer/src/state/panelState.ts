@@ -124,7 +124,11 @@ export function stateFromResponse(body: unknown): RequestState {
         requestId,
         policyVersion,
         layer: typeof b.layer === 'string' && b.layer in LAYER_STAGE ? (b.layer as Layer) : 'J',
-        code: typeof b.code === 'string' ? b.code : 'unspecified block code',
+        code: typeof b.code === 'string'
+          ? b.code
+          : Array.isArray(b.action_codes) && b.action_codes.every((code) => typeof code === 'string')
+            ? b.action_codes.join(', ')
+            : 'unspecified block code',
         stages,
       };
     default:

@@ -142,6 +142,7 @@ function tabStyle(selected: boolean, enabled: boolean): CSSProperties {
     border: `${hairline} solid ${selected ? color.accent : color.border}`,
     borderRadius: radius.sm,
     background: selected ? color.raised : 'transparent',
+    color: color.foreground,
     minHeight: primaryButton.minHeight,
     cursor: enabled ? 'pointer' : 'not-allowed',
     // The selection is carried by the border and by `aria-selected`, not by

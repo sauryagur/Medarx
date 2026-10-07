@@ -26,6 +26,7 @@ import { AVAILABLE } from './FunctionSwitch';
 import type { FunctionName } from './FunctionSwitch';
 import { PanelHeader } from './PanelHeader';
 import { PrivacyDrawer } from './PrivacyDrawer';
+import type { DraftReviewProps } from './DraftReview';
 import { color, hairline, shell, space, typeStyles } from '../design/tokens';
 import { announcementFor } from '../state/panelState';
 import type { RequestState, RouteState } from '../state/panelState';
@@ -40,6 +41,11 @@ export type MedarxPanelProps = {
   route: RouteState;
   requestState: RequestState;
   children?: ReactNode;
+  /** Synthetic study-scoped authorization supplied by the host; never inferred from DICOM. */
+  studyContext?: DraftReviewProps['studyContext'];
+  scope?: string;
+  /** Same-origin API prefix; defaults to /v1. */
+  apiBase?: string;
 };
 
 function LiveRegion({ region, message }: { region: RefObject<HTMLDivElement | null>; message: string }) {
