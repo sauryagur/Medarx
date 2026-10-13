@@ -154,6 +154,48 @@ Section 8 item 10: a real model records nothing, so component I's two-observer
 rule has one outsider and one piece of Medarx attesting to itself, and
 `check_agreement` says so rather than passing.
 
+### The Phase 2 cross-workstream review
+
+Per the Phase 2 plan (`WS3, WS4 and WS5 get one review, together, at the
+end`), the final cross-workstream review ran on 2026-10-13 over
+`fd5b6ea..bbd017f` and the in-force reports. Full text:
+`.superpowers/sdd/phase1-privacy-kernel/phase2-review.md` (that directory is
+gitignored; the verdicts that matter are summarized here).
+
+- **WS3 (local inference): PROVEN.** The real-model run (`MEDARX_LOCAL_MODEL_E2E=1`)
+  passed 17/17 against `gur-prime-2`, the three send guards held, the payload
+  the model received was byte-identical to the approved payload, cold 31.7 s /
+  warm 2.6 s through the full pipeline (well inside the 120 s budget), and no
+  provider branch entered the kernel.
+- **WS4 (Orthanc + the real OHIF mount): PARTIAL.** The archive, the forwarder
+  and the mount recipe are measured and held. Two gaps: the DICOMweb adapter
+  artifact set the plan named (`backend/src/medarx/dicomweb/`,
+  `viewer/src/datasources/`, `backend/tests/test_dicomweb_adapter.py`) does not
+  exist — the architecture routes DICOMweb through OHIF only, which supersedes
+  the plan's adapter but leaves the plan-listed tests unbuilt; and the two
+  mounted-mode screenshots (`.docs/evidence/ohif-real-mount.png`,
+  `ohif-panel.png`) do not record the Medarx panel rendering legibly — the
+  first carries a rspack duplicate-`index.html` dev overlay, the second is a
+  black capture.
+- **WS5 (Draft UI): PARTIAL.** The component code, the `/v1` client, the
+  drawer's J-layer / prefix-not-results / absent-model cases, the disposition
+  copy and the absent-by-default `Independent egress capture` section each
+  pass against the plan when read directly, and the blocked LOCAL beat is
+  proven at the transport layer. The mounted-mode screen walk was never
+  completed (same evidence gap as WS4), the plan's keyboard pass is
+  structurally satisfied (`aria-disabled` tab retention, no focus traps) but
+  has no recorded observation, and **reduced motion has no evidence at all** —
+  no `prefers-reduced-motion` handling exists anywhere in `viewer/src`.
+
+**The review's worst remaining gap, in one line:** no browser-visible evidence
+exists that the DraftReview panel renders inside the real mounted OHIF mode —
+the design's `Blocked (local) request` and `OHIF viewer + panel` rows were
+walked only through the standalone harness, never through the mounted adapter.
+
+**Section 8 disposition:** no Phase 2 item closed by this review; items 9-12
+were re-verified as accurate, and items 1-7 remain open with their named
+owners.
+
 ### What changed since this document was written
 
 Eight commits landed after the `47544a2` this document recorded. Six of them
