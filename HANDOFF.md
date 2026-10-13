@@ -168,29 +168,36 @@ gitignored; the verdicts that matter are summarized here).
   warm 2.6 s through the full pipeline (well inside the 120 s budget), and no
   provider branch entered the kernel.
 - **WS4 (Orthanc + the real OHIF mount): PARTIAL.** The archive, the forwarder
-  and the mount recipe are measured and held. Two gaps: the DICOMweb adapter
-  artifact set the plan named (`backend/src/medarx/dicomweb/`,
+  and the mount recipe are measured and held. One plan artifact set remains
+  unbuilt: the DICOMweb adapter the plan listed (`backend/src/medarx/dicomweb/`,
   `viewer/src/datasources/`, `backend/tests/test_dicomweb_adapter.py`) does not
   exist — the architecture routes DICOMweb through OHIF only, which supersedes
-  the plan's adapter but leaves the plan-listed tests unbuilt; and the two
-  mounted-mode screenshots (`.docs/evidence/ohif-real-mount.png`,
-  `ohif-panel.png`) do not record the Medarx panel rendering legibly — the
-  first carries a rspack duplicate-`index.html` dev overlay, the second is a
-  black capture.
-- **WS5 (Draft UI): PARTIAL.** The component code, the `/v1` client, the
-  drawer's J-layer / prefix-not-results / absent-model cases, the disposition
-  copy and the absent-by-default `Independent egress capture` section each
-  pass against the plan when read directly, and the blocked LOCAL beat is
-  proven at the transport layer. The mounted-mode screen walk was never
-  completed (same evidence gap as WS4), the plan's keyboard pass is
-  structurally satisfied (`aria-disabled` tab retention, no focus traps) but
-  has no recorded observation, and **reduced motion has no evidence at all** —
-  no `prefers-reduced-motion` handling exists anywhere in `viewer/src`.
+  the plan's adapter but leaves the listed tests unbuilt. The review's
+  first-pass finding that the two mounted-mode screenshots recorded no legible
+  panel content was **superseded by the recapture**: the artifacts on disk now
+  show the real OHIF with the synthetic CT rendered, no dev overlay, and the
+  Medarx copilot panel open (header, chip "No request yet", "Privacy details",
+  tabs Draft/Prior Summary/Ask with Draft `aria-selected` and the other two
+  `aria-disabled`; `tab.errors()` empty). Capture-context caveat: the
+  "Deployment-fixed route" row reads "Deployment policy could not be read"
+  because the backend was not running at capture — fail-closed copy printing
+  correctly, not a mount defect.
+- **WS5 (Draft UI): PROVEN, with the recaptured mounted-mode evidence.** The
+  mounted panel render (above), the harness-side flow, the drawer cases
+  (J-layer, prefix-not-results, absent-model), the disposition copy, the
+  restrained diff and the absent-by-default `Independent egress capture`
+  section each pass against the plan. Two criteria remain open: the keyboard
+  pass is structurally satisfied (`aria-disabled` tab retention, no focus
+  traps) but has no recorded observation, and **reduced motion has no evidence
+  at all** — no `prefers-reduced-motion` handling exists anywhere in
+  `viewer/src`. The blocked-request browser beat still has no packet capture —
+  the browser-initiated blocked route is proven transport-side only.
 
-**The review's worst remaining gap, in one line:** no browser-visible evidence
-exists that the DraftReview panel renders inside the real mounted OHIF mode —
-the design's `Blocked (local) request` and `OHIF viewer + panel` rows were
-walked only through the standalone harness, never through the mounted adapter.
+**The review's worst remaining gap, in one line:** the blocked local request's
+browser-side beat has never been packet-captured — the panel's blocked state is
+verified in the harness and the zero-byte transport guarantee at the API layer,
+but no capture has walked a blocked request from the browser's own fetch
+through the wire in the real mounted mode.
 
 **Section 8 disposition:** no Phase 2 item closed by this review; items 9-12
 were re-verified as accurate, and items 1-7 remain open with their named
