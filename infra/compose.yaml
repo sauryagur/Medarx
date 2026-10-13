@@ -105,12 +105,58 @@ services:
   orthanc:
     profiles: ["orthanc"]
     build:
+      # **`dockerfile:` is load-bearing and was missing.** The build context is
+      # `orthanc/`, whose Dockerfile is named `Dockerfile.orthanc`; without
+      # this key Compose looks for `orthanc/Dockerfile`, does not find it, and
+      # fails with `failed to read dockerfile: open Dockerfile: no such file or
+      # directory`. The service was behind a profile and had never been
+      # started, so nothing had ever exercised this. Measured 2026-09-28.
+      dockerfile: Dockerfile.orthanc
       context: ./orthanc
+    environment:
+      # The loopback forwarder's listener port inside the container. **Set it
+      # to the empty string to run without the forwarder**, which is how the
+      # absence of the forwarder is demonstrated rather than asserted: the
+      # published port then lands on Orthanc's own listener, Orthanc sees a
+      # remote request, and answers `401`.
+      #
+      # **`${VAR-default}`, not `${VAR:-default}`.** With the colon an *empty*
+      # variable is replaced by the default exactly as an unset one is, so
+      # `MEDARX_DICOMWEB_FORWARD_PORT= docker compose up` would silently keep
+      # the forwarder and the demonstration would show a working archive.
+      # Measured: that is what happened the first time this was run.
+      #
+      # This is never `RemoteAccessAllowed: true`. See
+      # `orthanc/Dockerfile.orthanc`: in 1.10.1 that turns on HTTP
+      # authentication, and the credential then has to live in a tracked file
+      # or in the image.
+      MEDARX_DICOMWEB_FORWARD_PORT: "${MEDARX_DICOMWEB_FORWARD_PORT-8043}"
     volumes:
       - ./orthanc/orthanc.json:/etc/orthanc/orthanc.json:ro
       - medarx-orthanc-data:/var/lib/orthanc/db
     ports:
-      - "127.0.0.1:8042:8042"
+      # **`127.0.0.1:8042:8043`, not `127.0.0.1:8042:8042`.** The host port is
+      # the one the OHIF data source is configured with; the container port is
+      # the forwarder, which connects to Orthanc on the container's own
+      # loopback.
+      #
+      # **Running without the forwarder takes two variables, not one**, and
+      # that is a limitation of Compose rather than a choice: `${VAR-8043}`
+      # with an *empty* value is a valid container port for the environment
+      # block and a parse error (`no port specified: 127.0.0.1:8042:<empty>`)
+      # for the ports block. So:
+      #
+      #     MEDARX_DICOMWEB_FORWARD_PORT= MEDARX_ORTHANC_CONTAINER_PORT=8042 \
+      #       docker compose -f infra/compose.yaml --profile orthanc up -d
+      #
+      # drops the forwarder *and* puts the published port on Orthanc's own
+      # listener, which answers 401. A toggle that only silenced one half
+      # would demonstrate nothing.
+      #
+      # The DICOM port is deliberately not published: nothing in Medarx speaks
+      # DICOM, only DICOMweb, and publishing an inbound DICOM listener is a
+      # decision this workstream has no reason to make.
+      - "127.0.0.1:8042:${MEDARX_ORTHANC_CONTAINER_PORT-8043}"
 
   # The second observer, as a service rather than as the host script that
   # normally starts it.

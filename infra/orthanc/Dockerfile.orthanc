@@ -22,13 +22,47 @@
 # anywhere in the tree. It is versioned now so that Phase 2 wires up a
 # configuration that has been read rather than one assembled from memory.
 
+#
+# ## Why there is a forwarder, and why it is not `RemoteAccessAllowed: true`
+#
+# Phase 2 has to reach this archive from a browser, and the browser is on the
+# host, so every request arrives at a container interface and Orthanc sees it
+# as **remote**. With `RemoteAccessAllowed: false` it answers every one of
+# them `401`, which is correct behaviour and useless to us. The two ways out
+# are both bad, and the second is bad in a way that is easy to miss.
+#
+# 1. `RemoteAccessAllowed: true`. In Orthanc 1.10.1 this **automatically
+#    enables HTTP authentication**, so the archive ends up behind a credential
+#    that has to live somewhere: in a tracked file, or as a default password
+#    baked into the image that anybody running the demo can read. A DICOM
+#    server reachable without a credential is a finding in itself.
+# 2. A forwarder inside the container's own network namespace that hands the
+#    published port to Orthanc on **127.0.0.1**. Orthanc still believes every
+#    request is local, `RemoteAccessAllowed` stays `false`, and no credential
+#    exists to leak. The port is still published to host loopback only, so
+#    nothing new is exposed off-host.
+#
+# This is the same property the rest of the project is built on: do the thing
+# at the seam rather than by weakening the thing itself. Do not "simplify" it
+# back to option 1 without reading this again.
+#
+# `MEDARX_DICOMWEB_FORWARD_PORT` exists so the forwarder can be *absent* on
+# purpose, which is how the absence is demonstrated rather than asserted: run
+# the container with it empty and the identical browser-originated request is
+# refused with `401`.
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends orthanc orthanc-dicomweb \
+    && apt-get install -y --no-install-recommends orthanc orthanc-dicomweb socat \
     && rm -rf /var/lib/apt/lists/*
 
-EXPOSE 8042
+COPY entrypoint.sh /usr/local/bin/medarx-orthanc-entrypoint
+RUN chmod 0755 /usr/local/bin/medarx-orthanc-entrypoint
 
-ENTRYPOINT ["/usr/sbin/Orthanc"]
+# 8042 is Orthanc's own listener; 8043 is the loopback forwarder the published
+# port is mapped onto. Both are exposed so `docker run -P` cannot accidentally
+# publish one without the other.
+EXPOSE 8042 8043
+
+ENTRYPOINT ["/usr/local/bin/medarx-orthanc-entrypoint"]
 CMD ["/etc/orthanc/orthanc.json"]
