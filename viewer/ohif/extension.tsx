@@ -24,6 +24,7 @@
  * The route is read, never chosen.
  */
 import { useEffect, useState } from 'react';
+import * as React from 'react';
 import { useSystem } from '@ohif/core';
 import {
   getCommands,

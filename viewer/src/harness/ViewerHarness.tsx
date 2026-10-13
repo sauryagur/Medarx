@@ -14,6 +14,7 @@
  * `.docs/phase2-plan.md` §WS2 item 4 owns it.
  */
 import { useEffect, useRef, useState } from 'react';
+import * as React from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { Button, Divider } from '../design/primitives';
 import { color, hairline, radius, space, typeStyles } from '../design/tokens';

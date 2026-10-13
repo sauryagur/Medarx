@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import * as React from 'react';
 import type { CSSProperties } from 'react';
 import { ApiError, blockReceipt, preflight, readAudit, readPolicy, sendApproved } from '../api/client';
 import type { BlockReceipt, ExecutionInput, PolicyResponse, PreflightResponse, StudyContext } from '../api/client';

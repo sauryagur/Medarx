@@ -24,6 +24,7 @@
  *     pointing at the line that explains them.
  */
 import { useRef } from 'react';
+import * as React from 'react';
 import type { CSSProperties, KeyboardEvent } from 'react';
 import { color, hairline, primaryButton, radius, space, typeStyles } from '../design/tokens';
 

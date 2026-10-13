@@ -13,6 +13,7 @@
  * explicit preflight action; it performs no local redaction or policy work.
  */
 import { useEffect, useState } from 'react';
+import * as React from 'react';
 import type { Panel } from './ohif/types';
 import { MedarxPanel } from './panels/MedarxPanel';
 import type { MedarxPanelProps } from './panels/MedarxPanel';

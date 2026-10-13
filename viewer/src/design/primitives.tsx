@@ -26,6 +26,7 @@
  *    focus only during the modal privacy review, which is WS5's.
  */
 import type { CSSProperties, ReactNode } from 'react';
+import * as React from 'react';
 import { color, editor, hairline, primaryButton, radius, secondaryButton, space, typeStyles } from './tokens';
 
 export function VisuallyHidden({ children }: { children: ReactNode }) {

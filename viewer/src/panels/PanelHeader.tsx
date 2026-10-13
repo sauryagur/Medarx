@@ -23,6 +23,7 @@
  * at label size and the controls sit in one row.
  */
 import { Disclosure, TRANSPARENT_CONTROL } from '../design/primitives';
+import * as React from 'react';
 import { StateChip } from './StateChip';
 import { color, hairline, space, typeStyles } from '../design/tokens';
 import { ROUTE_LABELS } from '../state/panelState';

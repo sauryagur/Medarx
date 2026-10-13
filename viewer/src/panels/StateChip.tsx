@@ -12,6 +12,7 @@
  *    than falling back to a neighbour that looks reassuring.
  */
 import type { RequestState, StatusTone } from '../state/panelState';
+import * as React from 'react';
 import { STATE_LABEL, STATE_MARK, STATE_TONE } from '../state/panelState';
 import { color, hairline, radius, space, typeStyles } from '../design/tokens';
 

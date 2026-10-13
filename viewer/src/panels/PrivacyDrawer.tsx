@@ -27,6 +27,7 @@
  *    different screen, in a different phase.
  */
 import type { CSSProperties, ReactNode } from 'react';
+import * as React from 'react';
 import { Badge, Divider, Raised } from '../design/primitives';
 import { color, hairline, space, typeStyles } from '../design/tokens';
 import type { RequestState, RouteState, TimelineRow } from '../state/panelState';

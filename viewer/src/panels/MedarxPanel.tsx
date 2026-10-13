@@ -19,6 +19,7 @@
  * whose announcements race.
  */
 import { useCallback, useEffect, useState } from 'react';
+import * as React from 'react';
 import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode, RefObject } from 'react';
 import { Button, VisuallyHidden } from '../design/primitives';
 import { FunctionNote, FunctionSwitch, functionAnnouncement, tabDomId } from './FunctionSwitch';
