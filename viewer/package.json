@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Medarx OHIF extension panel: design tokens, the panel shell and the privacy-details container.",
-  "main": "src/extension.tsx",
+  "main": "ohif/extension.tsx",
   "scripts": {
     "tokens": "bun run design/build.ts",
     "check:generated": "git diff --exit-code -- design/tokens.css design/tokens.ts",
