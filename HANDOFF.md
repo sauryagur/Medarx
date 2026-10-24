@@ -1314,8 +1314,68 @@ that moved are given as **was → now**.
 - **`.superpowers/sdd/` is gitignored.** None of the above is in git; if it
   matters, it needs to be copied somewhere that is not.
 
+## 11. Phase 2 close-out (2026-10-13)
+
+The Phase 2 review's three open items were taken up in the sessions after the
+review itself; this section records exactly where each landed.
+
+### What closed
+
+- **Mounted-mode evidence (was C-1/C-4)** — superseded by the recapture. The
+  artifacts on disk (`.docs/evidence/ohif-real-mount.png`, 1416×788;
+  `ohif-panel.png`, 260×690 crop) now show the real OHIF 3.13.10 longitudinal
+  mode with the synthetic CT rendered, no dev overlay, and the Medarx copilot
+  panel legible (header, chip "No request yet", tabs Draft active /
+  Prior Summary + Ask `aria-disabled`, `tab.errors()` empty). Caveat recorded:
+  the "Deployment-fixed route" row reads "Deployment policy could not be read"
+  because the backend was down at capture — fail-closed copy printing
+  correctly. Recaptured by the `p2-recapture` session; review findings amended
+  and pushed as `d782547`.
+- **Reduced-motion emission (was C-6)** — the emission already existed
+  (`design/build.ts` → `tokens.css`, `@media (prefers-reduced-motion: reduce)`
+  zeroing transitions/animations/scroll while leaving opacity and colour); it
+  was unguarded. `viewer/design/reduced-motion.test.ts` (3 tests) now pins the
+  emission. Suite: 32 pass / 0 fail. Committed and pushed as `b2a38ee`
+  (together with pointing `viewer/package.json` `main` at the committed
+  `ohif/extension.tsx`).
+
+### What remains open (with the exact blocker)
+
+- **C-5 keyboard pass** — no recorded keyboard-observation run. The
+  structural requirements hold (`primitives.tsx:17-20` `aria-disabled`
+  retention, no focus traps). Blocked by host memory: 998 MB available against
+  the 2000 MB gate for the OHIF dev server + backend + Chromium stack; the
+  other processes holding the memory are not this project's to kill.
+- **C-7 blocked-beat browser packet capture** — the blocked LOCAL request's
+  browser-side half has no wire capture. Zero-byte guarantee is proven at the
+  transport layer (`test_preflight.py:281-300`, `test_egress_e2e.py:279`) and
+  the blocked panel state in the harness; the mounted-mode packet walk is the
+  review's worst remaining gap. Same memory blocker.
+- **C-2 known-positive corpus** — no golden-corpus test, no recorded human
+  review of 10 outputs; plan defers below its Phase-4 line. Phase 3 item.
+- **C-3 DICOMweb adapter artifacts** — do not exist; architecture routes
+  DICOMweb through OHIF only, superseding the plan's adapter. Phase 3 item.
+- **Reduced-motion live observation** — the OS-setting observation (as opposed
+  to the code+test proof above) was not captured; same memory blocker.
+
+### Infra note
+
+`node_modules` under `viewer/` is not installed on this host at this writing;
+`bun test design src/api` (32/0) runs without it, but `tsc` and `eslint` need
+`bun install` first. Any new session picking up C-5/C-7 should `bun install`
+in `viewer/`, then follow `viewer/ohif/mount.sh` + `backend/README.md` serve
+command; Orthanc (`medarx-orthanc-1`) was left up with the synthetic study.
+
+The full review text lives in
+`.superpowers/sdd/phase1-privacy-kernel/phase2-review.md` (gitignored). It was
+accidentally truncated to a stub by an interrupted worker edit on 2026-10-13
+and reconstructed from the session transcript and the `HANDOFF.md` mirror;
+verdicts and defect IDs are preserved, with the reconstruction noted in its
+header.
+
 ---
 
-*Refreshed 2026-09-28 against `master` at `433cf6a`. Originally written
+*Refreshed 2026-09-28 against `master` at `433cf6a`; Phase 2 close-out
+appended 2026-10-13 against `master` at `b2a38ee`. Originally written
 2026-09-28 against `phase1-privacy-kernel` at `47544a2`. Nothing in this file is
 a substitute for running the command it describes.*
