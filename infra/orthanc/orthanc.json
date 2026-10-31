@@ -50,9 +50,12 @@
   "RemoteAccessAllowed": false,
 
   "// Authentication": [
-    "Left commented out on purpose. An `Authentication` block with a plain-text",
-    "user list is a credential in a tracked file, and Phase 1 has no user to",
-    "authenticate. Phase 2 sets this, and sets it from the environment."
+    "Decision (Phase 2, 2026-10-31): no `Authentication` block, and none is added.",
+    "`RemoteAccessAllowed` stays `false`, so Orthanc enables no HTTP authentication.",
+    "The browser reaches the archive through the loopback forwarder in `entrypoint.sh`,",
+    "which Orthanc sees as local. Verified 2026-10-31: with the forwarder running,",
+    "`GET /dicom-web/studies` from the host returns 200. No credential exists to leak.",
+    "If one is ever needed it is set from the environment, never in this file."
   ],
 
   "HttpServerPort": 8042,
@@ -80,11 +83,11 @@
     "plugins at all; with it present, the same log says",
     "`Registering plugin 'dicom-web' (version 1.7)` and the same request is 200.",
     "",
-    "`GET /plugins` is NOT a sufficient check. It lists the *Lua* plugins only,",
-    "so it returns `[explorer.js]` whether or not DICOMweb loaded, which is why",
-    "the older comment in this file could be right about the check and wrong",
-    "about the conclusion. The check that cannot be fooled is the request",
-    "itself: `curl -o /dev/null -w '%{http_code}' .../dicom-web/studies`."
+    "`GET /plugins` is NOT a sufficient check on its own. Measured 2026-10-31 on",
+    "this image it returned `[explorer.js, dicom-web, serve-folders, worklists]`,",
+    "so it can show the plugin, but it lists every registered plugin and an earlier",
+    "reading recorded only `[explorer.js]`. The check that cannot be fooled is the",
+    "request itself: `curl -o /dev/null -w '%{http_code}' .../dicom-web/studies`."
   ],
   "Plugins": ["/usr/share/orthanc/plugins"],
 
@@ -124,10 +127,12 @@
 
   "// Logging": [
     "SystemFile and its level are left at Orthanc's defaults. A DICOM server's",
-    "log names studies, series and SOP instance UIDs, and every one of those is",
-    "an identifier; Phase 1 has no logging policy for DICOM traffic and inventing",
-    "one here would be inventing it badly. Phase 2 inherits the same",
-    "sensitive-data policy that `medarx.logging_filter` applies to Python logs."
+    "log can name studies, series and SOP instance UIDs, and each one is an",
+    "identifier. Observed 2026-10-31: at the default level, the container log for",
+    "one STOW-RS of a synthetic study and the reads of its metadata contained no",
+    "UID. That is one run, not a policy. Named gap: the Orthanc log is not a Python",
+    "logger, so `medarx.logging_filter` does not cover it, and no sensitive-data",
+    "policy for DICOM traffic has been written. Writing one here would be inventing it."
   ],
 
   "IndexDirectory": "/var/lib/orthanc/db"
