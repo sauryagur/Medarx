@@ -26,8 +26,9 @@
  *    design traps focus only during the modal privacy review, which is a
  *    different screen, in a different phase.
  */
-import type { CSSProperties, ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import * as React from 'react';
+import type { FieldAction, PreflightResponse } from '../api/client';
 import { Badge, Divider, Raised } from '../design/primitives';
 import { color, hairline, space, typeStyles } from '../design/tokens';
 import type { RequestState, RouteState, TimelineRow } from '../state/panelState';
@@ -105,13 +106,54 @@ function TimelineRowView({ row }: { row: TimelineRow }) {
   );
 }
 
+const CATEGORIES: FieldAction['state'][] = ['included', 'transformed', 'excluded'];
+const CATEGORY_LABEL: Record<FieldAction['state'], string> = { included: 'Included', transformed: 'Transformed', excluded: 'Excluded' };
+
+export type PayloadPreviewView = {
+  categories: Array<{ state: FieldAction['state']; fields: string[] }>;
+  hashes: Array<{ term: string; value: string }>;
+  maskedValues: Array<{ field: string; masked: string }>;
+};
+
+/** Hides every letter and digit and keeps the shape, so the view shows a value's form, never its content. */
+export function maskValue(value: string): string {
+  return value.replace(/[\p{L}\p{N}]/gu, '•');
+}
+
+/**
+ * The drawer's view of a preflight payload, built from an allowlist of the members the
+ * contract names; anything else the server sent is dropped here. `null` means there is
+ * no payload, and the caller keeps its placeholder.
+ */
+export function payloadPreviewView(preflight: PreflightResponse | undefined): PayloadPreviewView | null {
+  if (!preflight?.payload) return null;
+  const { payload, field_actions: actions } = preflight;
+  return {
+    categories: CATEGORIES.map((state) => ({
+      state,
+      fields: actions.filter((action) => action.state === state).map((action) => action.field),
+    })),
+    hashes: [
+      { term: 'Approved payload hash', value: preflight.approved_payload_hash },
+      ...(payload.payload_hash ? [{ term: 'Payload hash', value: payload.payload_hash }] : []),
+      ...(payload.input_hash ? [{ term: 'Input hash', value: payload.input_hash }] : []),
+    ],
+    maskedValues: [
+      { field: 'report_text', masked: maskValue(payload.report_text) },
+      { field: 'study_ref', masked: maskValue(payload.study_ref) },
+      ...(payload.prior_study_refs ?? []).map((ref, index) => ({ field: `prior_study_refs.${index}`, masked: maskValue(ref) })),
+      ...Object.entries(payload.dicom_fields).map(([name, value]) => ({ field: `dicom_fields.${name}`, masked: maskValue(value) })),
+    ],
+  };
+}
+
 export function PrivacyDrawer({
   route,
   requestState,
   open,
   functionName,
   egressCapture,
-  payloadPreview,
+  preflight,
   studyScope,
 }: {
   route: RouteState;
@@ -121,16 +163,18 @@ export function PrivacyDrawer({
   /** Absent until a later workstream reads the preflight response back. The
    *  drawer shows what it is given and says so when it has nothing. */
   egressCapture?: EgressCaptureEvidence;
-  payloadPreview?: string;
+  preflight?: PreflightResponse;
   studyScope?: string;
 }) {
   if (!open) return null;
   const { rows, emptyReason } = timelineFor(requestState);
+  const preview = payloadPreviewView(preflight);
 
   return (
     <section
       id={PRIVACY_DRAWER_ID}
       aria-label="Privacy details"
+      tabIndex={0}
       style={{
         borderTop: `${hairline} solid ${color.border}`,
         padding: space.md,
@@ -213,12 +257,25 @@ export function PrivacyDrawer({
         <div style={{ ...typeStyles.label, color: color.muted, marginBottom: space.xs }}>
           Model-visible payload
         </div>
-        {payloadPreview ? (
+        {preview ? (
           <Raised>
-            <p style={STYLE_PREVIEW}>{payloadPreview}</p>
-            <p style={{ ...typeStyles.metadata, color: color.muted, margin: `${space.sm} 0 0` }}>
-              Rendered exactly as the server returned it. The panel never builds this text.
+            <p style={{ ...typeStyles.metadata, color: color.muted, margin: 0 }}>
+              Values are masked: letters and digits are hidden and the shape is kept. Excluded fields are
+              named, never valued, and this view holds no pseudonym mapping.
             </p>
+            <dl style={{ margin: `${space.sm} 0 0`, display: 'flex', flexDirection: 'column', gap: space.xs }}>
+              {preview.categories.map(({ state, fields }) => (
+                <DefinitionRow key={state} term={`${CATEGORY_LABEL[state]} (${fields.length})`}>
+                  {fields.length > 0 ? fields.join(', ') : 'None'}
+                </DefinitionRow>
+              ))}
+              {preview.hashes.map(({ term, value }) => (
+                <DefinitionRow key={term} term={term}>{value}</DefinitionRow>
+              ))}
+              {preview.maskedValues.map(({ field, masked }) => (
+                <DefinitionRow key={field} term={field}>{masked || 'Empty'}</DefinitionRow>
+              ))}
+            </dl>
           </Raised>
         ) : (
           <p style={{ ...typeStyles.body, color: color.muted, margin: 0 }}>
@@ -253,12 +310,4 @@ export function PrivacyDrawer({
     </section>
   );
 }
-
-const STYLE_PREVIEW: CSSProperties = {
-  ...typeStyles.metadata,
-  color: color.foreground,
-  margin: 0,
-  whiteSpace: 'pre-wrap',
-  overflowWrap: 'anywhere',
-};
 

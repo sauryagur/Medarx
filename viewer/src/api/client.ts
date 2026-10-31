@@ -1,9 +1,13 @@
 export type StudyContext = { study_reference: string; modality?: string };
-export type ExecutionInput = { study_context: StudyContext; report_text: string };
+export type ExecutionInput = { study_context: StudyContext; report_text: { text: string; source: 'clinician_supplied' } };
 export type PolicyResponse = { policy_mode: string; policy_version: string };
 export type FieldAction = { field: string; state: 'included' | 'transformed' | 'excluded' };
+export type PayloadPreview = {
+  function: string; report_text: string; dicom_fields: Record<string, string>; study_ref: string;
+  prior_study_refs?: string[]; policy_version: string; input_hash?: string; payload_hash?: string;
+};
 export type PreflightResponse = {
-  status: 'needs_review'; request_id: string; policy_version: string; payload: unknown;
+  status: 'needs_review'; request_id: string; policy_version: string; payload: PayloadPreview;
   field_actions: FieldAction[]; approved_payload_hash: string; stages: string[];
 };
 export type BlockReceipt = { status: 'blocked'; request_id: string; layer: string; action_codes: string[]; policy_version: string };

@@ -36,12 +36,12 @@ afterAll(async () => { Object.defineProperty(globalThis, 'fetch', { configurable
 test('preflight posts contract input and send posts no body', async () => {
   observed.length = 0;
   const scope = 'scope:study:STUDY-SYN-000041,scope:function:Draft';
-  const result = await preflight(baseUrl, scope, { study_context: { study_reference: 'STUDY-SYN-000041' }, report_text: 'Clinician findings' });
+  const result = await preflight(baseUrl, scope, { study_context: { study_reference: 'STUDY-SYN-000041' }, report_text: { text: 'Clinician findings', source: 'clinician_supplied' } });
   expect(result.stages).toHaveLength(5);
   expect(result.field_actions[0]?.state).toBe('transformed');
   await sendApproved(baseUrl, scope, result.request_id);
   expect(observed.map(({ method, url, body }) => [method, url, body])).toEqual([
-    ['POST', '/v1/functions/Draft/executions/preflight', JSON.stringify({ study_context: { study_reference: 'STUDY-SYN-000041' }, report_text: 'Clinician findings' })],
+    ['POST', '/v1/functions/Draft/executions/preflight', JSON.stringify({ study_context: { study_reference: 'STUDY-SYN-000041' }, report_text: { text: 'Clinician findings', source: 'clinician_supplied' } })],
     ['POST', '/v1/executions/req-1/send', ''],
   ]);
   expect(observed.every((entry) => entry.scope === scope)).toBe(true);
@@ -51,7 +51,7 @@ test('blocked preflight yields safe receipt without attempting a send', async ()
   observed.length = 0;
   const scope = 'scope:study:STUDY-SYN-000041,scope:function:Draft';
   let error: unknown;
-  try { await preflight(baseUrl, scope, { study_context: { study_reference: 'STUDY-SYN-000041' }, report_text: 'BLOCKED synthetic fixture' }); }
+  try { await preflight(baseUrl, scope, { study_context: { study_reference: 'STUDY-SYN-000041' }, report_text: { text: 'BLOCKED synthetic fixture', source: 'clinician_supplied' } }); }
   catch (cause) { error = cause; }
   const receipt = blockReceipt(error);
   expect(receipt?.layer).toBe('D.2');

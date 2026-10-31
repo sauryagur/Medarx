@@ -152,4 +152,9 @@ export default tseslint.config(
     files: ['design/**/*.test.ts', 'vite.config.ts', 'eslint.config.js'],
     languageOptions: { globals: { ...globals.node, ...globals.bun } },
   },
+  {
+    // app-config.js is a plain script OHIF loads as a global; `window.config` is its contract.
+    files: ['ohif/app-config.js'],
+    languageOptions: { globals: { ...globals.browser } },
+  },
 );

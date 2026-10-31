@@ -16,6 +16,7 @@ import '../../design/tokens.css';
 import { Button, Divider } from '../design/primitives';
 import { color, space, typeStyles } from '../design/tokens';
 import { MedarxPanel } from '../panels/MedarxPanel';
+import type { PreflightResponse } from '../api/client';
 import { DraftReview } from '../panels/DraftReview';
 import { routeFromPolicy, stateFromResponse } from '../state/panelState';
 import { ViewerHarness } from './ViewerHarness';
@@ -85,6 +86,7 @@ function Picker({ title, items, selected, onSelect }: {
 
 function Harness() {
   const [fixture, setFixture] = useState(0);
+  const [preflight, setPreflight] = useState<PreflightResponse | undefined>();
 
   const [requestState, setRequestState] = useState(() => stateFromResponse(FIXTURES[0]?.body));
   const selectFixture = (index: number) => {
@@ -97,6 +99,7 @@ function Harness() {
         studyLabel="Study (harness stand-in)"
         route={routeFromPolicy(undefined)}
         requestState={requestState}
+        preflight={preflight}
       >
         <p style={{ ...typeStyles.report, color: color.muted, margin: 0 }}>
           Draft is the only function in this version. The pickers below are harness furniture, not
@@ -105,7 +108,7 @@ function Harness() {
         </p>
         <Divider />
         <Picker title="Response fixture" items={FIXTURES} selected={fixture} onSelect={selectFixture} />
-        <DraftReview studyContext={{ study_reference: 'STUDY-SYN-000041' }} scope="scope:study:STUDY-SYN-000041,scope:function:Draft" onRequestState={setRequestState} />
+        <DraftReview studyContext={{ study_reference: 'STUDY-SYN-000041' }} scope="scope:study:STUDY-SYN-000041,scope:function:Draft" onRequestState={setRequestState} onPreflight={setPreflight} />
       </MedarxPanel>
     </ViewerHarness>
   );

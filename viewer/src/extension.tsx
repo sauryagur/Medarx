@@ -20,6 +20,7 @@ import type { MedarxPanelProps } from './panels/MedarxPanel';
 import { DraftReview } from './panels/DraftReview';
 import { panelStore } from './state/panelStore';
 import type { RequestState, RouteState } from './state/panelState';
+import type { PreflightResponse } from './api/client';
 
 export const MEDARX_EXTENSION_NAME = 'medarx';
 export const MEDARX_PANEL_NAME = 'medarxPanel';
@@ -45,6 +46,7 @@ export const NO_REQUEST: RequestState = { kind: 'idle' };
 
 function DraftPanel(props: Partial<MedarxPanelProps>) {
   const [requestState, setRequestState] = useState(props.requestState ?? NO_REQUEST);
+  const [preflight, setPreflight] = useState<PreflightResponse | undefined>(undefined);
   useEffect(() => {
     setRequestState(props.requestState ?? NO_REQUEST);
   }, [props.requestState]);
@@ -55,12 +57,14 @@ function DraftPanel(props: Partial<MedarxPanelProps>) {
       studyLabel={props.studyLabel ?? 'No study association'}
       route={props.route ?? UNREAD_ROUTE}
       requestState={requestState}
+      preflight={preflight}
     >
       <DraftReview
         studyContext={props.studyContext}
         scope={props.scope}
         apiBase={props.apiBase}
         onRequestState={setRequestState}
+        onPreflight={setPreflight}
       />
     </MedarxPanel>
   );
@@ -70,7 +74,7 @@ export function getPanelModule(_managers: ManagerBag = {}): Panel[] {
   return [
     {
       name: MEDARX_PANEL_NAME,
-      iconName: 'chat',
+      iconName: 'tab-studies',
       iconLabel: 'Medarx',
       label: 'Medarx',
       component: DraftPanel,

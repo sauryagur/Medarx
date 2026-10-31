@@ -13,7 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tools.json --noEmit",
     "dev": "vite",
     "build": "bun run tokens && tsc -p tsconfig.json --noEmit && vite build",
-    "verify": "bun run tokens && bun run lint && bun test design src/api && bun run typecheck && bun run check:generated"
+    "verify": "bun run tokens && bun run lint && bun test design src/api src/panels && bun run typecheck && bun run check:generated"
   },
   "dependencies": {
     "react": "19.3.0",

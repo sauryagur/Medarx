@@ -173,7 +173,7 @@ git -C "$OHIF_DIR" --no-pager diff --stat || true
 
 # -- 4. serve -----------------------------------------------------------------
 say "starting the OHIF dev server on 127.0.0.1:$PORT"
-echo "   open http://127.0.0.1:$PORT/localhost/orthanc/study/1.2.826.0.1.3680043.8.498.1138.900.1.1"
+   echo "   open http://127.0.0.1:$PORT/viewer/orthanc?StudyInstanceUIDs=1.2.826.0.1.3680043.8.498.1138.900.1.1"
 cd "$OHIF_DIR/platform/app"
 NODE_ENV=development \
 OHIF_PORT="$PORT" \

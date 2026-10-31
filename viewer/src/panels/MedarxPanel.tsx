@@ -28,6 +28,7 @@ import type { FunctionName } from './FunctionSwitch';
 import { PanelHeader } from './PanelHeader';
 import { PrivacyDrawer } from './PrivacyDrawer';
 import type { DraftReviewProps } from './DraftReview';
+import type { PreflightResponse } from '../api/client';
 import { color, hairline, shell, space, typeStyles } from '../design/tokens';
 import { announcementFor } from '../state/panelState';
 import type { RequestState, RouteState } from '../state/panelState';
@@ -47,6 +48,8 @@ export type MedarxPanelProps = {
   scope?: string;
   /** Same-origin API prefix; defaults to /v1. */
   apiBase?: string;
+  /** Latest preflight result from the host; the drawer shows only its masked preview. */
+  preflight?: PreflightResponse;
 };
 
 function LiveRegion({ region, message }: { region: RefObject<HTMLDivElement | null>; message: string }) {
@@ -129,7 +132,7 @@ function Separator({
   );
 }
 
-export function MedarxPanel({ studyLabel, route, requestState, children }: MedarxPanelProps) {
+export function MedarxPanel({ studyLabel, route, requestState, children, preflight }: MedarxPanelProps) {
   const { width, collapsed } = usePanelSnapshot();
   const { onPointerDown, onPointerMove, onPointerUp, onKeyDown } = useResize(width);
   const { message, announce, region } = useAnnouncer();
@@ -228,6 +231,7 @@ export function MedarxPanel({ studyLabel, route, requestState, children }: Medar
           route={route}
           requestState={requestState}
           open={drawerOpen}
+          preflight={preflight}
           functionName={activeFunction}
         />
 
